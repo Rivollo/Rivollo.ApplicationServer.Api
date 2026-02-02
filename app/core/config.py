@@ -42,5 +42,15 @@ class Settings(BaseSettings):
 	SERVICEBUS_CONNECTION_STRING: str = Field(default="")
 	SERVICEBUS_QUEUE_NAME: str = Field(default="")
 
+	# WhatsApp Business API			
+	WHATSAPP_ACCESS_TOKEN: str = Field(default="")
+	WHATSAPP_PHONE_NUMBER_ID: str = Field(default="")
+	WHATSAPP_TEMPLATE_NAME: str = Field(default="")
+	WHATSAPP_TEMPLATE_LANGUAGE: str = Field(default="en_US")
+	WHATSAPP_API_VERSION: str = Field(default="v18.0")
+		
+
+
+
 
 settings = Settings()

@@ -302,21 +302,7 @@ async def create_product_with_image(
             detail=f"Product limit exceeded. Upgrade your plan to create more products.",
         )
 
-    
-    # --- Check max products per user ---
-    #MAX_PRODUCTS_PER_USER = 2
-
-    # existing_count = await db.scalar(
-    #     text("SELECT COUNT(*) FROM tbl_products WHERE created_by = :user_id"),
-    #     {"user_id": str(user_uuid)}
-    # )
-
-    # if existing_count >= MAX_PRODUCTS_PER_USER:
-    #     raise HTTPException(
-    #         status_code=status.HTTP_200_OK,
-    #         detail=f"Product limit of {MAX_PRODUCTS_PER_USER} reached. You cannot create more products.",
-    #     )
-
+  
 
     # Validate file type
     if not image.filename:
@@ -1333,18 +1319,9 @@ async def get_background(backgroundid: int, db: DB):
 @router.put("/products/{product_id}/details", response_model=dict)
 async def update_product_details(
     product_id: str,
-    current_user: CurrentUser,
+    payload: ProductDetailsUpdate,
     request: Request,
     db: DB,
-    name: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    price: Optional[float] = Form(None),
-    currency_type: Optional[int] = Form(None),
-    background_type: Optional[str] = Form(None),
-    background_value: Optional[str] = Form(None),
-    backgroundid: Optional[int] = Form(None),
-    links: Optional[str] = Form(None),
-    background_image: Optional[UploadFile] = File(None),
 ):
     """Insert or update product details including name, description, price, currency_type, background, and links."""
     try:
@@ -1365,137 +1342,113 @@ async def update_product_details(
                 detail="Product not found.",
             )
 
-        # Parse links from JSON string if provided
-        parsed_links = None
-        if links is not None:
-            import json
-            try:
-                parsed_links = json.loads(links)
-            except json.JSONDecodeError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid JSON format for links parameter.",
-                )
-        
-        # Construct background object from form parameters if provided
-        background_obj = None
-        if background_type is not None and background_value is not None:
-            from app.schemas.products import BackgroundInput
-            background_obj = BackgroundInput(type=background_type, value=background_value)
-        
         # Update product fields
-        if name is not None:
+        if payload.name is not None:
             if product is None:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Product not found.",
                 )
-            product.name = name
+            product.name = payload.name
             # Update slug if name changes
-            product.slug = await _generate_unique_slug(db, _slugify(name), exclude_id=product.id)
+            product.slug = await _generate_unique_slug(db, _slugify(payload.name), exclude_id=product.id)
 
-        if description is not None:
-            product.description = description
+        if payload.description is not None:
+            product.description = payload.description
 
-        if price is not None:
+        if payload.price is not None:
             # Store price as integer (BigInteger in database)
-            product.price = int(price) if price else None
+            product.price = int(payload.price) if payload.price else None
 
-        if currency_type is not None:
+        if payload.currency_type is not None:
             # Verify currency type exists
             currency_result = await db.execute(
-                select(CurrencyType).where(CurrencyType.id == currency_type)
+                select(CurrencyType).where(CurrencyType.id == payload.currency_type)
             )
             currency = currency_result.scalar_one_or_none()
             if not currency:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Currency type with ID {currency_type} not found.",
+                    detail=f"Currency type with ID {payload.currency_type} not found.",
                 )
             # Store currency type ID as integer
-            product.currency_type = currency_type
+            product.currency_type = payload.currency_type
 
-        # Handle background
-        background_blob_url = None
-        
-        # Priority 1: Background image file upload
-        if background_image and background_image.filename:
-            # Validate file extension (.jpg, .jpeg, .png, .webp, .gif)
-            allowed_extensions = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-            file_ext = None
-            for ext in allowed_extensions:
-                if background_image.filename.lower().endswith(ext):
-                    file_ext = ext
-                    break
+        # Handle background - support both new format (background object) and legacy format (backgroundid)
+        if payload.background is not None:
+            logger = logging.getLogger(__name__)
+            logger.info(f"Processing background for product {prod_uuid}: type={payload.background.type}, value={payload.background.value}")
             
-            if not file_ext:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid background image format. Allowed formats: {', '.join(allowed_extensions)}",
-                )
+            # Determine background_type_id based on type
+            background_type_id = 1 if payload.background.type.lower() == "color" else 2
             
-            # Read and process image
-            try:
-                image_bytes = await background_image.read()
-                content_type = background_image.content_type or f"image/{file_ext[1:]}"
-                filename = f"background-{uuid.uuid4()}{file_ext}"
-                image_stream = io.BytesIO(image_bytes)
+            # Check if a background with this value already exists
+            existing_bg_query = select(Background).where(
+                Background.background_type_id == background_type_id,
+                Background.image == payload.background.value,
+                Background.isactive == True
+            )
+            existing_bg_result = await db.execute(existing_bg_query)
+            existing_bg = existing_bg_result.scalar_one_or_none()
+            
+            if existing_bg:
+                # Use existing background
+                logger.info(f"Found existing background: id={existing_bg.id}, name={existing_bg.name}")
+                product.background_type = existing_bg.id
+            else:
+                # Create new background record
+                # Get next available ID (since id is not auto-incrementing)
+                from sqlalchemy import func
+                max_id_query = select(func.max(Background.id))
+                max_id_result = await db.execute(max_id_query)
+                max_id = max_id_result.scalar()
+                next_id = (max_id or 0) + 1
                 
-                # Use ProductService
-                background_id, background_blob_url = await product_service.update_product_background_image(
-                    db=db,
-                    product_id=prod_uuid,
-                    user_id=current_user.id,
-                    image_stream=image_stream,
-                    image_filename=filename,
-                    image_content_type=content_type,
+                background_name = f"Color {payload.background.value}" if payload.background.type.lower() == "color" else f"Image {payload.background.value[:50]}"
+                
+                # Get audit user ID
+                audit_user_id = product.created_by if product.created_by else uuid.uuid4()
+                
+                # Insert new background with explicit ID
+                from sqlalchemy import insert
+                insert_stmt = insert(Background.__table__).values(
+                    id=next_id,  # Explicitly set ID
+                    background_type_id=background_type_id,
+                    name=background_name,
+                    description=f"Auto-generated {payload.background.type} background",
+                    image=payload.background.value,
+                    isactive=True,
+                    created_by=audit_user_id,
+                    created_date=datetime.utcnow(),
                 )
                 
-                product.background_type = background_id
+                await db.execute(insert_stmt)
+                await db.flush()
                 
-            except RuntimeError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=str(e),
-                )
-        
-        # Priority 2: Color background
-        elif background_type == "color" and background_value:
-            try:
-                background_id = await product_service.update_product_background_color(
-                    db=db,
-                    user_id=current_user.id,
-                    color_value=background_value,
-                )
-                product.background_type = background_id
-            except RuntimeError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=str(e),
-                )
-        
-        # Priority 3: Legacy backgroundid
-        elif backgroundid is not None:
+                logger.info(f"Created new background: id={next_id}, name={background_name}, value={payload.background.value}")
+                product.background_type = next_id
+                
+        elif payload.backgroundid is not None:
             # Legacy format - backgroundid provided directly
             logger = logging.getLogger(__name__)
-            logger.info(f"Attempting to set background for product {prod_uuid}: backgroundid={backgroundid}")
+            logger.info(f"Attempting to set background for product {prod_uuid}: backgroundid={payload.backgroundid}")
             
             # Verify background exists
             background_result = await db.execute(
-                select(Background).where(Background.id == backgroundid)
+                select(Background).where(Background.id == payload.backgroundid)
             )
             background = background_result.scalar_one_or_none()
             if not background:
-                logger.error(f"Background with ID {backgroundid} not found in database")
+                logger.error(f"Background with ID {payload.backgroundid} not found in database")
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Background with ID {backgroundid} not found.",
+                    detail=f"Background with ID {payload.backgroundid} not found.",
                 )
             
             logger.info(f"Background found: id={background.id}, name={background.name}")
             
             # Store background ID in background_type column as integer
-            product.background_type = backgroundid
+            product.background_type = payload.backgroundid
             logger.info(f"Set product.background_type = {product.background_type}")
 
         # Get a valid user ID for audit fields (use product's created_by or a default UUID if None)
@@ -1510,10 +1463,10 @@ async def update_product_details(
 
         # Handle links - ADD new links (preserve existing ones)
         # Unlike the old behavior, this does NOT deactivate existing links
-        if parsed_links is not None and len(parsed_links) > 0:
+        if payload.links is not None and len(payload.links) > 0:
             try:
                 logger = logging.getLogger(__name__)
-                logger.info(f"Adding {len(parsed_links)} new links to product {product_id} (existing links will be preserved)")
+                logger.info(f"Adding {len(payload.links)} new links to product {product_id} (existing links will be preserved)")
                 
                 # Ensure product is not None before accessing product.id
                 if product is None:
@@ -1525,12 +1478,12 @@ async def update_product_details(
                 product_id = product.id
                 
                 # Create new links (existing links are NOT touched)
-                for link_data in parsed_links:
+                for link_data in payload.links:
                     stmt = insert(ProductLink.__table__).values(
                         productid=str(product_id),
-                        name=link_data.get('name'),
-                        link=link_data.get('link'),
-                        description=link_data.get('description'),
+                        name=link_data.name,
+                        link=link_data.link,
+                        description=link_data.description,
                         isactive=True,
                         created_by=audit_user_id,
                         created_date=datetime.utcnow(),
@@ -1539,7 +1492,7 @@ async def update_product_details(
                     )
                     await db.execute(stmt)
                 
-                logger.info(f"Successfully added {len(parsed_links)} new links to product {product_id}")
+                logger.info(f"Successfully added {len(payload.links)} new links to product {product_id}")
                 
             except Exception as e:
                 import traceback
@@ -1648,9 +1601,6 @@ async def update_product_details(
             
         if links_data:
             response_data["links"] = [link.model_dump(exclude_none=True) for link in links_data]
-
-        if background_blob_url:
-            response_data["background_blob_url"] = background_blob_url
 
         logger.info(f"Final response keys: {response_data.keys()}")
         return api_success(response_data)
