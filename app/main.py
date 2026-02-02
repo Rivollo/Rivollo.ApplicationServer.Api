@@ -26,6 +26,7 @@ from app.api.routes.hotspots import router as hotspots_router
 from app.api.routes.dimensions import router as dimensions_router
 from app.api.routes.product_links import router as product_links_router
 from app.api.routes.support import router as support_router
+from app.api.routes.link_share import router as link_share_router
 from app.utils.envelopes import api_success, api_error
 from app.core.db import init_engine_and_session
 
@@ -112,6 +113,8 @@ app.include_router(hotspots_router, prefix=_api_prefix)
 app.include_router(dimensions_router, prefix=_api_prefix)
 app.include_router(product_links_router, prefix=_api_prefix)
 app.include_router(support_router, prefix=_api_prefix)
+app.include_router(link_share_router, prefix=_api_prefix)
+
 
 
 # Structured request logging (includes trace correlation where available)
