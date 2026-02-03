@@ -25,7 +25,7 @@ router = APIRouter(
 async def share_link_via_whatsapp(
     payload: SendWhatsAppLinkRequest,
     db: AsyncSession = Depends(get_db),
-    #current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Share a product link via WhatsApp and log the event.
@@ -35,7 +35,7 @@ async def share_link_via_whatsapp(
         result = await LinkShareService.share_link_via_whatsapp(
             db=db,
             payload=payload,
-           # shared_by_user_id=current_user.id,
+            shared_by_user_id=current_user.id,
         )
 
         # business failure → client error
