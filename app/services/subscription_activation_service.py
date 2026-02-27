@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────
 # TESTING PERIOD — change to timedelta(days=30) for production
 # ─────────────────────────────────────────────────────────────────
-SUBSCRIPTION_PERIOD = timedelta(minutes=10)
+SUBSCRIPTION_PERIOD = timedelta(days=10)
 
 
 # ─────────────────────────────────────────────────────────────────
