@@ -362,7 +362,7 @@ async def create_product_with_image(
 
     # Use ProductService to create product and upload image
     try:
-        product, blob_url, external_job_uid = await product_service.create_product_with_image(
+        product, blob_url, mesh_blob_url, external_job_uid = await product_service.create_product_with_image(
             db=db,
             user_id=user_uuid,
             name=name,
@@ -428,6 +428,7 @@ async def create_product_with_image(
     # Return response with blob URL
     response_dict = response_data.model_dump(exclude_none=True)
     response_dict["image_blob_url"] = blob_url
+    response_dict["mesh_blob_url"] = mesh_blob_url
 
     # Kick off background polling for external API
     if external_job_uid:

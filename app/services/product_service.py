@@ -66,9 +66,9 @@ class ProductService:
         mask_filename: Optional[str] = None,
         mask_content_type: Optional[str] = None,
         mask_size_bytes: Optional[int] = None,
-    ) -> tuple[Product, str, Optional[str]]:
-        """Create a product and publish processing request to Service Bus."""
-
+    ) -> tuple[Product, str, Optional[str], Optional[str]]:
+        """Create a product and publish processing request to Service Bus.""" 
+             
         logger = logging.getLogger(__name__)
 
         # -------------------------------
@@ -110,7 +110,7 @@ class ProductService:
         # -------------------------------
         # 3. Upload MASK image (NEW)
         # -------------------------------
-        mask_blob_url = None
+        mask_blob_url = f"https://placeholder.dev/{user_id_str}/{product_id}/{mask_filename}"
 
         if mask_stream and mask_filename:
             try:
@@ -175,7 +175,7 @@ class ProductService:
             "product_id": str(product.id),
             "user_id": str(user_id),
             "blob_url": blob_url,
-            "mask_blob_url": mask_blob_url,  # ✅ NEW
+            "mask_blob_url": mask_blob_url,
             "target_format": target_format,
             "asset_id": asset_id,
             "mesh_asset_id": mesh_asset_id,
@@ -206,7 +206,8 @@ class ProductService:
         except Exception:
             pass
 
-        return product, blob_url, None
+        # ✅ FINAL RETURN
+        return product, blob_url, mask_blob_url, None
 
     @staticmethod
     async def update_product_background_image(
