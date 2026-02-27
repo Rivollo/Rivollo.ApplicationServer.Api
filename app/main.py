@@ -1,8 +1,10 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 import logging
 import time
+from contextlib import asynccontextmanager, suppress
 from typing import Optional
 import os
 
@@ -27,14 +29,70 @@ from app.api.routes.dimensions import router as dimensions_router
 from app.api.routes.product_links import router as product_links_router
 from app.api.routes.support import router as support_router
 from app.api.routes.link_share import router as link_share_router
+from app.api.routes.payments import router as payments_router
 from app.utils.envelopes import api_success, api_error
 from app.core.db import init_engine_and_session
 
 
-app = FastAPI(title=settings.APP_NAME)
-
-# Telemetry / Azure Monitor (optional)
+# ---------------------------------------------------------------------------
+# Module-level logger (used in lifespan + request middleware)
+# ---------------------------------------------------------------------------
 _logger = logging.getLogger("rivollo.api")
+
+# ---------------------------------------------------------------------------
+# Background task: periodic subscription deactivation
+# ---------------------------------------------------------------------------
+# Runs every 5 minutes.
+# Marks subscriptions whose current_period_end has passed as 'canceled'
+# and revokes their licenses, returning users to the free plan.
+_DEACTIVATION_INTERVAL_SECONDS = 5 * 60  # 5 minutes
+
+
+async def _deactivation_loop() -> None:
+    """Infinite asyncio loop that runs the deactivation job periodically.
+
+    - Waits DEACTIVATION_INTERVAL_SECONDS before the first run (gives the server
+      time to fully initialise on startup).
+    - Opens its own DB session for each run (independent from request sessions).
+    - Never raises — any error is caught and logged inside the service.
+    """
+    from app.services.subscription_deactivation_service import (
+        SubscriptionDeactivationService,
+    )
+    from app.core.db import get_db
+
+    _bg_logger = logging.getLogger("rivollo.deactivation_loop")
+    _bg_logger.info("Subscription deactivation loop started (interval=%ds).",
+                    _DEACTIVATION_INTERVAL_SECONDS)
+    while True:
+        await asyncio.sleep(_DEACTIVATION_INTERVAL_SECONDS)
+        try:
+            async for db in get_db():
+                await SubscriptionDeactivationService.run_deactivation_job(db)
+        except Exception as exc:
+            _bg_logger.exception("Deactivation loop outer error (will retry): %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan — runs startup logic, yields, then shutdown logic."""
+    # --- Startup ---
+    init_engine_and_session()
+
+    # Launch background deactivation task
+    deactivation_task = asyncio.create_task(_deactivation_loop())
+    _logger.info("Background subscription deactivation task started.")
+
+    yield  # <-- app is live here
+
+    # --- Shutdown ---
+    deactivation_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await deactivation_task
+    _logger.info("Background subscription deactivation task stopped.")
+
+
+app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
 # Ensure we also write logs to a local file `.server.log`
 def _ensure_file_logging() -> None:
@@ -114,6 +172,7 @@ app.include_router(dimensions_router, prefix=_api_prefix)
 app.include_router(product_links_router, prefix=_api_prefix)
 app.include_router(support_router, prefix=_api_prefix)
 app.include_router(link_share_router, prefix=_api_prefix)
+app.include_router(payments_router, prefix=_api_prefix)
 
 
 
@@ -165,9 +224,8 @@ async def request_logging_middleware(request: Request, call_next):
 		)
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-	init_engine_and_session()
+# Startup is now handled by the lifespan context manager above.
+# The legacy @app.on_event("startup") decorator is removed.
 
 
 @app.exception_handler(Exception)

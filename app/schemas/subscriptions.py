@@ -33,11 +33,35 @@ class TrialInfo(BaseModel):
 
 
 class SubscriptionMe(BaseModel):
-    """Current user's subscription information."""
+    """Current user's subscription information.
+
+    Fields:
+        plan:        Plan code — "free", "pro", or "enterprise".
+        trial:       Trial period status (currently always inactive).
+        quotas:      Resource usage and limits.
+        period_start: UTC ISO timestamp of when the current billing period began.
+                     Null for free-plan users (no billing period).
+        period_end:  UTC ISO timestamp of when the current billing period ends.
+                     Null for free-plan users. Frontend uses this to show
+                     time remaining / countdown.
+    """
 
     plan: str = Field(..., description="Plan code: free, pro, enterprise")
     trial: TrialInfo
     quotas: dict[str, Any]
+    period_start: Optional[datetime] = Field(
+        None,
+        alias="periodStart",
+        description="Billing period start (UTC ISO). Null for free-plan users.",
+    )
+    period_end: Optional[datetime] = Field(
+        None,
+        alias="periodEnd",
+        description="Billing period end (UTC ISO). Frontend uses this for countdown.",
+    )
+
+    class Config:
+        populate_by_name = True
 
 
 class PlanFeature(BaseModel):

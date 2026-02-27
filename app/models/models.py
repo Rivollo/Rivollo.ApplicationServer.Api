@@ -844,6 +844,7 @@ from app.models.license_assignment import LicenseAssignment
 from app.models.plan import Plan
 from app.models.subscription import Subscription
 from app.models.subscription_enums import LicenseStatus, SubscriptionStatus
+from app.models.payment import Payment  # registers tbl_payments with SQLAlchemy metadata
 class Support(AuditMixin, Base):
     """Support contact table (tbl_support)."""
     __tablename__ = "tbl_support"
