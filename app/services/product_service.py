@@ -60,6 +60,12 @@ class ProductService:
         image_filename: str,
         image_content_type: Optional[str] = None,
         image_size_bytes: Optional[int] = None,
+
+        # ✅ NEW MASK PARAMETERS
+        mask_stream: Optional[BinaryIO] = None,
+        mask_filename: Optional[str] = None,
+        mask_content_type: Optional[str] = None,
+        mask_size_bytes: Optional[int] = None,
     ) -> tuple[Product, str, Optional[str]]:
         """Create a product and publish processing request to Service Bus."""
 
@@ -102,7 +108,27 @@ class ProductService:
             logger.error("Image upload failed, using placeholder: %s", e)
 
         # -------------------------------
-        # 3. Create ProductAsset + Mapping
+        # 3. Upload MASK image (NEW)
+        # -------------------------------
+        mask_blob_url = None
+
+        if mask_stream and mask_filename:
+            try:
+                mask_stream.seek(0)
+                _, mask_blob_url = storage_service.upload_product_image(
+                    user_id=user_id_str,
+                    product_id=product_id,
+                    filename=f"mask_{mask_filename}",
+                    content_type=mask_content_type,
+                    stream=mask_stream,
+                )
+                logger.info("Mask uploaded: %s", mask_blob_url)
+            except Exception as e:
+                logger.exception("Mask upload failed")
+                raise RuntimeError("Failed to upload mask image") from e
+
+        # -------------------------------
+        # 4. Create ProductAsset + Mapping
         # -------------------------------
         try:
             product_asset = ProductAsset(
@@ -123,17 +149,33 @@ class ProductService:
                 created_by=user_id,
             )
             db.add(product_asset_mapping)
+
+            # -------------------------------
+            # 5. Create ProductAsset (MASK) - NEW
+            # -------------------------------
+            if mask_blob_url:
+                mask_asset = ProductAsset(
+                    asset_id=mesh_asset_id,
+                    image=mask_blob_url,
+                    size_bytes=mask_size_bytes,
+                    created_by=user_id,
+                )
+                db.add(mask_asset)
+                await db.flush()
+
         except Exception as e:
             logger.exception("Failed to create asset records")
+            # await db.rollback()
             raise RuntimeError("Failed to create asset entries") from e
 
         # -------------------------------
-        # 4. HANDOFF TO SERVICE BUS
+        # 6. HANDOFF TO SERVICE BUS
         # -------------------------------
         payload = {
             "product_id": str(product.id),
             "user_id": str(user_id),
             "blob_url": blob_url,
+            "mask_blob_url": mask_blob_url,  # ✅ NEW
             "target_format": target_format,
             "asset_id": asset_id,
             "mesh_asset_id": mesh_asset_id,
@@ -144,7 +186,7 @@ class ProductService:
         published = await ServiceBusPublisher.publish(payload)
 
         # -------------------------------
-        # 5. Update status & commit
+        # 7. Update status & commit
         # -------------------------------
         # Set status based on whether Service Bus publish succeeded
         if published:
