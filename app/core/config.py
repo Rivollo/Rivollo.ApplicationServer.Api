@@ -48,7 +48,13 @@ class Settings(BaseSettings):
 	WHATSAPP_TEMPLATE_NAME: str = Field(default="")
 	WHATSAPP_TEMPLATE_LANGUAGE: str = Field(default="en_US")
 	WHATSAPP_API_VERSION: str = Field(default="v18.0")
-		
+
+	# Razorpay Payment Gateway
+	RAZORPAY_KEY_ID: str = Field(default="")
+	RAZORPAY_KEY_SECRET: str = Field(default="")
+	# Webhook secret — must match the value set in Razorpay Dashboard → Settings → Webhooks
+	RAZORPAY_WEBHOOK_SECRET: str = Field(default="")
+	
 
 
 

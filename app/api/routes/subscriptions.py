@@ -39,7 +39,9 @@ async def get_my_subscription(
     subscription_data = await SubscriptionService.get_user_subscription(db, current_user.id)
 
     # Return formatted response
-    return api_success(subscription_data.model_dump())
+    # by_alias=True → uses camelCase aliases (periodStart, periodEnd, daysRemaining, etc.)
+    # exclude_none=True → omits null fields for free-plan users (no period dates)
+    return api_success(subscription_data.model_dump(by_alias=True, exclude_none=True))
 
 
 @router.get("/subscriptions/plans", response_model=dict)

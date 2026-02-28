@@ -18,7 +18,7 @@ Architecture:
 
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,6 +62,30 @@ class SubscriptionService:
             license_assignment._usage_dict = usage  # Cache for performance
 
         return limits, usage
+
+    @staticmethod
+    def _is_expired(period_end: Optional[datetime], now: datetime) -> bool:
+        """Check whether a subscription billing period has ended.
+
+        Handles both timezone-aware and timezone-naive datetimes returned by
+        the database driver (asyncpg returns tz-aware, but older rows may not).
+
+        Args:
+            period_end: The subscription's current_period_end timestamp, or None.
+            now:        The current UTC time (must be tz-aware).
+
+        Returns:
+            True if the period has ended, False if still active or no end date.
+        """
+        if period_end is None:
+            return False  # No end date → treat as non-expiring (free plan forever)
+
+        # Make period_end tz-aware if the driver returned a naive datetime.
+        # asyncpg always returns tz-aware, but we guard defensively.
+        if period_end.tzinfo is None:
+            period_end = period_end.replace(tzinfo=timezone.utc)
+
+        return period_end < now
 
     @staticmethod
     def _calculate_trial_info(subscription: Subscription) -> TrialInfo:
@@ -213,6 +237,15 @@ class SubscriptionService:
 
         subscription, plan = subscription_plan
 
+        # ── Realtime expiry check ────────────────────────────────────────────
+        # The background job deactivates expired subscriptions every 5 minutes,
+        # but we MUST NOT rely on it for live API correctness.
+        # If period_end has passed right now, return free plan immediately —
+        # the background job will clean up the DB row on its next run.
+        now = datetime.now(timezone.utc)
+        if SubscriptionService._is_expired(subscription.current_period_end, now):
+            return SubscriptionService._get_free_plan_defaults()
+
         # Step 5: Calculate trial information
         trial_info = SubscriptionService._calculate_trial_info(subscription)
 
@@ -230,5 +263,7 @@ class SubscriptionService:
             plan=plan.code,  # "free", "pro", or "enterprise"
             trial=trial_info,
             quotas=quotas,
+            period_start=subscription.current_period_start,
+            period_end=subscription.current_period_end,
         )
 

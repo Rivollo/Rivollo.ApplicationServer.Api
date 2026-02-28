@@ -10,12 +10,17 @@ Key Concepts:
 """
 
 import uuid
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import LicenseAssignment, Plan, Product, Subscription
+from app.queries.subscription_queries import (
+    DEACTIVATE_EXPIRED_SUBSCRIPTIONS,
+    REVOKE_LICENSES_FOR_SUBSCRIPTIONS,
+)
 
 
 class SubscriptionRepository:
@@ -81,4 +86,43 @@ class SubscriptionRepository:
         """
         result = await db.execute(select(Plan).where(Plan.code == plan_code))
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def deactivate_expired_subscriptions(
+        db: AsyncSession,
+    ) -> tuple[int, int]:
+        """
+        Cancel all subscriptions whose billing period has ended and revoke
+        their associated licenses.
+
+        Performs TWO parameterised SQL statements in the caller's transaction:
+            1. UPDATE tbl_subscriptions  → status = 'canceled'  (RETURNING ids)
+            2. UPDATE tbl_license_assignments → status = 'revoked'
+
+        The caller is responsible for committing / rolling back the transaction.
+
+        Returns:
+            (subscriptions_deactivated, licenses_revoked) as a tuple of ints.
+        """
+        now = datetime.now(timezone.utc)
+
+        # ── 1. Cancel expired subscriptions, retrieve their IDs ───────────────
+        sub_result = await db.execute(
+            text(DEACTIVATE_EXPIRED_SUBSCRIPTIONS),
+            {"now": now},
+        )
+        canceled_ids = [row[0] for row in sub_result.fetchall()]
+        sub_count = len(canceled_ids)
+
+        if sub_count == 0:
+            return 0, 0
+
+        # ── 2. Revoke licenses whose subscription was just canceled ───────────
+        license_result = await db.execute(
+            text(REVOKE_LICENSES_FOR_SUBSCRIPTIONS),
+            {"now": now, "subscription_ids": canceled_ids},
+        )
+        license_count = license_result.rowcount
+
+        return sub_count, license_count
 
