@@ -283,6 +283,7 @@ async def create_product_with_image(
     mesh_asset_id: int = Form(..., description="Mesh asset ID for generated output (integer)"),
     target_format: str = Form(..., description="Target format for external API (e.g., glb, obj)"),
     image: UploadFile = File(..., description="Image file to upload (JPG, PNG, WEBP, GIF)"),
+    mask: UploadFile = File(...),  # 👈 NEW PARAME
 ):
     """Create a new product with an image file upload (authentication disabled for testing)."""
     # Validate user ID
@@ -338,9 +339,30 @@ async def create_product_with_image(
             detail=f"Failed to read image file: {str(e)}",
         )
 
+    # -------------------------------
+    # Read mask file
+    # -------------------------------
+    if not mask.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Mask image file is required"
+        )
+
+    try:
+        mask_bytes = await mask.read()
+        mask_content_type = mask.content_type or "image/png"
+        mask_filename = mask.filename
+        mask_stream = io.BytesIO(mask_bytes)
+        mask_size_bytes = len(mask_bytes)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to read mask file: {str(e)}"
+        )
+
     # Use ProductService to create product and upload image
     try:
-        product, blob_url, external_job_uid = await product_service.create_product_with_image(
+        product, blob_url, mesh_blob_url, external_job_uid = await product_service.create_product_with_image(
             db=db,
             user_id=user_uuid,
             name=name,
@@ -351,6 +373,12 @@ async def create_product_with_image(
             image_filename=filename,
             image_content_type=content_type,
             image_size_bytes=image_size_bytes,
+
+            # 👇 NEW PARAMS
+            mask_stream=mask_stream,
+            mask_filename=mask_filename,
+            mask_content_type=mask_content_type,
+            mask_size_bytes=mask_size_bytes,
         )
 
         # Increment usage
@@ -400,6 +428,7 @@ async def create_product_with_image(
     # Return response with blob URL
     response_dict = response_data.model_dump(exclude_none=True)
     response_dict["image_blob_url"] = blob_url
+    response_dict["mesh_blob_url"] = mesh_blob_url
 
     # Kick off background polling for external API
     if external_job_uid:
