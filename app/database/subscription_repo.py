@@ -20,6 +20,7 @@ from app.models.models import LicenseAssignment, Plan, Product, Subscription
 from app.queries.subscription_queries import (
     DEACTIVATE_EXPIRED_SUBSCRIPTIONS,
     REVOKE_LICENSES_FOR_SUBSCRIPTIONS,
+    GET_USER_PLAN_CODE,
 )
 
 
@@ -126,3 +127,17 @@ class SubscriptionRepository:
 
         return sub_count, license_count
 
+    @staticmethod
+    async def get_user_plan_code(
+        db: AsyncSession, user_id: uuid.UUID
+    ) -> Optional[str]:
+        """Fetch the user's active plan code (e.g. 'pro', 'free').
+
+        Returns 'free' if the user has no active subscription.
+        """
+        result = await db.execute(
+            text(GET_USER_PLAN_CODE),
+            {"user_id": user_id},
+        )
+        row = result.fetchone()
+        return row[0] if row else "free"

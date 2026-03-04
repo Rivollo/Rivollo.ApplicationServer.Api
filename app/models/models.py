@@ -86,6 +86,7 @@ class AssetType(str, enum.Enum):
 
 class ProductStatus(str, enum.Enum):
     DRAFT = "draft"
+    QUEUE = "queue"
     PROCESSING = "processing"
     READY = "ready"
     PUBLISHED = "published"

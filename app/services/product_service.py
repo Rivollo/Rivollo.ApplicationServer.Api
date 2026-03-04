@@ -11,7 +11,9 @@ from datetime import datetime
 from app.models.models import Product, ProductAsset, ProductAssetMapping, ProductStatus, Background
 from app.services.storage import storage_service
 from app.integrations.threed_model_client import threed_model_client
+from app.integrations.service_bus_publisher import ServiceBusPublisher
 from app.database.products_repo import ProductRepository
+from app.database.subscription_repo import SubscriptionRepository
 from app.schemas.products import ProductWithPrimaryAsset, ProductsByUserResponse
 
 
@@ -169,11 +171,10 @@ class ProductService:
             raise RuntimeError("Failed to create asset entries") from e
 
         # -------------------------------
-        # 6. Finalize Product Creation State
+        # 6. Set initial status & commit
         # -------------------------------
         product.status = ProductStatus.QUEUE
         logger.info("Product %s created and queued for 3D generation", product.id)
-        
         await db.commit()
 
         try:
@@ -181,8 +182,52 @@ class ProductService:
         except Exception:
             pass
 
-        # ✅ FINAL RETURN
-        return product, blob_url, mask_blob_url, None
+        # -------------------------------
+        # 7. Route by subscription plan
+        # -------------------------------
+        plan_code = await SubscriptionRepository.get_user_plan_code(db, user_id)
+        logger.info("User %s plan: %s", user_id, plan_code)
+
+        match plan_code:
+            case "pro":
+                logger.info("PRO user → Direct VM execution for product %s", product.id)
+                glb_url = await ProductService.generate_3d_and_finalize(
+                    db=db,
+                    user_id=user_id,
+                    product_id=product.id,
+                    asset_id=asset_id,
+                    mesh_asset_id=mesh_asset_id,
+                    name=name,
+                    target_format=target_format,
+                    blob_url=blob_url,
+                    mask_blob_url=mask_blob_url,
+                )
+
+            case "free" | _:
+                logger.info(
+                    "FREE/unknown plan ('%s') → Service Bus queue for product %s",
+                    plan_code, product.id,
+                )
+                glb_url = None
+                payload = {
+                    "product_id": str(product.id),
+                    "user_id": str(user_id),
+                    "blob_url": blob_url,
+                    "mask_blob_url": mask_blob_url,
+                    "target_format": target_format,
+                    "asset_id": asset_id,
+                    "mesh_asset_id": mesh_asset_id,
+                    "name": name,
+                }
+                published = await ServiceBusPublisher.publish(payload)
+                if not published:
+                    logger.warning(
+                        "Service Bus publish failed for product %s — staying in QUEUE status",
+                        product.id,
+                    )
+
+        # ✅ FINAL RETURN — glb_url is set for PRO, None for FREE
+        return product, blob_url, mask_blob_url, glb_url
 
     @staticmethod
     async def generate_3d_and_finalize(

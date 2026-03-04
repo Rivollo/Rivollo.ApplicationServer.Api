@@ -46,3 +46,12 @@ REVOKE_LICENSES_FOR_SUBSCRIPTIONS = """
     WHERE  subscription_id = ANY(:subscription_ids)
       AND  status = 'active'
 """
+GET_USER_PLAN_CODE = """
+    SELECT p.code
+    FROM tbl_subscriptions s
+    INNER JOIN tbl_mstr_plans p ON s.plan_id = p.id
+    WHERE s.user_id = :user_id
+      AND s.status = 'ACTIVE'
+      ORDER BY s.created_date DESC
+      LIMIT 1
+"""

@@ -362,7 +362,7 @@ async def create_product_with_image(
 
     # Use ProductService to create product and upload image
     try:
-        product, blob_url, mask_blob_url, external_job_uid = await product_service.create_product_with_image(
+        product, blob_url, mask_blob_url, glb_url = await product_service.create_product_with_image(
             db=db,
             user_id=user_uuid,
             name=name,
@@ -399,32 +399,8 @@ async def create_product_with_image(
             detail=f"{str(e)}\n\nTraceback:\n{traceback.format_exc()}",
         )
 
-    # --- Synchronous 3D generation (waits for API response before returning) ---
-    try:
-        glb_url = await product_service.generate_3d_and_finalize(
-            db=db,
-            user_id=user_uuid,
-            product_id=product.id,
-            asset_id=asset_id,
-            mesh_asset_id=mesh_asset_id,
-            name=name,
-            target_format=target_format,
-            blob_url=blob_url,
-            mask_blob_url=mask_blob_url,
-        )
-    except RuntimeError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
-        )
-    except Exception as e:
-        import traceback
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"3D generation error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}",
-        )
-
-    # Refresh product to get the latest status (READY) set by generate_3d_and_finalize
+    # Refresh product to get the latest status set by the service layer
+    # (READY for PRO users after direct VM execution, QUEUE for FREE users pending Service Bus)
     await db.refresh(product)
 
     response_data = ProductResponse(
@@ -442,7 +418,9 @@ async def create_product_with_image(
 
     response_dict = response_data.model_dump(exclude_none=True)
     response_dict["image_blob_url"] = blob_url
-    response_dict["glb_url"] = glb_url
+    if glb_url:
+        # PRO users: 3D generation ran synchronously, GLB is ready now
+        response_dict["glb_url"] = glb_url
 
     return api_success(response_dict)
 
