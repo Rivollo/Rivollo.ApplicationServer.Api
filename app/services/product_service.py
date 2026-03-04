@@ -10,7 +10,7 @@ from datetime import datetime
 
 from app.models.models import Product, ProductAsset, ProductAssetMapping, ProductStatus, Background
 from app.services.storage import storage_service
-from app.integrations.service_bus_publisher import ServiceBusPublisher
+from app.integrations.threed_model_client import threed_model_client
 from app.database.products_repo import ProductRepository
 from app.schemas.products import ProductWithPrimaryAsset, ProductsByUserResponse
 
@@ -169,36 +169,11 @@ class ProductService:
             raise RuntimeError("Failed to create asset entries") from e
 
         # -------------------------------
-        # 6. HANDOFF TO SERVICE BUS
+        # 6. Finalize Product Creation State
         # -------------------------------
-        payload = {
-            "product_id": str(product.id),
-            "user_id": str(user_id),
-            "blob_url": blob_url,
-            "mask_blob_url": mask_blob_url,
-            "target_format": target_format,
-            "asset_id": asset_id,
-            "mesh_asset_id": mesh_asset_id,
-            "name": name,
-        }
-
-        logger.info("Publishing message to Service Bus: %s", payload)
-        published = await ServiceBusPublisher.publish(payload)
-
-        # -------------------------------
-        # 7. Update status & commit
-        # -------------------------------
-        # Set status based on whether Service Bus publish succeeded
-        if published:
-            product.status = ProductStatus.PROCESSING
-            logger.info("Product %s queued for background processing", product.id)
-        else:
-            product.status = ProductStatus.DRAFT
-            logger.warning(
-                "Product %s created but background processing not queued. "
-                "Manual processing may be required.",
-                product.id
-            )
+        product.status = ProductStatus.QUEUE
+        logger.info("Product %s created and queued for 3D generation", product.id)
+        
         await db.commit()
 
         try:
@@ -208,6 +183,109 @@ class ProductService:
 
         # ✅ FINAL RETURN
         return product, blob_url, mask_blob_url, None
+
+    @staticmethod
+    async def generate_3d_and_finalize(
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        product_id: uuid.UUID,
+        asset_id: int,
+        mesh_asset_id: int,
+        name: str,
+        target_format: str,
+        blob_url: str,
+        mask_blob_url: str,
+    ) -> str:
+        """
+        Synchronously call the 3D generation API and persist the GLB asset.
+
+        Sets the product status to PROCESSING before calling the API, then
+        READY on success. Raises RuntimeError on failure so the caller can
+        surface a clean HTTP 500.
+
+        Returns:
+            glb_url: The URL of the generated GLB file.
+        """
+        logger = logging.getLogger(__name__)
+
+        # 1. Mark product as PROCESSING so callers / UI can show in-progress state
+        product = await db.get(Product, product_id)
+        if not product:
+            raise RuntimeError(f"Product {product_id} not found")
+
+        product.status = ProductStatus.PROCESSING
+        await db.commit()
+        logger.info("Product %s status → PROCESSING", product_id)
+
+        # 2. Call the 3D generation API (blocks until response arrives)
+        response = await threed_model_client.generate_3d(
+            product_id=product_id,
+            user_id=user_id,
+            blob_url=blob_url,
+            mask_blob_url=mask_blob_url,
+            target_format=target_format,
+            asset_id=asset_id,
+            mesh_asset_id=mesh_asset_id,
+            name=name,
+        )
+
+        # Re-fetch in case the session state drifted during the long await
+        product = await db.get(Product, product_id)
+        if not product:
+            raise RuntimeError(f"Product {product_id} disappeared during 3D generation")
+
+        # 3. Handle failure
+        if not response.success:
+            error_msg = response.error or "Unknown error from 3D generation API"
+            logger.error("3D generation failed for product %s: %s", product_id, error_msg)
+            product.status = ProductStatus.DRAFT
+            await db.commit()
+            raise RuntimeError(f"3D generation failed: {error_msg}")
+
+        glb_url: Optional[str] = response.glb_url
+        if not glb_url:
+            logger.error("3D API returned success but no GLB URL for product %s", product_id)
+            product.status = ProductStatus.DRAFT
+            await db.commit()
+            raise RuntimeError("3D generation succeeded but returned no GLB URL")
+
+        # 4. Persist only the GLB asset + mapping
+        try:
+            glb_asset = ProductAsset(
+                asset_id=mesh_asset_id,
+                image=glb_url,
+                created_by=user_id,
+            )
+            db.add(glb_asset)
+            await db.flush()
+
+            glb_mapping = ProductAssetMapping(
+                name=name,
+                productid=product_id,
+                product_asset_id=glb_asset.id,
+                isactive=True,
+                created_by=user_id,
+            )
+            db.add(glb_mapping)
+
+            # 5. Mark as READY
+            product.status = ProductStatus.READY
+            await db.commit()
+            logger.info("Product %s → READY  glb_url=%s", product_id, glb_url)
+
+        except Exception as exc:
+            logger.exception("Failed to persist GLB asset for product %s", product_id)
+            await db.rollback()
+            try:
+                product = await db.get(Product, product_id)
+                if product:
+                    product.status = ProductStatus.DRAFT
+                    await db.commit()
+            except Exception:
+                pass
+            raise RuntimeError("Failed to save GLB asset to database") from exc
+
+        return glb_url
 
     @staticmethod
     async def update_product_background_image(

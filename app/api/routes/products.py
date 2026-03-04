@@ -8,12 +8,11 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-import asyncio
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from sqlalchemy import and_, delete, desc, func, or_, select, cast, String, insert, update, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.api.deps import CurrentUser, DB, get_current_user, get_db
@@ -362,7 +361,7 @@ async def create_product_with_image(
 
     # Use ProductService to create product and upload image
     try:
-        product, blob_url, mesh_blob_url, external_job_uid = await product_service.create_product_with_image(
+        product, blob_url, mask_blob_url, external_job_uid = await product_service.create_product_with_image(
             db=db,
             user_id=user_uuid,
             name=name,
@@ -373,8 +372,6 @@ async def create_product_with_image(
             image_filename=filename,
             image_content_type=content_type,
             image_size_bytes=image_size_bytes,
-
-            # 👇 NEW PARAMS
             mask_stream=mask_stream,
             mask_filename=mask_filename,
             mask_content_type=mask_content_type,
@@ -383,7 +380,7 @@ async def create_product_with_image(
 
         # Increment usage
         await LicensingService.increment_usage(db, user_uuid, "max_products")
-    
+
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -395,22 +392,39 @@ async def create_product_with_image(
             detail=str(e),
         )
     except Exception as e:
-        # Catch all other exceptions and return the actual error for debugging
         import traceback
-        error_detail = f"{str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=error_detail,
+            detail=f"{str(e)}\n\nTraceback:\n{traceback.format_exc()}",
         )
 
-    # Log activity - COMMENTED OUT FOR TESTING (might be causing timeout)
-    # await ActivityService.log_product_action(
-    #     db=db,
-    #     action="product.created",
-    #     user_id=user_uuid,
-    #     product_id=product.id,
-    #     request=request,
-    # )
+    # --- Synchronous 3D generation (waits for API response before returning) ---
+    try:
+        glb_url = await product_service.generate_3d_and_finalize(
+            db=db,
+            user_id=user_uuid,
+            product_id=product.id,
+            asset_id=asset_id,
+            mesh_asset_id=mesh_asset_id,
+            name=name,
+            target_format=target_format,
+            blob_url=blob_url,
+            mask_blob_url=mask_blob_url,
+        )
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+    except Exception as e:
+        import traceback
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"3D generation error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}",
+        )
+
+    # Refresh product to get the latest status (READY) set by generate_3d_and_finalize
+    await db.refresh(product)
 
     response_data = ProductResponse(
         id=str(product.id),
@@ -425,28 +439,9 @@ async def create_product_with_image(
         updated_at=product.updated_at,
     )
 
-    # Return response with blob URL
     response_dict = response_data.model_dump(exclude_none=True)
     response_dict["image_blob_url"] = blob_url
-    response_dict["mesh_blob_url"] = mesh_blob_url
-
-    # Kick off background polling for external API
-    if external_job_uid:
-        engine = db.bind
-        if engine is not None:
-            session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
-            asyncio.create_task(
-                product_service.poll_external_api_and_finalize(
-                    session_factory=session_factory,
-                    user_id=user_uuid,
-                    product_id=product.id,
-                    asset_id=asset_id,
-                    mesh_asset_id=mesh_asset_id,
-                    name=name,
-                    target_format=target_format,
-                    job_uid=external_job_uid,
-                )
-            )
+    response_dict["glb_url"] = glb_url
 
     return api_success(response_dict)
 

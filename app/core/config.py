@@ -1,6 +1,6 @@
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, AliasChoices
 
 
 class Settings(BaseSettings):
@@ -27,6 +27,12 @@ class Settings(BaseSettings):
 
 	# External model service endpoint
 	MODEL_SERVICE_URL: str = Field(default="mock://local")
+
+	# 3D model generation API base URL (env key: 3D_MODEL_API_BASE_URL)
+	MODEL_3D_API_BASE_URL: str = Field(
+		default="",
+		validation_alias=AliasChoices("MODEL_3D_API_BASE_URL", "3D_MODEL_API_BASE_URL"),
+	)
 
 	# Azure Monitor / Application Insights
 	AZURE_MONITOR_CONN_STR: str = Field(default="")
