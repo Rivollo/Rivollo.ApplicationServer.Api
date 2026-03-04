@@ -46,6 +46,7 @@ from app.schemas.products import (
     ProductAssetsData,
     ProductAssetsHotspot,
     ProductAssetsResponse,
+    ProductMeshItem,
     ProductCreate,
     ProductDetailsUpdate,
     ProductImageItem,
@@ -620,35 +621,50 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
             detail="Product not found.",
         )
 
-    # Join ProductAsset with ProductAssetMapping and AssetStatic
-    stmt = (
+    # Query 1: Mesh / 3D assets (tbl_asset.assetid = 2) — classified at SQL level
+    mesh_stmt = (
         select(
             ProductAsset.asset_id,
             ProductAsset.image,
-            AssetStatic.name.label("asset_name"),
-            AssetStatic.assetid.label("asset_type_id"),
         )
         .join(ProductAssetMapping, ProductAsset.id == ProductAssetMapping.product_asset_id)
         .join(AssetStatic, ProductAsset.asset_id == AssetStatic.id)
         .where(ProductAssetMapping.productid == str(product_uuid))
         .where(ProductAssetMapping.isactive == True)
+        .where(AssetStatic.assetid == 2)
         .order_by(ProductAssetMapping.created_date.desc())
     )
-    result = await db.execute(stmt)
-    rows = result.all()
+    mesh_result = await db.execute(mesh_stmt)
+    mesh = [
+        ProductMeshItem(asset_id=row.asset_id, url=row.image)
+        for row in mesh_result.all()
+    ]
 
-    # Separate mesh (assetid = 2) from other images
-    meshurl: Optional[str] = None
-    images: list[ProductImageItem] = []
+    # Query 2: Image assets (tbl_asset.assetid = 1) — classified at SQL level
+    image_stmt = (
+        select(
+            ProductAsset.asset_id,
+            ProductAsset.image,
+            AssetStatic.name.label("asset_name"),
+        )
+        .join(ProductAssetMapping, ProductAsset.id == ProductAssetMapping.product_asset_id)
+        .join(AssetStatic, ProductAsset.asset_id == AssetStatic.id)
+        .where(ProductAssetMapping.productid == str(product_uuid))
+        .where(ProductAssetMapping.isactive == True)
+        .where(AssetStatic.assetid == 1)
+        .order_by(ProductAssetMapping.created_date.desc())
+    )
+    image_result = await db.execute(image_stmt)
 
-    for row in rows:
-        asset_id, image_url, asset_name, asset_type_id = row
-        if asset_type_id == 2:
-            # This is the mesh (assetid = 2 in tbl_asset)
-            meshurl = image_url
-        else:
-            # This is a regular image
-            images.append(ProductImageItem(url=image_url, type=asset_name))
+    # Deduplicate: exclude image entries whose URL already exists in mesh.
+    # This guards against corrupted mappings where mesh file URLs were also
+    # stored under image-type asset_ids in tbl_product_asset_mapping.
+    mesh_urls = {item.url for item in mesh}
+    images = [
+        ProductImageItem(asset_id=row.asset_id, url=row.image, type=row.asset_name)
+        for row in image_result.all()
+        if row.image not in mesh_urls
+    ]
 
     # Fetch background data if background_type exists
     background_data = None
@@ -785,7 +801,7 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
         status=product.status.value,
         created_at=product.created_at,
         updated_at=product.updated_at,
-        meshurl=meshurl,
+        mesh=mesh,
         images=images,
         background=background_data,
         links=links_data,
