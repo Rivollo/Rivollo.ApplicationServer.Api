@@ -124,8 +124,16 @@ class PublishProductResponse(BaseModel):
 class ProductImageItem(BaseModel):
     """Image item in product assets response."""
 
+    asset_id: int
     url: str
     type: str
+
+
+class ProductMeshItem(BaseModel):
+    """Mesh / 3D asset item in product assets response (assetid = 2)."""
+
+    asset_id: int
+    url: str
 
 
 class ProductAssetsData(BaseModel):
@@ -139,7 +147,7 @@ class ProductAssetsData(BaseModel):
     status: str
     created_at: datetime
     updated_at: Optional[datetime] = None
-    meshurl: Optional[str] = None
+    mesh: list["ProductMeshItem"] = Field(default_factory=list)
     images: list[ProductImageItem] = Field(default_factory=list)
     background: Optional[dict] = None  # Background data with type
     links: Optional[list[dict]] = None  # Product links
