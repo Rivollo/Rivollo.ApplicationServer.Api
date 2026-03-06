@@ -32,6 +32,8 @@ class PaymentRepository:
         amount: int,
         currency: str,
         plan_code: str,
+        promo_id: Optional[uuid.UUID] = None,
+        discount_amount: int = 0,
     ) -> Payment:
         """Insert a new payment row with status = 'created'.
 
@@ -54,6 +56,8 @@ class PaymentRepository:
             amount=amount,
             currency=currency,
             plan_code=plan_code,
+            promo_id=promo_id,
+            discount_amount=discount_amount,
             status=PaymentStatus.CREATED,
         )
         db.add(payment)

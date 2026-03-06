@@ -36,6 +36,8 @@ from app.database.payment_repo import PaymentRepository
 from app.models.payment import PaymentStatus
 from app.services.subscription_activation_service import SubscriptionActivationService
 
+from app.database.promo_repo import PromoRepository
+
 _logger = logging.getLogger("rivollo.payment_service")
 
 _RAZORPAY_BASE_URL = "https://api.razorpay.com/v1"
@@ -89,6 +91,7 @@ async def create_razorpay_order(
     currency: str = "INR",
     receipt: Optional[str] = None,
     notes: Optional[dict[str, Any]] = None,
+    promo_code: Optional[str] = None,
 ) -> dict[str, Any]:
     """Create a Razorpay order and save a payment record to the database.
 
@@ -120,11 +123,43 @@ async def create_razorpay_order(
     # ── 1. Server-side amount — never trust frontend ─────────────────────────
     amount = SubscriptionActivationService.get_plan_price_paise(plan_code)
 
-    # ── 2. Check credentials ─────────────────────────────────────────────────
+    promo = None
+    discount = 0
+
+    # ── Promo Validation ─────────────────────────────
+    if promo_code:
+
+        promo = await PromoRepository.get_by_code(db, promo_code)
+
+        if not promo:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid or expired promo code"
+            )
+
+        if promo.plan_code and promo.plan_code != plan_code:
+            raise HTTPException(
+                status_code=400,
+                detail="Promo code not valid for this plan"
+            )
+
+        if promo.max_usage and promo.used_count >= promo.max_usage:
+            raise HTTPException(
+                status_code=400,
+                detail="Promo usage limit reached"
+            )
+
+        amount, discount = calculate_discount(
+            amount,
+            promo.discount_type,
+            promo.discount_value
+        )
+
+    # ── Check Razorpay credentials ─────────────────────
     _check_credentials()
 
-    # ── 3. Build payload ─────────────────────────────────────────────────────
-    payload: dict[str, Any] = {
+    # ── Build Razorpay payload ─────────────────────────
+    payload = {
         "amount": amount,
         "currency": currency,
         "payment_capture": 1,  # auto-capture on payment success
@@ -136,6 +171,7 @@ async def create_razorpay_order(
 
     # ── 4. Call Razorpay API ─────────────────────────────────────────────────
     try:
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
                 f"{_RAZORPAY_BASE_URL}/orders",
@@ -159,40 +195,33 @@ async def create_razorpay_order(
             )
 
         response.raise_for_status()
-        order: dict[str, Any] = response.json()
 
-    except HTTPException:
-        raise
-    except httpx.TimeoutException as exc:
-        _logger.exception("Razorpay API timed out: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Payment gateway timed out. Please try again.",
-        ) from exc
+        order = response.json()
+
     except Exception as exc:
+
         _logger.exception("Razorpay order creation failed: %s", exc)
+
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Payment gateway error. Please try again later.",
-        ) from exc
+        )
 
-    # ── 5. Save payment record to DB ─────────────────────────────────────────
-    razorpay_order_id: str = order["id"]
-    await PaymentRepository.create_payment(
+    razorpay_order_id = order["id"]
+
+    # ── Save Payment ─────────────────────────────
+    payment = await PaymentRepository.create_payment(
         db,
         user_id=user_id,
         razorpay_order_id=razorpay_order_id,
         amount=order["amount"],
         currency=order["currency"],
         plan_code=plan_code,
+        promo_id=promo.id if promo else None,
+        discount_amount=discount,
     )
-    # Commit so the payment row is durably saved even if verify never arrives
-    await db.commit()
 
-    _logger.info(
-        "Razorpay order created and payment record saved",
-        extra={"order_id": razorpay_order_id, "amount": amount, "plan": plan_code},
-    )
+    await db.commit()
 
     return {
         "orderId": razorpay_order_id,
@@ -316,6 +345,13 @@ async def verify_and_activate_payment(
         razorpay_signature=razorpay_signature,
         subscription_id=subscription.id,
     )
+
+    if payment.promo_id:
+
+        promo = await PromoRepository.get_by_code(db, payment.promo.code)
+
+        if promo:
+            await PromoRepository.increment_usage(db, promo)
 
     # ── 7. Commit the full transaction ────────────────────────────────────────
     await db.commit()
@@ -515,4 +551,18 @@ async def handle_razorpay_webhook(
     )
 
     return {"status": "ok"}
+
+# Calculate the Discount using the PROMOCODE
+
+def calculate_discount(amount: int, discount_type: str, discount_value: int):
+
+    if discount_type == "percentage":
+        discount = int(amount * discount_value / 100)
+
+    else:
+        discount = discount_value
+
+    final_amount = max(amount - discount, 0)
+
+    return final_amount, discount
 

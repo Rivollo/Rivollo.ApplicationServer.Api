@@ -98,6 +98,20 @@ class Payment(Base):
         String(50), nullable=False  # "pro" | "enterprise"
     )
 
+        # ✅ PROMO CODE USED
+    promo_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("tbl_promo_codes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # ✅ DISCOUNT APPLIED
+    discount_amount: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0
+    )
+
     # Status — TEXT column (see PaymentStatus constants above)
     status: Mapped[str] = mapped_column(
         String(50), nullable=False, default=PaymentStatus.CREATED
