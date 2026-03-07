@@ -66,6 +66,13 @@ class Payment(Base):
         PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
 
+    # PROMO CODE USED
+    promo_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("tbl_promo_codes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Who made this payment
     user_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -131,3 +138,5 @@ class Payment(Base):
     # Relationships
     user: Mapped["User"] = relationship("User")
     subscription: Mapped[Optional["Subscription"]] = relationship("Subscription")
+
+    promo: Mapped[Optional["PromoCode"]] = relationship("PromoCode")

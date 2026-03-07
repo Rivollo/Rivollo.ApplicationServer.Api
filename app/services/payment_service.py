@@ -293,6 +293,8 @@ async def verify_and_activate_payment(
             "Duplicate verify call for already-captured order_id: %s", razorpay_order_id
         )
         subscription = payment.subscription
+
+               
         return {
             "verified": True,
             "message": "Payment already verified and subscription is active.",
@@ -311,7 +313,7 @@ async def verify_and_activate_payment(
         razorpay_payment_id=razorpay_payment_id,
         razorpay_signature=razorpay_signature,
     )
-
+    # is_valid= True
     if not is_valid:
         _logger.warning(
             "Signature verification FAILED for order_id: %s", razorpay_order_id
@@ -348,10 +350,21 @@ async def verify_and_activate_payment(
 
     if payment.promo_id:
 
-        promo = await PromoRepository.get_by_code(db, payment.promo.code)
+        promo = payment.promo
 
         if promo:
+
+            # increment global usage counter
             await PromoRepository.increment_usage(db, promo)
+
+            # record promo usage per user/payment
+            await PromoRepository.create_usage(
+                db,
+                promo_id=promo.id,
+                user_id=user_id,
+                payment_id=payment.id,
+                created_by=user_id
+            )
 
     # ── 7. Commit the full transaction ────────────────────────────────────────
     await db.commit()
