@@ -85,6 +85,7 @@ async def create_order(
         currency=body.currency,
         receipt=body.receipt,
         notes=body.notes,
+        promo_code=body.promo_code   # NEW
     )
     return api_success(order)
 

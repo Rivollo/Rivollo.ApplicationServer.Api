@@ -68,6 +68,13 @@ class CreateOrderRequest(_CamelModel):
         examples=[{"user": "pratik"}],
     )
 
+    promo_code: str | None = Field(
+        default=None,
+        max_length=50,
+        description="Optional promo or discount code applied to the order.",
+        examples=["NEWUSER20"],
+    )
+
     model_config = ConfigDict(
         alias_generator=to_camel,
         populate_by_name=True,

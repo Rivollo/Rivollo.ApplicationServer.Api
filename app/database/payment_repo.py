@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.payment import Payment, PaymentStatus
+from sqlalchemy.orm import selectinload
 
 
 class PaymentRepository:
@@ -32,6 +33,8 @@ class PaymentRepository:
         amount: int,
         currency: str,
         plan_code: str,
+        promo_id: Optional[uuid.UUID] = None,
+        discount_amount: int = 0,
     ) -> Payment:
         """Insert a new payment row with status = 'created'.
 
@@ -54,6 +57,8 @@ class PaymentRepository:
             amount=amount,
             currency=currency,
             plan_code=plan_code,
+            promo_id=promo_id,
+            discount_amount=discount_amount,
             status=PaymentStatus.CREATED,
         )
         db.add(payment)
@@ -77,8 +82,21 @@ class PaymentRepository:
         Returns:
             Payment row if found, None otherwise
         """
+        # result = await db.execute(
+        #     select(Payment).where(Payment.razorpay_order_id == razorpay_order_id)
+        # result = await db.execute(
+        #         select(Payment)
+        #         .options(selectinload(Payment.subscription))
+        #         .where(Payment.razorpay_order_id == razorpay_order_id)
+        #     )
+
         result = await db.execute(
-            select(Payment).where(Payment.razorpay_order_id == razorpay_order_id)
+            select(Payment)
+            .options(
+                selectinload(Payment.subscription),
+                selectinload(Payment.promo)   # ← add this
+            )
+            .where(Payment.razorpay_order_id == razorpay_order_id)
         )
         return result.scalar_one_or_none()
 
