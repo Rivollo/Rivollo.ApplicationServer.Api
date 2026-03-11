@@ -138,23 +138,41 @@ class LicensingService:
         user: User,
     ) -> LicenseAssignment:
         """Create a free plan license for a new user."""
-        # Get or create free plan
-        result = await db.execute(select(Plan).where(Plan.code == "free"))
-        free_plan = result.scalar_one_or_none()
+        from app.database.subscription_repo import SubscriptionRepository
+        
+        # Get free plan with features
+        free_plan = await SubscriptionRepository.get_plan_with_features(db, "free")
 
         if not free_plan:
-            quotas_dict = {
-                "max_products": 2,
-                "max_ai_credits_month": 5,
-                "max_public_views": 1000,
-            }
+            # Fallback if DB not seeded
             free_plan = Plan(
                 code="free",
                 name="Free",
-                quotas=json.dumps(quotas_dict),  # Serialize to JSON string
             )
             db.add(free_plan)
             await db.flush()
+            # If we created it now, it won't have features. 
+            # In a real environment, it should exist with features.
+
+        # Default limits for safety if features missing
+        limits = {
+            "max_products": 2,
+            "max_ai_credits_month": 5,
+            "max_public_views": 1000,
+            "max_galleries": 0,
+        }
+
+        # Override with database values if available
+        if free_plan.plan_features:
+            for pf in free_plan.plan_features:
+                if pf.feature.code == "max_products":
+                    limits["max_products"] = pf.limit_value or 0
+                elif pf.feature.code in ["ai_credits", "max_ai_credits_month"]:
+                    limits["max_ai_credits_month"] = pf.limit_value or 0
+                elif pf.feature.code in ["public_views", "max_public_views"]:
+                    limits["max_public_views"] = pf.limit_value or 0
+                elif pf.feature.code in ["galleries", "max_galleries"]:
+                    limits["max_galleries"] = pf.limit_value or 0
 
         # Create subscription
         subscription = Subscription(
@@ -166,18 +184,15 @@ class LicensingService:
         db.add(subscription)
         await db.flush()
 
-        # Parse quotas from TEXT field
-        quotas_dict = json.loads(free_plan.quotas) if free_plan.quotas else {}
-
         # Create license assignment
         license = LicenseAssignment(
             subscription_id=subscription.id,
             user_id=user.id,
             status="active",
-            limit_max_products=int(quotas_dict.get("max_products", 2) or 0),
-            limit_max_ai_credits=int(quotas_dict.get("max_ai_credits_month", 5) or 0),
-            limit_max_public_views=int(quotas_dict.get("max_public_views", 1000) or 0),
-            limit_max_galleries=int(quotas_dict.get("max_galleries", 0) or 0),
+            limit_max_products=limits["max_products"],
+            limit_max_ai_credits=limits["max_ai_credits_month"],
+            limit_max_public_views=limits["max_public_views"],
+            limit_max_galleries=limits["max_galleries"],
             usage_products=0,
             usage_ai_credits=0,
             usage_public_views=0,

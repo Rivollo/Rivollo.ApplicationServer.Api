@@ -91,6 +91,20 @@ class SubscriptionRepository:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def get_plan_with_features(db: AsyncSession, plan_code: str) -> Optional[Plan]:
+        """
+        Fetch a plan by its code with all its features and limits loaded.
+        """
+        result = await db.execute(
+            select(Plan)
+            .where(Plan.code == plan_code)
+            .options(
+                selectinload(Plan.plan_features).selectinload(PlanFeature.feature)
+            )
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
     async def get_all_plans(db: AsyncSession) -> list[Plan]:
         """
         Fetch all subscription plans from the database, including features.
