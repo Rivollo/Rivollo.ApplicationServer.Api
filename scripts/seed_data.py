@@ -17,32 +17,14 @@ async def seed_plans(session: AsyncSession) -> None:
         {
             "code": "free",
             "name": "Free",
-            "quotas": {
-                "max_products": 2,
-                "max_ai_credits_month": 5,
-                "max_public_views": 1000,
-                "max_galleries": 0,
-            },
         },
         {
             "code": "pro",
             "name": "Pro",
-            "quotas": {
-                "max_products": 50,
-                "max_ai_credits_month": 50,
-                "max_public_views": 25000,
-                "max_galleries": 10,
-            },
         },
         {
             "code": "enterprise",
             "name": "Enterprise",
-            "quotas": {
-                "max_products": None,  # Unlimited
-                "max_ai_credits_month": None,
-                "max_public_views": None,
-                "max_galleries": None,
-            },
         },
     ]
 
@@ -51,13 +33,12 @@ async def seed_plans(session: AsyncSession) -> None:
         existing_plan = result.scalar_one_or_none()
 
         if existing_plan:
-            # Update existing plan
+            # Update existing plan name only (quotas column no longer exists)
             existing_plan.name = plan_data["name"]
-            existing_plan.quotas = plan_data["quotas"]
             print(f"✓ Updated plan: {plan_data['name']}")
         else:
-            # Create new plan
-            plan = Plan(**plan_data)
+            # Create new plan (no quotas column in schema)
+            plan = Plan(code=plan_data["code"], name=plan_data["name"])
             session.add(plan)
             print(f"✓ Created plan: {plan_data['name']}")
 
@@ -116,13 +97,19 @@ async def seed_demo_user(session: AsyncSession) -> None:
         session.add(subscription)
         await session.flush()
 
-        # Create license
+        # Create license with individual limit/usage columns (quotas column removed)
         license_assignment = LicenseAssignment(
             subscription_id=subscription.id,
             user_id=demo_user.id,
             status="active",
-            limits=free_plan.quotas,
-            usage_counters={},
+            limit_max_products=2,
+            limit_max_ai_credits=5,
+            limit_max_public_views=1000,
+            limit_max_galleries=0,
+            usage_products=0,
+            usage_ai_credits=0,
+            usage_public_views=0,
+            usage_galleries=0,
         )
         session.add(license_assignment)
 
