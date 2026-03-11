@@ -13,10 +13,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
-from sqlalchemy import select, text
+from sqlalchemy import select, update, text
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import LicenseAssignment, Plan, Product, Subscription
+from app.models.models import LicenseAssignment, Product, Subscription
+from app.models.plan import Plan, PlanFeature
 from app.queries.subscription_queries import (
     DEACTIVATE_EXPIRED_SUBSCRIPTIONS,
     REVOKE_LICENSES_FOR_SUBSCRIPTIONS,
@@ -87,6 +89,27 @@ class SubscriptionRepository:
         """
         result = await db.execute(select(Plan).where(Plan.code == plan_code))
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_all_plans(db: AsyncSession) -> list[Plan]:
+        """
+        Fetch all subscription plans from the database, including features.
+
+        Args:
+            db: Database session
+
+        Returns:
+            List of Plan models
+        """
+        result = await db.execute(
+            select(Plan)
+            .where(Plan.isactive == True)
+            .options(
+                selectinload(Plan.plan_features).selectinload(PlanFeature.feature)
+            )
+            .order_by(Plan.created_date.asc())
+        )
+        return list(result.scalars().all())
 
     @staticmethod
     async def deactivate_expired_subscriptions(
