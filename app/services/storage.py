@@ -225,86 +225,54 @@ class StorageService:
 		
 		return cdn_urls, blob_urls, asset_url_base
 
+	def _media_container(self) -> str:
+		"""Resolve the container for product/background images."""
+		return settings.STORAGE_CONTAINER_MEDIA or settings.STORAGE_CONTAINER_UPLOADS or "uploads"
+
 	def upload_product_image(self, user_id: str, product_id: str, filename: str, content_type: Optional[str], stream: BinaryIO) -> tuple[str, str]:
-		"""Upload product image to dev container with path structure: dev/{userId}/{productId}/filename
-		
+		"""Upload product image with path structure: {userId}/{productId}/filename
+
 		Args:
 			user_id: User ID
 			product_id: Product ID
 			filename: Image filename
 			content_type: Content type of the image
 			stream: Binary stream of the image
-			
+
 		Returns:
 			Tuple of (cdn_url, blob_url)
 		"""
 		client = self._get_blob_service_client()
-		container = "dev"
-		
-		# Check if container exists, create if not
-		try:
-			container_client = client.get_container_client(container)
-			if not container_client.exists():
-				container_client.create_container()
-		except Exception as e:
-			raise RuntimeError(f"Failed to access/create container 'dev': {str(e)}")
-		
-		# Build blob path: dev/{userId}/{productId}/filename
+		container = self._media_container()
 		blob_path = f"{user_id}/{product_id}/{quote(filename)}"
-		
-		# Check if user folder exists (by checking if any blob with that prefix exists)
-		# In Azure Blob Storage, folders are virtual - they exist if there's a blob with that prefix
-		# We'll just upload the file - if the "folder" doesn't exist, it will be created automatically
-		
 		blob_client = client.get_blob_client(container=container, blob=blob_path)
 		settings_obj = ContentSettings(content_type=content_type or "application/octet-stream")  # type: ignore
 		blob_client.upload_blob(stream, overwrite=True, content_settings=settings_obj)
-		
-		# Return blob URL (CDN URL would need CDN_BASE_URL configured for dev container)
+		cdn_url = f"{settings.CDN_BASE_URL}/{blob_path}"
 		blob_url = blob_client.url
-		cdn_url = blob_url  # Use blob URL as CDN URL if CDN not configured for dev container
-		
 		return cdn_url, blob_url
-	
+
 	def upload_background_image(self, user_id: str, product_id: str, filename: str, content_type: Optional[str], stream: BinaryIO) -> tuple[str, str]:
-		"""Upload background image to dev container with path structure: dev/{userId}/{productId}/backgrounds/filename
-		
+		"""Upload background image with path structure: {userId}/{productId}/backgrounds/filename
+
 		Args:
 			user_id: User ID
 			product_id: Product ID
 			filename: Image filename
 			content_type: Content type of the image
 			stream: Binary stream of the image
-			
+
 		Returns:
 			Tuple of (cdn_url, blob_url)
 		"""
 		client = self._get_blob_service_client()
-		container = "dev"
-		
-		# Check if container exists, create if not
-		try:
-			container_client = client.get_container_client(container)
-			if not container_client.exists():
-				container_client.create_container()
-		except Exception as e:
-			raise RuntimeError(f"Failed to access/create container 'dev': {str(e)}")
-		
-		# Build blob path: dev/{userId}/{productId}/backgrounds/filename
+		container = self._media_container()
 		blob_path = f"{user_id}/{product_id}/backgrounds/{quote(filename)}"
-		
-		# Check if user folder exists (by checking if any blob with that prefix exists)
-		# In Azure Blob Storage, folders are virtual - they exist if there's a blob with that prefix
-		# We'll just upload the file - if the "folder" doesn't exist, it will be created automatically
-		
 		blob_client = client.get_blob_client(container=container, blob=blob_path)
 		settings_obj = ContentSettings(content_type=content_type or "application/octet-stream")  # type: ignore
 		blob_client.upload_blob(stream, overwrite=True, content_settings=settings_obj)
-		
-		# Return blob URL (CDN URL would need CDN_BASE_URL configured for dev container)
+		cdn_url = f"{settings.CDN_BASE_URL}/{blob_path}"
 		blob_url = blob_client.url
-		cdn_url = blob_url  # Use blob URL as CDN URL if CDN not configured for dev container
-		
 		return cdn_url, blob_url
 
 
