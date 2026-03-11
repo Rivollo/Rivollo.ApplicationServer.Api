@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 	# Storage / CDN placeholders (wire Azure later)
 	CDN_BASE_URL: str = Field(default="https://cdn.example")
 	STORAGE_CONTAINER_UPLOADS: str = Field(default="uploads")
+	STORAGE_CONTAINER_MEDIA: str = Field(default="")  # product/background images; falls back to STORAGE_CONTAINER_UPLOADS
 	AZURE_STORAGE_ACCOUNT: str = Field(default="")
 	AZURE_STORAGE_KEY: str = Field(default="")
 	AZURE_STORAGE_CONN_STRING: str = Field(default="")
