@@ -118,7 +118,7 @@ async def create_razorpay_order(
         HTTPException 503: Credentials not configured
     """
     # ── 1. Server-side amount — never trust frontend ─────────────────────────
-    amount = SubscriptionActivationService.get_plan_price_paise(plan_code)
+    amount = await SubscriptionActivationService.get_plan_price_paise(db, plan_code)
 
     # ── 2. Check credentials ─────────────────────────────────────────────────
     _check_credentials()

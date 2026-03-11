@@ -32,36 +32,7 @@ from app.database.subscription_repo import SubscriptionRepository
 class SubscriptionService:
     """Service for subscription business logic."""
 
-    @staticmethod
-    def _parse_license_json_fields(license_assignment: LicenseAssignment) -> tuple[dict, dict]:
-        """
-        Parse JSON fields from LicenseAssignment into dictionaries.
 
-        LicenseAssignment stores limits and usage_counters as JSON strings.
-        We parse them to dictionaries and cache the result to avoid re-parsing.
-
-        Args:
-            license_assignment: The LicenseAssignment model
-
-        Returns:
-            Tuple of (limits_dict, usage_dict)
-        """
-        # Check if already parsed and cached
-        limits = getattr(license_assignment, "_limits_dict", None)
-        if limits is None:
-            limits = json.loads(license_assignment.limits) if license_assignment.limits else {}
-            license_assignment._limits_dict = limits  # Cache for performance
-
-        usage = getattr(license_assignment, "_usage_dict", None)
-        if usage is None:
-            usage = (
-                json.loads(license_assignment.usage_counters)
-                if license_assignment.usage_counters
-                else {}
-            )
-            license_assignment._usage_dict = usage  # Cache for performance
-
-        return limits, usage
 
     @staticmethod
     def _is_expired(period_end: Optional[datetime], now: datetime) -> bool:
@@ -121,22 +92,20 @@ class SubscriptionService:
 
     @staticmethod
     def _build_quotas(
-        limits: dict,
-        usage: dict,
+        license: LicenseAssignment,
         product_count: int,
     ) -> dict:
         """
-        Build quota information dictionary from limits, usage, and product count.
+        Build quota information directly from LicenseAssignment native integer columns.
 
         Quotas track resource usage:
-        - aiCredits: AI processing credits (included in plan, can be purchased)
+        - aiCredits: AI processing credits
         - publicViews: Public product view count
-        - products: Number of products created (counted separately)
+        - products: Number of products created
         - galleries: Number of galleries created
 
         Args:
-            limits: Dictionary of quota limits from LicenseAssignment
-            usage: Dictionary of current usage from LicenseAssignment
+            license: The LicenseAssignment model
             product_count: Number of products (counted from database)
 
         Returns:
@@ -144,44 +113,56 @@ class SubscriptionService:
         """
         quotas = {
             "aiCredits": QuotaUsage(
-                included=limits.get("max_ai_credits_month", 5),  # Default: 5 for free plan
+                included=license.limit_max_ai_credits,
                 purchased=0,  # Not implemented yet
-                used=usage.get("ai_credits", 0),
+                used=license.usage_ai_credits,
             ).model_dump(),
             "publicViews": QuotaUsage(
-                included=limits.get("max_public_views", 1000),  # Default: 1000 for free plan
+                included=license.limit_max_public_views,
                 purchased=0,  # Not implemented yet
-                used=usage.get("public_views", 0),
+                used=license.usage_public_views,
             ).model_dump(),
             "products": QuotaInfo(
                 used=product_count,
-                limit=limits.get("max_products"),  # Can be None (unlimited)
+                limit=license.limit_max_products if license.limit_max_products > 0 else None,
             ).model_dump(),
             "galleries": QuotaInfo(
-                used=usage.get("galleries", 0),
-                limit=limits.get("max_galleries"),  # Can be None (unlimited)
+                used=license.usage_galleries,
+                limit=license.limit_max_galleries if license.limit_max_galleries > 0 else None,
             ).model_dump(),
         }
 
         return quotas
 
     @staticmethod
-    def _get_free_plan_defaults() -> SubscriptionMe:
+    async def _get_free_plan_defaults(db: AsyncSession) -> SubscriptionMe:
         """
-        Get default free plan subscription information.
+        Get default free plan subscription information from the database.
 
         This is returned when a user has no active license.
         All new users start with free plan until they subscribe to a paid plan.
+        
+        Args:
+            db: Database session
 
         Returns:
             SubscriptionMe with free plan defaults
         """
+        from app.database.subscription_repo import SubscriptionRepository
+        # We don't really rely on the plan object anymore since quotas was dropped.
+        # We manually provide the baseline here, or could fetch from tbl_plan_features later.
+        # For performance, returning hardcoded defaults for users purely without any license row.
+        
         return SubscriptionMe(
             plan="free",
             trial=TrialInfo(active=False, daysRemaining=0, startedAt=None),
             quotas={
-                "aiCredits": QuotaUsage(included=5, purchased=0, used=0).model_dump(),
-                "publicViews": QuotaUsage(included=1000, purchased=0, used=0).model_dump(),
+                "aiCredits": QuotaUsage(
+                    included=5, purchased=0, used=0
+                ).model_dump(),
+                "publicViews": QuotaUsage(
+                    included=1000, purchased=0, used=0
+                ).model_dump(),
                 "products": QuotaInfo(used=0, limit=2).model_dump(),
                 "galleries": QuotaInfo(used=0, limit=0).model_dump(),
             },
@@ -219,7 +200,7 @@ class SubscriptionService:
         # Step 2: If no license, return free plan defaults
         # This happens for new users who haven't subscribed yet
         if not license_assignment:
-            return SubscriptionService._get_free_plan_defaults()
+            return await SubscriptionService._get_free_plan_defaults(db)
 
         # Step 3: Fetch subscription and plan data from database
         subscription_plan = await SubscriptionRepository.get_subscription_and_plan(
@@ -244,19 +225,16 @@ class SubscriptionService:
         # the background job will clean up the DB row on its next run.
         now = datetime.now(timezone.utc)
         if SubscriptionService._is_expired(subscription.current_period_end, now):
-            return SubscriptionService._get_free_plan_defaults()
+            return await SubscriptionService._get_free_plan_defaults(db)
 
         # Step 5: Calculate trial information
         trial_info = SubscriptionService._calculate_trial_info(subscription)
 
-        # Step 6: Parse license JSON fields (limits and usage counters)
-        limits, usage = SubscriptionService._parse_license_json_fields(license_assignment)
-
-        # Step 7: Count user's products (products are counted separately)
+        # Step 6 & 7: Count user's products
         product_count = await SubscriptionRepository.get_user_product_count(db, user_id)
 
-        # Step 8: Build quota information
-        quotas = SubscriptionService._build_quotas(limits, usage, product_count)
+        # Step 8: Build quota information directly from the license assignment columns
+        quotas = SubscriptionService._build_quotas(license_assignment, product_count)
 
         # Step 9: Build and return complete subscription response
         return SubscriptionMe(

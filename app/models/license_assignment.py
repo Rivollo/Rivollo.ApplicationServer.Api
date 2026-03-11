@@ -8,7 +8,8 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Enum, ForeignKey, Index, Text, UniqueConstraint, text
+
+from sqlalchemy import Enum, ForeignKey, Index, Text, UniqueConstraint, text, Integer
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TIMESTAMP
@@ -52,12 +53,21 @@ class LicenseAssignment(UUIDMixin, CreatedAtMixin, AuditMixin, Base):
         nullable=False,
         server_default=text("'active'"),
     )
-    # limits and usage_counters are TEXT in database, storing JSON as string
-    limits: Mapped[Optional[str]] = mapped_column(Text)
-    usage_counters: Mapped[Optional[str]] = mapped_column(Text)
+    # New Strict Integer columns for Limits
+    limit_max_products: Mapped[int] = mapped_column(default=0)
+    limit_max_ai_credits: Mapped[int] = mapped_column(default=0)
+    limit_max_public_views: Mapped[int] = mapped_column(default=0)
+    limit_max_galleries: Mapped[int] = mapped_column(default=0)
 
-    # Property for backward compatibility
-    @property
+    # New Strict Integer columns for Usage
+    usage_products: Mapped[int] = mapped_column(default=0)
+    usage_ai_credits: Mapped[int] = mapped_column(default=0)
+    usage_public_views: Mapped[int] = mapped_column(default=0)
+    usage_galleries: Mapped[int] = mapped_column(default=0)
+
+    # The legacy JSON string proxy properties have been successfully removed.
+
+    # ──────────────────────────────────────────────────────────────────────────    @property
     def updated_at(self) -> Optional[datetime]:
         return self.updated_date
 

@@ -27,10 +27,6 @@ class LicensingService:
             .limit(1)
         )
         license_obj = result.scalar_one_or_none()
-        # Parse TEXT fields to dicts for backward compatibility
-        if license_obj:
-            license_obj._limits_dict = json.loads(license_obj.limits) if license_obj.limits else {}
-            license_obj._usage_dict = json.loads(license_obj.usage_counters) if license_obj.usage_counters else {}
         return license_obj
 
     @staticmethod
@@ -51,29 +47,47 @@ class LicensingService:
             # No active license - deny
             return False, None
 
-        limits = getattr(license, "_limits_dict", None)
-        if limits is None:
-            limits = json.loads(license.limits) if license.limits else {}
-            license._limits_dict = limits
+        # Map quota_key to internal column names
+        # Default mapping logic based on legacy keys:
+        if quota_key == "max_products":
+            limit_col = "limit_max_products"
+            usage_col = "usage_products"
+        elif quota_key == "ai_credits" or quota_key == "max_ai_credits_month":
+            limit_col = "limit_max_ai_credits"
+            usage_col = "usage_ai_credits"
+        elif quota_key == "public_views" or quota_key == "max_public_views":
+            limit_col = "limit_max_public_views"
+            usage_col = "usage_public_views"
+        elif quota_key == "galleries" or quota_key == "max_galleries":
+            limit_col = "limit_max_galleries"
+            usage_col = "usage_galleries"
+        else:
+            # Unknown quota - fail safe by allowing or we could block
+            return True, None
 
-        usage = getattr(license, "_usage_dict", None)
-        if usage is None:
-            usage = json.loads(license.usage_counters) if license.usage_counters else {}
-            license._usage_dict = usage
+        # Dynamically fetch limit and usage from native integer columns
+        limit_val = getattr(license, limit_col, 0)
+        current_usage = getattr(license, usage_col, 0)
+        
+        # Build limits dict for legacy response struct, if API still expects it
+        limits_info = {
+            "max_products": license.limit_max_products,
+            "max_ai_credits_month": license.limit_max_ai_credits,
+            "max_public_views": license.limit_max_public_views,
+            "max_galleries": license.limit_max_galleries,
+        }
 
-        # Get limit for this quota
-        limit = limits.get(quota_key)
-        if limit is None:
-            # No limit set - allow
-            return True, limits
+        # 0 or None means unlimited in this context if that's the business rule?
+        # Actually in our activation service, 'enterprise' plan has hardcoded None for unlimited.
+        # But wait, integer columns with default=0 means 0 is the limit.
+        if limit_val is None:
+            return True, limits_info
 
-        current_usage = usage.get(quota_key, 0)
-
-        if current_usage + increment > limit:
+        if current_usage + increment > limit_val:
             # Quota exceeded
-            return False, {"limit": limit, "current": current_usage, "quota": quota_key}
+            return False, {"limit": limit_val, "current": current_usage, "quota": quota_key}
 
-        return True, limits
+        return True, limits_info
 
     @staticmethod
     async def increment_usage(
@@ -88,15 +102,14 @@ class LicensingService:
         if not license:
             return False
 
-        usage = getattr(license, "_usage_dict", None)
-        if usage is None:
-            usage = json.loads(license.usage_counters) if license.usage_counters else {}
-        else:
-            # Create shallow copy to avoid mutating cached dict without serialization
-            usage = dict(usage)
-        usage[quota_key] = usage.get(quota_key, 0) + increment
-        license.usage_counters = json.dumps(usage)
-        license._usage_dict = usage
+        if quota_key == "max_products" or quota_key == "products":
+            license.usage_products += increment
+        elif quota_key == "ai_credits" or quota_key == "max_ai_credits_month":
+            license.usage_ai_credits += increment
+        elif quota_key == "public_views" or quota_key == "max_public_views":
+            license.usage_public_views += increment
+        elif quota_key == "galleries" or quota_key == "max_galleries":
+            license.usage_galleries += increment
 
         await db.commit()
         return True
@@ -161,8 +174,14 @@ class LicensingService:
             subscription_id=subscription.id,
             user_id=user.id,
             status="active",
-            limits=json.dumps(quotas_dict),  # Serialize to JSON string
-            usage_counters=json.dumps({}),  # Serialize to JSON string
+            limit_max_products=int(quotas_dict.get("max_products", 2) or 0),
+            limit_max_ai_credits=int(quotas_dict.get("max_ai_credits_month", 5) or 0),
+            limit_max_public_views=int(quotas_dict.get("max_public_views", 1000) or 0),
+            limit_max_galleries=int(quotas_dict.get("max_galleries", 0) or 0),
+            usage_products=0,
+            usage_ai_credits=0,
+            usage_public_views=0,
+            usage_galleries=0,
         )
         db.add(license)
         await db.commit()

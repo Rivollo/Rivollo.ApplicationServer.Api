@@ -12,7 +12,9 @@ Architecture:
 
 from fastapi import APIRouter, Depends
 
+import json
 from app.api.deps import CurrentUser, DB, OptionalUser
+from app.database.subscription_repo import SubscriptionRepository
 from app.schemas.subscriptions import Plan as PlanSchema, PlanFeature
 from app.services.subscription_service import SubscriptionService
 from app.utils.envelopes import api_success
@@ -46,56 +48,44 @@ async def get_my_subscription(
 
 @router.get("/subscriptions/plans", response_model=dict)
 async def list_plans(
+    db: DB,
     current_user: OptionalUser = None,
 ):
-    """List all available subscription plans (public endpoint)."""
-    plans_data = [
-        PlanSchema(
-            name="Free",
-            priceINR=0,
-            description="Perfect for trying out Rivollo",
-            features=[
-                PlanFeature(label="2 product listings", available=True),
-                PlanFeature(label="5 AI credits per month", available=True),
-                PlanFeature(label="1,000 public views", available=True),
-                PlanFeature(label="Basic analytics", available=True),
-                PlanFeature(label="Galleries", available=False),
-                PlanFeature(label="Advanced analytics", available=False),
-                PlanFeature(label="Custom branding", available=False),
-            ],
-            featured=False,
-        ),
-        PlanSchema(
-            name="Pro",
-            priceINR=1999,
-            description="Scale with galleries, credits, views, and advanced analytics",
-            features=[
-                PlanFeature(label="50 product listings", available=True),
-                PlanFeature(label="50 AI credits per month", available=True),
-                PlanFeature(label="25,000 public views", available=True),
-                PlanFeature(label="10 galleries", available=True),
-                PlanFeature(label="Advanced analytics", available=True),
-                PlanFeature(label="Priority support", available=True),
-                PlanFeature(label="Custom branding", available=True),
-            ],
-            featured=True,
-        ),
-        PlanSchema(
-            name="Enterprise",
-            priceINR=0,
-            description="Unlimited everything with dedicated support. Contact sales for pricing.",
-            features=[
-                PlanFeature(label="Unlimited products", available=True),
-                PlanFeature(label="Unlimited AI credits", available=True),
-                PlanFeature(label="Unlimited public views", available=True),
-                PlanFeature(label="Unlimited galleries", available=True),
-                PlanFeature(label="Advanced analytics", available=True),
-                PlanFeature(label="Custom branding", available=True),
-                PlanFeature(label="Dedicated account manager", available=True),
-                PlanFeature(label="SLA guarantee", available=True),
-            ],
-            featured=False,
-        ),
-    ]
+    """List all available subscription plans."""
+    
+    # ── Fetch plans and features from DB ──────────────────────────────────────
+    db_plans = await SubscriptionRepository.get_all_plans(db)
+    
+    plans_data = []
+
+    # ── Map Normalized DB plans to output schemas ─────────────────────────────
+    for p in db_plans:
+        # Build the features list based on the junction table (tbl_plan_features)
+        features_list = []
+        for pf in getattr(p, "plan_features", []):
+            if pf.feature:
+                # Format label dynamically based on explicit limits or boolean availability
+                label = pf.feature.name
+                if pf.limit_value is not None:
+                    # Example format: "50 product listings" instead of just "Product listings"
+                    label = f"{pf.limit_value:,} {label.lower()}"
+                    
+                features_list.append(
+                    PlanFeature(
+                        label=label,
+                        available=pf.is_available
+                    )
+                )
+
+        # Append to response list using pure database values
+        plans_data.append(
+            PlanSchema(
+                name=p.name,
+                priceINR=getattr(p, "price_inr", 0),
+                description=getattr(p, "description", None) or f"{p.name} Plan",
+                features=features_list,
+                featured=getattr(p, "is_featured", False),
+            )
+        )
 
     return api_success([p.model_dump() for p in plans_data])

@@ -35,7 +35,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.license_assignment import LicenseAssignment
-from app.models.plan import Plan
+from sqlalchemy.orm import selectinload
+
+from app.models.license_assignment import LicenseAssignment
+from app.models.plan import Plan, PlanFeature
 from app.models.subscription import Subscription
 from app.models.subscription_enums import LicenseStatus, SubscriptionStatus
 
@@ -45,34 +48,6 @@ logger = logging.getLogger(__name__)
 # TESTING PERIOD — change to timedelta(days=30) for production
 # ─────────────────────────────────────────────────────────────────
 SUBSCRIPTION_PERIOD = timedelta(days=10)
-
-
-# ─────────────────────────────────────────────────────────────────
-# Plan limits — server-side source of truth for quota values
-# These are the limits that get written to tbl_license_assignments.limits
-# ─────────────────────────────────────────────────────────────────
-PLAN_LIMITS: dict[str, dict] = {
-    "pro": {
-        "max_products": 50,
-        "max_ai_credits_month": 50,
-        "max_public_views": 25000,
-        "max_galleries": 10,
-    },
-    "enterprise": {
-        # None = unlimited (frontend should show "Unlimited")
-        "max_products": None,
-        "max_ai_credits_month": None,
-        "max_public_views": None,
-        "max_galleries": None,
-    },
-}
-
-# Plan price in paise — server-side source of truth (never trust frontend amount).
-# Only "pro" is listed here because "enterprise" is a contact-sales plan
-# and does NOT go through the self-serve Razorpay payment flow.
-PLAN_PRICES_PAISE: dict[str, int] = {
-    "pro": 199900,  # ₹1,999/month
-}
 
 
 class SubscriptionActivationService:
@@ -109,14 +84,12 @@ class SubscriptionActivationService:
             HTTPException 400: if plan_code is not recognised
         """
         # ── 1. Validate plan_code and load plan from DB ──────────────────────
-        plan = await SubscriptionActivationService._get_plan(db, plan_code)
+        plan, limits = await SubscriptionActivationService._get_plan_and_limits(db, plan_code)
 
-        # ── 2. Get limits for this plan ──────────────────────────────────────
-        limits = PLAN_LIMITS.get(plan_code)
-        if limits is None:
+        if not limits:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"No limits configured for plan '{plan_code}'.",
+                detail=f"No features configured for plan '{plan_code}'.",
             )
 
         now = datetime.now(timezone.utc)
@@ -193,43 +166,38 @@ class SubscriptionActivationService:
     # ── Private helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    async def _get_plan(db: AsyncSession, plan_code: str) -> Plan:
-        """Fetch a plan by code from the database.
-
-        Validation strategy:
-            1. Validate plan_code against PLAN_LIMITS (server-side source of truth).
-               This prevents any unknown plan from ever being activated.
-            2. Query tbl_mstr_plans for the matching row.
-            3. If no row exists yet (unseeded DB), create a transient Plan object
-               so activation can still proceed without crashing.
+    async def _get_plan_and_limits(db: AsyncSession, plan_code: str) -> tuple[Plan, dict]:
+        """Fetch a plan by code from the database with its features.
+        
+        This dynamically builds the limits dictionary used for license assignments
+        based on the normalized tbl_plan_features table, instead of legacy JSON.
         """
-        # ── Step 1: validate against our authoritative plan list ─────────────
-        valid_plans = list(PLAN_LIMITS.keys())
-        if plan_code not in valid_plans:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Plan '{plan_code}' not found. Valid values: {', '.join(valid_plans)}.",
+        # ── Step 1: try to fetch from DB ─────────────────────────────────────
+        result = await db.execute(
+            select(Plan)
+            .where(Plan.code == plan_code, Plan.isactive == True)
+            .options(
+                selectinload(Plan.plan_features).selectinload(PlanFeature.feature)
             )
-
-        # ── Step 2: try to fetch from DB ─────────────────────────────────────
-        result = await db.execute(select(Plan).where(Plan.code == plan_code))
+        )
         plan = result.scalar_one_or_none()
 
-        if plan is not None:
-            return plan
+        if plan is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Plan '{plan_code}' not found or is no longer active.",
+            )
 
-        # ── Step 3: DB row missing (unseeded) — create + persist it ──────────
-        logger.warning(
-            "Plan '%s' not found in tbl_mstr_plans — creating it now.", plan_code
-        )
-        plan = Plan(
-            code=plan_code,
-            name=plan_code.capitalize(),
-        )
-        db.add(plan)
-        await db.flush()   # assigns plan.id without committing the outer txn
-        await db.refresh(plan)
-        return plan
+        # ── Step 2: Dynamically construct limits dictionary from features ──────
+        limits = {}
+        for pf in plan.plan_features:
+            if pf.feature:
+                # We extract the integer limit value. If it's a boolean feature
+                # without a limit, we won't put it in the limits dict for backward capability
+                if pf.limit_value is not None:
+                     limits[pf.feature.code] = pf.limit_value
+                
+        return plan, limits
 
     @staticmethod
     async def _get_user_subscription(
@@ -255,11 +223,9 @@ class SubscriptionActivationService:
     ) -> LicenseAssignment:
         """Create or update the license assignment for this subscription.
 
-        For a new subscription → create new license row, reset usage_counters to {}
-        For an extended subscription → update limits, keep existing usage_counters
+        For a new subscription → create new license row, zero usage columns
+        For an extended subscription → update limit columns, keep existing usage
         """
-        limits_json = json.dumps(limits)
-
         # Check if a license already exists for this (subscription_id, user_id)
         existing_license_result = await db.execute(
             select(LicenseAssignment).where(
@@ -272,22 +238,25 @@ class SubscriptionActivationService:
         if existing_license is not None:
             # ── UPDATE: refresh limits but keep existing usage ───────────────
             existing_license.status = LicenseStatus.ACTIVE
-            existing_license.limits = limits_json
-            # Don't reset usage_counters — user keeps their usage history
+            existing_license.limit_max_products = limits.get("max_products", 0)
+            existing_license.limit_max_ai_credits = limits.get("max_ai_credits_month", 0)
+            existing_license.limit_max_public_views = limits.get("max_public_views", 0)
+            existing_license.limit_max_galleries = limits.get("max_galleries", 0)
             license_assignment = existing_license
         else:
             # ── CREATE: fresh license with zeroed usage ──────────────────────
-            empty_usage = json.dumps({
-                "ai_credits": 0,
-                "public_views": 0,
-                "galleries": 0,
-            })
             license_assignment = LicenseAssignment(
                 subscription_id=subscription.id,
                 user_id=user_id,
                 status=LicenseStatus.ACTIVE,
-                limits=limits_json,
-                usage_counters=empty_usage,
+                limit_max_products=limits.get("max_products", 0),
+                limit_max_ai_credits=limits.get("max_ai_credits_month", 0),
+                limit_max_public_views=limits.get("max_public_views", 0),
+                limit_max_galleries=limits.get("max_galleries", 0),
+                usage_products=0,
+                usage_ai_credits=0,
+                usage_public_views=0,
+                usage_galleries=0,
             )
             db.add(license_assignment)
 
@@ -295,24 +264,30 @@ class SubscriptionActivationService:
         return license_assignment
 
     @staticmethod
-    def get_plan_price_paise(plan_code: str) -> int:
-        """Return the server-side price for a plan in paise.
+    async def get_plan_price_paise(db: AsyncSession, plan_code: str) -> int:
+        """Return the server-side price for a plan in paise dynamically from the DB.
 
         This is the authoritative source of truth — never trust frontend amounts.
 
         Args:
-            plan_code: "pro" or "enterprise"
+            db: Database session
+            plan_code: Plan code to lookup
 
         Returns:
             Amount in paise
 
         Raises:
-            HTTPException 400: if plan_code is not recognised
+            HTTPException 400: if plan code is not recognized or not active
         """
-        price = PLAN_PRICES_PAISE.get(plan_code)
-        if price is None:
+        result = await db.execute(
+            select(Plan).where(Plan.code == plan_code, Plan.isactive == True)
+        )
+        plan = result.scalar_one_or_none()
+        
+        if plan is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unknown plan '{plan_code}'. Valid values: {list(PLAN_PRICES_PAISE.keys())}.",
+                detail=f"Unknown or inactive plan '{plan_code}'.",
             )
-        return price
+            
+        return getattr(plan, "price_inr", 0) * 100
