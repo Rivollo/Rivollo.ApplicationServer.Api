@@ -62,6 +62,9 @@ class Plan(UUIDMixin, AuditMixin, Base):
     price_inr: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     is_featured: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     isactive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    price_inr_yearly: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    razorpay_plan_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    razorpay_plan_id_yearly: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # Property for backward compatibility
     @property

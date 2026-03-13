@@ -66,10 +66,10 @@ class Payment(Base):
         PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
 
-    # PROMO CODE USED
+    # Legacy promo column — FK removed because promo is now handled by Razorpay Offers.
+    # Column kept so existing rows with promo_id values are preserved.
     promo_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PGUUID(as_uuid=True),
-        ForeignKey("tbl_promo_codes.id", ondelete="SET NULL"),
         nullable=True,
     )
 
@@ -95,6 +95,9 @@ class Payment(Base):
         String(255), nullable=True
     )
     razorpay_signature: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    razorpay_subscription_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
 
     # Payment details
     amount: Mapped[int] = mapped_column(Integer, nullable=False)  # in paise
@@ -105,14 +108,7 @@ class Payment(Base):
         String(50), nullable=False  # "pro" | "enterprise"
     )
 
-        # ✅ PROMO CODE USED
-    promo_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("tbl_promo_codes.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-
-    # ✅ DISCOUNT APPLIED
+    # DISCOUNT APPLIED
     discount_amount: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -138,5 +134,3 @@ class Payment(Base):
     # Relationships
     user: Mapped["User"] = relationship("User")
     subscription: Mapped[Optional["Subscription"]] = relationship("Subscription")
-
-    promo: Mapped[Optional["PromoCode"]] = relationship("PromoCode")

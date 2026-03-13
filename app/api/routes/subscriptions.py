@@ -12,10 +12,9 @@ Architecture:
 
 from fastapi import APIRouter, Depends
 
-import json
 from app.api.deps import CurrentUser, DB, OptionalUser
 from app.database.subscription_repo import SubscriptionRepository
-from app.schemas.subscriptions import Plan as PlanSchema, PlanFeature
+from app.schemas.subscriptions import Plan as PlanSchema, PlanFeature, PlanPricing
 from app.services.subscription_service import SubscriptionService
 from app.utils.envelopes import api_success
 
@@ -77,15 +76,34 @@ async def list_plans(
                     )
                 )
 
+        # Build pricing options based on configured Razorpay plan IDs
+        monthly_price = getattr(p, "price_inr", 0)
+        yearly_price = getattr(p, "price_inr_yearly", 0)
+        has_monthly = bool(getattr(p, "razorpay_plan_id", None))
+        has_yearly = bool(getattr(p, "razorpay_plan_id_yearly", None))
+
+        pricing = []
+        if has_monthly or monthly_price > 0:
+            pricing.append(
+                PlanPricing(interval="monthly", priceINR=monthly_price, available=has_monthly)
+            )
+        if has_yearly or yearly_price > 0:
+            pricing.append(
+                PlanPricing(interval="yearly", priceINR=yearly_price, available=has_yearly)
+            )
+
         # Append to response list using pure database values
         plans_data.append(
             PlanSchema(
+                code=p.code,
                 name=p.name,
-                priceINR=getattr(p, "price_inr", 0),
+                priceINR=monthly_price,
+                priceINRYearly=yearly_price,
+                pricing=pricing,
                 description=getattr(p, "description", None) or f"{p.name} Plan",
                 features=features_list,
                 featured=getattr(p, "is_featured", False),
             )
         )
 
-    return api_success([p.model_dump() for p in plans_data])
+    return api_success([p.model_dump(by_alias=True) for p in plans_data])

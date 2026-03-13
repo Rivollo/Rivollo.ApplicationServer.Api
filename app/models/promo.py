@@ -77,6 +77,11 @@ class PromoCode(Base):
         nullable=False,
     )
 
+    razorpay_offer_id = Column(
+        String(255),
+        nullable=True,
+    )
+
     created_date = Column(
         DateTime(timezone=True),
         server_default=func.now(),

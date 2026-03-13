@@ -228,3 +228,6 @@ SUBSCRIPTION_MODELS_SPLIT.md
 
 # Local DB
 dev.db
+
+# AI Agent 
+.claude

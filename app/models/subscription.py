@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Enum, ForeignKey, Index, Integer, Text, text
+from sqlalchemy import Enum, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, column_property, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -53,6 +53,14 @@ class Subscription(UUIDMixin, Base):
     # These columns exist in the database as nullable timestamps
     current_period_start: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
     current_period_end: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
+
+    # Razorpay subscription tracking
+    razorpay_subscription_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
+    razorpay_customer_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
 
     # Audit fields that exist in the database
     created_by: Mapped[Optional[uuid.UUID]] = mapped_column(PGUUID(as_uuid=True))
