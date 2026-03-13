@@ -57,6 +57,7 @@ class Settings(BaseSettings):
 	WHATSAPP_API_VERSION: str = Field(default="v18.0")
 
 	# Razorpay Payment Gateway
+	RAZORPAY_BASE_URL: str = Field(default="https://api.razorpay.com/v1")
 	RAZORPAY_KEY_ID: str = Field(default="")
 	RAZORPAY_KEY_SECRET: str = Field(default="")
 	# Webhook secret — must match the value set in Razorpay Dashboard → Settings → Webhooks

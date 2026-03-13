@@ -68,7 +68,7 @@ class PromoRepository:
         *,
         promo_id: uuid.UUID,
         user_id: uuid.UUID,
-        payment_id: uuid.UUID,
+        payment_id: uuid.UUID | None = None,
         created_by: uuid.UUID | None = None,
     ) -> PromoUsage:
 

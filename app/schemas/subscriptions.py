@@ -71,11 +71,25 @@ class PlanFeature(BaseModel):
     available: bool
 
 
+class PlanPricing(BaseModel):
+    """Pricing details for a specific billing interval."""
+
+    interval: str = Field(..., description="Billing interval: 'monthly' or 'yearly'.")
+    price_inr: int = Field(..., ge=0, alias="priceINR")
+    available: bool = Field(..., description="True if this interval is configured for purchase.")
+
+    class Config:
+        populate_by_name = True
+
+
 class Plan(BaseModel):
     """Subscription plan details."""
 
+    code: str = Field(..., description="Plan code: free, pro, enterprise.")
     name: str
-    price_inr: int = Field(..., ge=0, alias="priceINR")
+    price_inr: int = Field(..., ge=0, alias="priceINR", description="Monthly price (kept for backward compatibility).")
+    price_inr_yearly: int = Field(0, ge=0, alias="priceINRYearly", description="Yearly price.")
+    pricing: list[PlanPricing] = Field(default_factory=list, description="Available billing intervals with pricing.")
     description: str = Field(..., max_length=500)
     features: list[PlanFeature]
     featured: bool = False
