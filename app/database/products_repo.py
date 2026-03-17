@@ -22,7 +22,7 @@ class ProductRepository:
             .where(
                 Product.created_by == user_id,
                 Product.deleted_at.is_(None),
-                Product.status != ProductStatus.ARCHIVED,   # ← exclude disabled/archived
+                # Product.status != ProductStatus.ARCHIVED,   # ← exclude disabled/archived
             )
             .order_by(func.coalesce(Product.updated_date, Product.created_date).desc())
         )
