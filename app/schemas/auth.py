@@ -87,16 +87,3 @@ class ResetPasswordRequest(BaseModel):
             raise ValueError("Passwords do not match")
         return self
 
-    @field_validator("avatar_url")
-    @classmethod
-    def validate_avatar_size(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        # Allow regular URLs (Google OAuth avatar)
-        if v.startswith("http://") or v.startswith("https://"):
-            return v
-        # For base64 data URIs, enforce 2MB limit
-        max_bytes = 2 * 1024 * 1024  # 2MB
-        if len(v.encode("utf-8")) > max_bytes:
-            raise ValueError("Avatar image must be smaller than 2MB")
-        return v
