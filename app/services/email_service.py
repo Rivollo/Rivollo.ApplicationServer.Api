@@ -502,3 +502,4 @@ def _welcome_template(name: str, frontend_url: str) -> str:
 
 </body>
 </html>"""
+
