@@ -6,7 +6,7 @@ from app.utils.envelopes import api_success
 
 router = APIRouter(tags=["users"])
 
-
+# Note: User management endpoints (get/update current user) are protected and require authentication.
 @router.get("/users/me", response_model=dict)
 async def get_current_user_endpoint(current_user: CurrentUser):
 	user_data = UserResponse(
