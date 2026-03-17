@@ -1342,8 +1342,6 @@ async def update_product_details(
     db: DB,
     name: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
-    price: Optional[float] = Form(None),
-    currency_type: Optional[int] = Form(None),
     background_type: Optional[str] = Form(None),
     background_value: Optional[str] = Form(None),
     backgroundid: Optional[int] = Form(None),
@@ -1377,24 +1375,6 @@ async def update_product_details(
 
         if description is not None:
             product.description = description
-
-        if price is not None:
-            # Store price as integer (BigInteger in database)
-            product.price = int(price) if price else None
-
-        if currency_type is not None:
-            # Verify currency type exists
-            currency_result = await db.execute(
-                select(CurrencyType).where(CurrencyType.id == currency_type)
-            )
-            currency = currency_result.scalar_one_or_none()
-            if not currency:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Currency type with ID {currency_type} not found.",
-                )
-            # Store currency type ID as integer
-            product.currency_type = currency_type
 
         # Handle background with priority system
         background_blob_url = None
@@ -1607,8 +1587,6 @@ async def update_product_details(
             "id": str(product.id),
             "name": product.name,
             "description": product.description,
-            "price": float(product.price) if product.price else None,  # Convert integer to float
-            "currency_type": product.currency_type,
             "background_type": product.background_type,  # Background ID as integer
             "backgroundid": product.background_type,  # Same as background_type for backward compatibility
             "status": product.status.value,
