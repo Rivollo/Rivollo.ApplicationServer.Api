@@ -10,13 +10,17 @@ from sqlalchemy.exc import IntegrityError
 from app.api.deps import DB
 from app.schemas.auth import (
     AuthResponse,
+    ForgotPasswordRequest,
     GoogleAuthRequest,
     LoginRequest,
+    ResetPasswordRequest,
     SignupRequest,
     UserResponse,
+    VerifyOTPRequest,
 )
 from app.services.activity_service import ActivityService
 from app.services.auth_service import AuthService
+from app.services.email_service import EmailService
 from app.utils.envelopes import api_success
 from app.core.config import settings
 
@@ -129,6 +133,65 @@ async def login(
             token=token,
         ).model_dump()
     )
+
+
+@router.post("/auth/forgot-password", response_model=dict)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    db: DB,
+):
+    """Initiate a password reset by sending a 6-digit OTP to the user's email."""
+    user = await AuthService.get_user_by_email(db, payload.email)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    otp = await AuthService.create_password_reset_otp(db, payload.email)
+    await EmailService.send_otp_email(
+        to_email=user.email,
+        name=user.name or user.email,
+        otp=otp,
+        expires_minutes=settings.PASSWORD_RESET_OTP_EXPIRES_MINUTES,
+    )
+    return api_success({"message": "OTP sent to your email", "expires_in_minutes": settings.PASSWORD_RESET_OTP_EXPIRES_MINUTES})
+
+
+@router.post("/auth/verify-otp", response_model=dict)
+async def verify_otp(
+    payload: VerifyOTPRequest,
+    db: DB,
+):
+    """Verify the OTP and return a secure reset token to use in reset-password."""
+    reset_token = await AuthService.verify_otp(db, payload.email, payload.otp)
+    if reset_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OTP",
+        )
+    return api_success({"reset_token": reset_token, "expires_in_minutes": 15})
+
+
+@router.post("/auth/reset-password", response_model=dict)
+async def reset_password(
+    payload: ResetPasswordRequest,
+    db: DB,
+):
+    """Reset password using the verified reset token."""
+    user = await AuthService.reset_password(db, payload.token, payload.new_password)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token",
+        )
+
+    await EmailService.send_password_reset_success_email(
+        to_email=user.email,
+        name=user.name or user.email,
+    )
+    return api_success({"message": "Password reset successfully"})
 
 
 @router.post("/auth/google", response_model=dict)

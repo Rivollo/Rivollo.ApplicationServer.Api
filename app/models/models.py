@@ -468,7 +468,7 @@ class Job(UUIDMixin, AuditMixin, Base):
     product: Mapped[Product] = relationship("Product", back_populates="jobs")
 
 
-class PublishLink(UUIDMixin, CreatedAtMixin, Base):
+class PublishLink(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "tbl_publish_links"
     __table_args__ = (
         Index(
@@ -485,9 +485,9 @@ class PublishLink(UUIDMixin, CreatedAtMixin, Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     expires_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
     password_hash: Mapped[Optional[str]] = mapped_column(Text)
-    iframe_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    view_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
-    last_viewed_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
+    # iframe_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    # view_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    # last_viewed_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
 
     product: Mapped[Product] = relationship("Product", back_populates="publish_links")
 
