@@ -14,6 +14,7 @@ async def get_current_user_endpoint(current_user: CurrentUser):
 		email=current_user.email,
 		name=current_user.name,
 		avatar_url=current_user.avatar_url,
+		bio=current_user.bio,
 		created_at=current_user.created_at,
 		updated_at=current_user.updated_at,
 	)
@@ -30,6 +31,9 @@ async def update_current_user_endpoint(
 	if payload.name is not None and payload.name != current_user.name:
 		current_user.name = payload.name
 		updated = True
+	if payload.bio is not None and payload.bio != current_user.bio:
+		current_user.bio = payload.bio
+		updated = True
 	if payload.avatar_url is not None and payload.avatar_url != current_user.avatar_url:
 		current_user.avatar_url = payload.avatar_url
 		updated = True
@@ -43,6 +47,7 @@ async def update_current_user_endpoint(
 		email=current_user.email,
 		name=current_user.name,
 		avatar_url=current_user.avatar_url,
+		bio=current_user.bio,
 		created_at=current_user.created_at,
 		updated_at=current_user.updated_at,
 	)
