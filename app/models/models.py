@@ -151,6 +151,7 @@ class User(UUIDMixin, CreatedAtMixin, AuditMixin, Base):
     password_hash: Mapped[Optional[str]] = mapped_column(Text)
     name: Mapped[Optional[str]] = mapped_column(Text)
     avatar_url: Mapped[Optional[str]] = mapped_column(Text)
+    bio: Mapped[Optional[str]] = mapped_column(Text)
 
     # Virtual column - users table doesn't have deleted_at in database
     deleted_at = column_property(literal_column("NULL::timestamptz"))
