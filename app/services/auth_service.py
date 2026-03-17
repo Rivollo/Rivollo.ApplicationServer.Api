@@ -1,14 +1,16 @@
 """Authentication service for user signup, login, and OAuth."""
 
+import random
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import create_access_token, hash_password, verify_password
-from app.models.models import AuthIdentity, AuthProvider, User
+from app.core.config import settings
+from app.core.security import create_access_token, generate_token, hash_password, verify_password
+from app.models.models import AuthIdentity, AuthProvider, PasswordReset, User
 from app.services.licensing_service import LicensingService
 
 
@@ -142,3 +144,92 @@ class AuthService:
             data={"sub": str(user_id)},
             expires_delta=expires_delta,
         )
+
+    @staticmethod
+    async def create_password_reset_otp(db: AsyncSession, email: str) -> Optional[str]:
+        """Generate a 6-digit OTP for password reset and store it.
+
+        Returns the OTP string, or None if no user with that email exists.
+        OTP expires in 10 minutes.
+        """
+        user = await AuthService.get_user_by_email(db, email)
+        if not user:
+            return None
+
+        otp = str(random.randint(100000, 999999))
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.PASSWORD_RESET_OTP_EXPIRES_MINUTES)
+
+        reset = PasswordReset(
+            user_id=user.id,
+            token=otp,
+            expires_at=expires_at,
+        )
+        db.add(reset)
+        await db.commit()
+
+        return otp
+
+    @staticmethod
+    async def verify_otp(db: AsyncSession, email: str, otp: str) -> Optional[str]:
+        """Verify the OTP for the given email.
+
+        Returns a secure reset token on success, or None if OTP is invalid/expired.
+        The OTP record is replaced with the secure token for use in reset-password.
+        """
+        now = datetime.now(timezone.utc)
+
+        user = await AuthService.get_user_by_email(db, email)
+        if not user:
+            return None
+
+        result = await db.execute(
+            select(PasswordReset).where(
+                PasswordReset.user_id == user.id,
+                PasswordReset.token == otp,
+                PasswordReset.used_at.is_(None),
+                PasswordReset.expires_at > now,
+            )
+        )
+        reset = result.scalar_one_or_none()
+        if not reset:
+            return None
+
+        # Replace OTP with a secure reset token valid for 15 minutes
+        secure_token = generate_token(32)
+        reset.token = secure_token
+        reset.expires_at = now + timedelta(minutes=settings.PASSWORD_RESET_TOKEN_EXPIRES_MINUTES)
+        await db.commit()
+
+        return secure_token
+
+    @staticmethod
+    async def reset_password(db: AsyncSession, token: str, new_password: str) -> Optional[User]:
+        """Consume a verified reset token and update the user's password.
+
+        Returns the User on success, or None if the token is invalid, expired, or already used.
+        """
+        now = datetime.now(timezone.utc)
+
+        result = await db.execute(
+            select(PasswordReset).where(
+                PasswordReset.token == token,
+                PasswordReset.used_at.is_(None),
+                PasswordReset.expires_at > now,
+            )
+        )
+        reset = result.scalar_one_or_none()
+        if not reset:
+            return None
+
+        result = await db.execute(
+            select(User).where(User.id == reset.user_id, User.deleted_at.is_(None))
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            return None
+
+        user.password_hash = hash_password(new_password)
+        reset.used_at = now
+        await db.commit()
+
+        return user

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, model_validator, field_validator
 
 
 class LoginRequest(BaseModel):
@@ -59,6 +59,33 @@ class UserUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, max_length=100)
     bio: Optional[str] = Field(None, max_length=500)
     avatar_url: Optional[str] = None
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Request to initiate a password reset."""
+
+    email: EmailStr
+
+
+class VerifyOTPRequest(BaseModel):
+    """Request to verify the OTP sent to the user's email."""
+
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6)
+
+
+class ResetPasswordRequest(BaseModel):
+    """Request to complete a password reset using a verified token."""
+
+    token: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8, max_length=128)
+    confirm_password: str = Field(..., min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def passwords_match(self) -> "ResetPasswordRequest":
+        if self.new_password != self.confirm_password:
+            raise ValueError("Passwords do not match")
+        return self
 
     @field_validator("avatar_url")
     @classmethod

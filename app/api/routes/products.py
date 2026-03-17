@@ -40,6 +40,8 @@ from app.schemas.products import (
     ConfiguratorSettings,
     CurrencyTypeResponse,
     CurrencyTypesResponse,
+    DisableProductRequest,
+    DisableProductResponse,
     HotspotPosition,
     HotspotTypeResponse,
     HotspotTypesResponse,
@@ -68,6 +70,7 @@ from app.services.background_removal_service import background_removal_service
 from app.services.licensing_service import LicensingService
 from app.services.product_service import product_service
 from app.services.dimension_service import DimensionService
+from app.services.product_validation_service import ProductValidationService
 from app.utils.envelopes import api_success
 from app.models.models import PublishLink
 from app.services.product_service import ProductService
@@ -293,6 +296,19 @@ async def create_product_with_image(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid userId format. Expected UUID string.",
+        )
+    
+       # ── Validate product name is not duplicate for this user ─────────────────
+    try:
+        await ProductValidationService.validate_product_name(
+            db=db,
+            user_id=user_uuid,
+            product_name=name,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
         )
 
    # Check if user has enough quota
@@ -1621,3 +1637,112 @@ async def update_product_details(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update product details: {str(e)}",
         )
+    
+
+    #make product deactivate
+
+
+@router.post("/products/{product_id}/disable", response_model=dict)
+async def disable_product(
+    payload: DisableProductRequest,
+    current_user: CurrentUser,
+    request: Request,
+    db: DB,
+):
+    """
+    Disable (archive) or re-enable a product.
+
+    | ``disable`` | Current status      | Result                                    |
+    |-------------|---------------------|-------------------------------------------|
+    | ``true``    | any except archived | → ``archived``; publish link deactivated  |
+    | ``true``    | ``archived``        | 409 – already disabled                    |
+    | ``false``   | ``archived``        | → ``draft``                               |
+    | ``false``   | anything else       | 409 – product is not disabled             |
+
+    Re-enabling always lands on ``draft``. Use ``POST /products/{id}/publish``
+    to make the product public again.
+    """
+    # ── Validate & parse UUID from request body ───────────────────────────────
+    try:
+        prod_uuid = uuid.UUID(payload.product_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found",
+        )
+
+    # ── Fetch product ─────────────────────────────────────────────────────────
+    # deleted_at is a virtual NULL column (no real DB column), so we query by PK only.
+    result = await db.execute(
+        select(Product).where(Product.id == prod_uuid)
+    )
+    product = result.scalar_one_or_none()
+
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found",
+        )
+
+    now = datetime.utcnow()
+
+    # ── Disable ───────────────────────────────────────────────────────────────
+    if payload.disable:
+        if product.status == ProductStatus.ARCHIVED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Product is already disabled",
+            )
+
+        # Deactivate publish link if the product is currently live
+        if product.status == ProductStatus.PUBLISHED:
+            pub_result = await db.execute(
+                select(PublishLink).where(
+                    PublishLink.product_id == product.id,
+                    PublishLink.is_enabled == True,
+                )
+            )
+            publish_link = pub_result.scalar_one_or_none()
+            if publish_link:
+                publish_link.is_enabled = False
+
+        product.status       = ProductStatus.ARCHIVED
+        product.updated_by   = current_user.id   # AuditMixin via TimestampMixin
+        product.updated_date = now
+
+        action = "product.disabled"
+
+    # ── Re-enable ─────────────────────────────────────────────────────────────
+    else:
+        if product.status != ProductStatus.ARCHIVED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Product is not disabled (current status: {product.status.value})",
+            )
+
+        product.status       = ProductStatus.DRAFT
+        product.updated_by   = current_user.id
+        product.updated_date = now
+
+        action = "product.enabled"
+
+    # ── Activity log ──────────────────────────────────────────────────────────
+    await ActivityService.log_product_action(
+        db=db,
+        action=action,
+        user_id=current_user.id,
+        product_id=product.id,
+        request=request,
+    )
+
+    await db.commit()
+    await db.refresh(product)
+
+    return api_success(
+        DisableProductResponse(
+            id=str(product.id),
+            name=product.name,
+            status=product.status.value,
+            disabled_at=now if payload.disable else None,
+            reason=payload.reason if payload.disable else None,
+        ).model_dump(exclude_none=True))

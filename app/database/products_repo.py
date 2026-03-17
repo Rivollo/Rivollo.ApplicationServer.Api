@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import Product, ProductAsset, ProductAssetMapping, AssetStatic, PublishLink
+from app.models.models import Product, ProductAsset, ProductAssetMapping, AssetStatic, ProductStatus, PublishLink
 
 
 class ProductRepository:
@@ -16,12 +16,13 @@ class ProductRepository:
     async def get_products_by_user_id(
         db: AsyncSession, user_id: uuid.UUID
     ) -> list[Product]:
-        """Get all products for a user, ordered by most recent first."""
+        """Get all products for a user, ordered by most recent first. Excludes archived products."""
         result = await db.execute(
             select(Product)
             .where(
                 Product.created_by == user_id,
                 Product.deleted_at.is_(None),
+                # Product.status != ProductStatus.ARCHIVED,   # ← exclude disabled/archived
             )
             .order_by(func.coalesce(Product.updated_date, Product.created_date).desc())
         )

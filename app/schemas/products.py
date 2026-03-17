@@ -135,6 +135,24 @@ class ProductMeshItem(BaseModel):
     asset_id: int
     url: str
 
+#added for make product Disable
+class DisableProductRequest(BaseModel):
+    """
+    disable=True  → archive/disable the product.
+    disable=False → restore the product to draft.
+    """
+    product_id: str                # UUID of the product to disable / re-enable
+    disable: bool
+    reason: Optional[str] = None   # optional audit note (logged, not persisted)
+
+#Response after product disabled
+class DisableProductResponse(BaseModel):
+    id: str
+    name: str
+    status: str
+    disabled_at: Optional[datetime] = None
+    reason: Optional[str] = None
+
 
 class ProductAssetsData(BaseModel):
     """Product assets data."""
