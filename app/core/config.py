@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 	SENDGRID_API_KEY: str = Field(default="")
 	SENDGRID_FROM_EMAIL: str = Field(default="noreply@rivollo.com")
 	SENDGRID_FROM_NAME: str = Field(default="Rivollo")
+	SENDGRID_URL: str = Field(default="https://api.sendgrid.com/v3/mail/send")
 
 	# Frontend base URL (used in email links)
 	FRONTEND_URL: str = Field(default="http://localhost:3000")
