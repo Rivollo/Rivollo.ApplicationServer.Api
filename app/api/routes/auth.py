@@ -1,5 +1,6 @@
 """Authentication routes for signup, login, and OAuth."""
 
+import asyncio
 import logging
 from typing import Any, Dict
 
@@ -60,6 +61,14 @@ async def signup(
             action="user.signup",
             user_id=user.id,
             request=request,
+        )
+
+        # Send welcome email (non-blocking)
+        asyncio.create_task(
+            EmailService.send_welcome_email(
+                to_email=user.email,
+                name=user.name or user.email,
+            )
         )
 
         # Prepare response
@@ -250,6 +259,8 @@ async def google_auth(
     display_name = token_info.get("name")
     avatar_url = token_info.get("picture")
 
+    pre_existing = await AuthService.get_user_by_email(db, email)
+
     user = await AuthService.get_or_create_google_user(
         db=db,
         google_id=str(google_user_id),
@@ -268,6 +279,15 @@ async def google_auth(
     if updated:
         await db.commit()
         await db.refresh(user)
+
+    # Send welcome email only for brand-new signups (non-blocking)
+    if pre_existing is None:
+        asyncio.create_task(
+            EmailService.send_welcome_email(
+                to_email=user.email,
+                name=user.name or user.email,
+            )
+        )
 
     token = AuthService.generate_token(user.id, payload.remember_me)
 
