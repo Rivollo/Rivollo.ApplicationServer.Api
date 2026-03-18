@@ -72,6 +72,17 @@ async def signup(
             updated_at=user.updated_at,
         )
 
+        # Send welcome email (non-blocking — failure must not affect signup response)
+        try:
+            await EmailService.send_welcome_email(
+                to_email=user.email,
+                name=user.name or user.email,
+            )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to send welcome email to %s", user.email, exc_info=True
+            )
+
         return api_success(
             AuthResponse(
                 user=user_data,
@@ -250,7 +261,7 @@ async def google_auth(
     display_name = token_info.get("name")
     avatar_url = token_info.get("picture")
 
-    user = await AuthService.get_or_create_google_user(
+    user, is_new_user = await AuthService.get_or_create_google_user(
         db=db,
         google_id=str(google_user_id),
         email=email,
@@ -287,6 +298,18 @@ async def google_auth(
         created_at=user.created_at,
         updated_at=user.updated_at,
     )
+
+    # Send welcome email for newly created Google accounts (non-blocking)
+    if is_new_user:
+        try:
+            await EmailService.send_welcome_email(
+                to_email=user.email,
+                name=user.name or user.email,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to send welcome email to %s", user.email, exc_info=True
+            )
 
     return api_success(
         AuthResponse(

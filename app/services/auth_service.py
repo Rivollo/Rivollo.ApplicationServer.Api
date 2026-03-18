@@ -3,7 +3,7 @@
 import random
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -93,8 +93,8 @@ class AuthService:
         google_id: str,
         email: str,
         name: Optional[str] = None,
-    ) -> User:
-        """Get or create user from Google OAuth."""
+    ) -> Tuple[User, bool]:
+        """Get or create user from Google OAuth. Returns (user, is_new)."""
         # Check if identity exists
         result = await db.execute(
             select(AuthIdentity).where(
@@ -111,7 +111,7 @@ class AuthService:
             )
             user = result.scalar_one_or_none()
             if user:
-                return user
+                return user, False
 
         # Check if user with email exists
         existing_user = await AuthService.get_user_by_email(db, email)
@@ -125,16 +125,17 @@ class AuthService:
             )
             db.add(identity)
             await db.commit()
-            return existing_user
+            return existing_user, False
 
         # Create new user
-        return await AuthService.create_user(
+        user = await AuthService.create_user(
             db=db,
             email=email,
             name=name,
             provider=AuthProvider.GOOGLE,
             provider_user_id=google_id,
         )
+        return user, True
 
     @staticmethod
     def generate_token(user_id: uuid.UUID, remember_me: bool = False) -> str:
