@@ -30,6 +30,7 @@ from app.api.routes.product_links import router as product_links_router
 from app.api.routes.support import router as support_router
 from app.api.routes.link_share import router as link_share_router
 from app.api.routes.razorpay_subscriptions import router as razorpay_subscriptions_router
+from app.api.routes.payments import router as payments_router
 from app.utils.envelopes import api_success, api_error
 from app.core.db import init_engine_and_session
 
@@ -173,6 +174,7 @@ app.include_router(product_links_router, prefix=_api_prefix)
 app.include_router(support_router, prefix=_api_prefix)
 app.include_router(link_share_router, prefix=_api_prefix)
 app.include_router(razorpay_subscriptions_router, prefix=_api_prefix)
+app.include_router(payments_router, prefix=_api_prefix)
 
 
 

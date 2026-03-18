@@ -158,6 +158,25 @@ class VerifyPaymentRequest(_CamelModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Promo Code Validation
+# ---------------------------------------------------------------------------
+
+
+class ValidatePromoResponse(_CamelModel):
+    """Response for promo code validation."""
+
+    valid: bool = Field(..., description="True if the promo code is valid and applicable.")
+    code: str = Field(..., description="The promo code that was validated.")
+    discount_type: Optional[str] = Field(None, description="'percentage' or 'fixed'.")
+    discount_value: Optional[int] = Field(None, description="Discount amount or percentage.")
+    razorpay_offer_id: Optional[str] = Field(
+        None,
+        description="Razorpay offer ID to pass in the checkout payload (if applicable).",
+    )
+    message: str = Field(..., description="Human-readable validation result.")
+
+
 class VerifyPaymentResponse(_CamelModel):
     """Result of signature verification + subscription activation."""
 
