@@ -2,7 +2,7 @@ from typing import Any, Dict, Optional
 
 
 def api_success(data: Any) -> Dict[str, Any]:
-	return {"success": True, "data": data, "error": None}
+	return {"success": True, "data": data}
 
 
 def api_error(code: str, message: str, details: Optional[Any] = None) -> Dict[str, Any]:

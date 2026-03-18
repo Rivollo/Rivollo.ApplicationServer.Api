@@ -362,6 +362,7 @@ def _reset_success_template(name: str, frontend_url: str) -> str:
 def _welcome_template(name: str, frontend_url: str) -> str:
     banner = _banner_header(settings.SENDGRID_FROM_NAME)
     footer = _footer(settings.SENDGRID_FROM_NAME, settings.SENDGRID_FROM_EMAIL)
+    font_stack = "-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -369,7 +370,12 @@ def _welcome_template(name: str, frontend_url: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Welcome to {settings.SENDGRID_FROM_NAME}</title>
 </head>
-<body style="margin:0;padding:0;background-color:#f0f2f8;font-family:Arial,sans-serif;">
+<body style="margin:0;padding:0;background-color:#f0f2f8;font-family:{font_stack};">
+
+  <!-- Preheader text (hidden, shows in inbox preview) -->
+  <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;color:#f0f2f8;line-height:1px;">
+    Your {settings.SENDGRID_FROM_NAME} account is ready — start building your product catalogue today.&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;
+  </div>
 
   <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f2f8;padding:40px 0;">
     <tr>
@@ -378,82 +384,84 @@ def _welcome_template(name: str, frontend_url: str) -> str:
 
           {banner}
 
-          <!-- ── Hero section ── -->
+          <!-- ── Hero ── -->
           <tr>
-            <td style="background:linear-gradient(180deg,#eef1fc 0%,#ffffff 100%);padding:36px 40px 28px;text-align:center;">
+            <td style="background:linear-gradient(180deg,#eef1fc 0%,#ffffff 100%);padding:40px 40px 30px;text-align:center;">
               <p style="margin:0 0 8px;font-size:11px;letter-spacing:2.5px;color:#3a5bd9;text-transform:uppercase;font-weight:600;">
-                Welcome Aboard
+                Welcome to {settings.SENDGRID_FROM_NAME}
               </p>
-              <p style="margin:0 0 12px;font-size:26px;color:#1a1a4e;font-weight:700;line-height:1.3;">
-                Your account is ready, {name}!
+              <p style="margin:0 0 14px;font-size:26px;color:#1a1a4e;font-weight:700;line-height:1.3;">
+                Hello, {name} — glad to have you.
               </p>
-              <p style="margin:0;font-size:15px;color:#666666;line-height:1.7;max-width:440px;display:inline-block;">
-                You're now part of <strong style="color:#1a1a4e;">{settings.SENDGRID_FROM_NAME}</strong> — the smarter way
-                to list, showcase, and grow your product business.
+              <p style="margin:0;font-size:15px;color:#555555;line-height:1.8;max-width:460px;display:inline-block;">
+                Your account is ready. Turn any product into an immersive 3D experience, instantly.
               </p>
             </td>
           </tr>
 
-          <!-- ── Feature highlights ── -->
+          <!-- ── Divider ── -->
+          <tr>
+            <td style="padding:0 40px;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr><td style="border-top:1px solid #eeeeee;font-size:0;line-height:0;">&nbsp;</td></tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- ── Features ── -->
           <tr>
             <td style="padding:28px 40px 8px;">
-              <p style="margin:0 0 16px;font-size:13px;color:#1a1a4e;font-weight:700;text-transform:uppercase;letter-spacing:1px;">
-                Here's what you can do with {settings.SENDGRID_FROM_NAME}
+              <p style="margin:0 0 20px;font-size:13px;color:#1a1a4e;font-weight:700;text-transform:uppercase;letter-spacing:1px;">
+                What you can do with {settings.SENDGRID_FROM_NAME}
               </p>
 
               <!-- Feature 1 -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 14px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 18px;">
                 <tr>
-                  <td style="width:40px;vertical-align:top;padding-top:1px;">
-                    <table cellpadding="0" cellspacing="0">
-                      <tr>
-                        <td style="width:32px;height:32px;background-color:#eef1fc;border-radius:8px;text-align:center;vertical-align:middle;">
-                          <span style="font-size:15px;line-height:32px;display:block;">&#128230;</span>
-                        </td>
-                      </tr>
-                    </table>
+                  <td style="width:40px;vertical-align:top;padding-top:2px;">
+                    <table cellpadding="0" cellspacing="0"><tr>
+                      <td style="width:34px;height:34px;background-color:#eef1fc;border-radius:8px;text-align:center;vertical-align:middle;">
+                        <span style="font-size:16px;line-height:34px;display:block;">&#127919;</span>
+                      </td>
+                    </tr></table>
                   </td>
-                  <td style="padding-left:14px;vertical-align:top;">
-                    <p style="margin:0 0 2px;font-size:14px;color:#1a1a4e;font-weight:600;">Upload Your Catalogue</p>
-                    <p style="margin:0;font-size:13px;color:#888888;line-height:1.6;">Add products with images, descriptions, and pricing in minutes.</p>
+                  <td style="padding-left:16px;vertical-align:top;">
+                    <p style="margin:0 0 3px;font-size:14px;color:#1a1a4e;font-weight:600;">2D → interactive 3D conversion</p>
+                    <p style="margin:0;font-size:13px;color:#777777;line-height:1.7;">Turn product photos into web-ready 3D models with hotspots, custom backgrounds, and purchase links.</p>
                   </td>
                 </tr>
               </table>
 
               <!-- Feature 2 -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 14px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 18px;">
                 <tr>
-                  <td style="width:40px;vertical-align:top;padding-top:1px;">
-                    <table cellpadding="0" cellspacing="0">
-                      <tr>
-                        <td style="width:32px;height:32px;background-color:#eef1fc;border-radius:8px;text-align:center;vertical-align:middle;">
-                          <span style="font-size:15px;line-height:32px;display:block;">&#128279;</span>
-                        </td>
-                      </tr>
-                    </table>
+                  <td style="width:40px;vertical-align:top;padding-top:2px;">
+                    <table cellpadding="0" cellspacing="0"><tr>
+                      <td style="width:34px;height:34px;background-color:#eef1fc;border-radius:8px;text-align:center;vertical-align:middle;">
+                        <span style="font-size:16px;line-height:34px;display:block;">&#128279;</span>
+                      </td>
+                    </tr></table>
                   </td>
-                  <td style="padding-left:14px;vertical-align:top;">
-                    <p style="margin:0 0 2px;font-size:14px;color:#1a1a4e;font-weight:600;">Share Instantly</p>
-                    <p style="margin:0;font-size:13px;color:#888888;line-height:1.6;">Generate a shareable link to your storefront and send it to anyone.</p>
+                  <td style="padding-left:16px;vertical-align:top;">
+                    <p style="margin:0 0 3px;font-size:14px;color:#1a1a4e;font-weight:600;">Share your storefront instantly</p>
+                    <p style="margin:0;font-size:13px;color:#777777;line-height:1.7;">Generate a shareable link and send it to clients, buyers, or partners.</p>
                   </td>
                 </tr>
               </table>
 
-              <!-- Feature 3 -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 28px;">
+              <!-- Feature 4 -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 32px;">
                 <tr>
-                  <td style="width:40px;vertical-align:top;padding-top:1px;">
-                    <table cellpadding="0" cellspacing="0">
-                      <tr>
-                        <td style="width:32px;height:32px;background-color:#eef1fc;border-radius:8px;text-align:center;vertical-align:middle;">
-                          <span style="font-size:15px;line-height:32px;display:block;">&#128101;</span>
-                        </td>
-                      </tr>
-                    </table>
+                  <td style="width:40px;vertical-align:top;padding-top:2px;">
+                    <table cellpadding="0" cellspacing="0"><tr>
+                      <td style="width:34px;height:34px;background-color:#eef1fc;border-radius:8px;text-align:center;vertical-align:middle;">
+                        <span style="font-size:16px;line-height:34px;display:block;">&#128202;</span>
+                      </td>
+                    </tr></table>
                   </td>
-                  <td style="padding-left:14px;vertical-align:top;">
-                    <p style="margin:0 0 2px;font-size:14px;color:#1a1a4e;font-weight:600;">Reach Customers Directly</p>
-                    <p style="margin:0;font-size:13px;color:#888888;line-height:1.6;">Connect with buyers and manage enquiries all in one place.</p>
+                  <td style="padding-left:16px;vertical-align:top;">
+                    <p style="margin:0 0 3px;font-size:14px;color:#1a1a4e;font-weight:600;">Product analytics</p>
+                    <p style="margin:0;font-size:13px;color:#777777;line-height:1.7;">Track views, engagement, and buyer interest per product — so you know exactly what's working.</p>
                   </td>
                 </tr>
               </table>
@@ -463,13 +471,13 @@ def _welcome_template(name: str, frontend_url: str) -> str:
 
           <!-- ── CTA ── -->
           <tr>
-            <td style="padding:0 40px 36px;text-align:center;">
+            <td style="padding:0 40px 40px;text-align:center;">
               <table cellpadding="0" cellspacing="0" style="margin:0 auto;">
                 <tr>
                   <td style="background:linear-gradient(135deg,#3a5bd9,#1a1a4e);border-radius:30px;">
                     <a href="{frontend_url}"
-                       style="display:inline-block;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 44px;border-radius:30px;font-family:Arial,sans-serif;letter-spacing:0.3px;">
-                      Get Started &rarr;
+                       style="display:inline-block;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 48px;border-radius:30px;font-family:{font_stack};letter-spacing:0.3px;">
+                      Go to my dashboard &rarr;
                     </a>
                   </td>
                 </tr>
@@ -477,18 +485,21 @@ def _welcome_template(name: str, frontend_url: str) -> str:
             </td>
           </tr>
 
-          <!-- ── Divider + disclaimer ── -->
+          <!-- ── Divider ── -->
           <tr>
-            <td style="padding:0 40px 28px;">
-              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
-                <tr>
-                  <td style="border-top:1px solid #eeeeee;font-size:0;line-height:0;">&nbsp;</td>
-                </tr>
+            <td style="padding:0 40px;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr><td style="border-top:1px solid #eeeeee;font-size:0;line-height:0;">&nbsp;</td></tr>
               </table>
-              <p style="margin:0;font-size:12px;color:#aaaaaa;line-height:1.7;">
-                If you did not create this account, please contact us at
-                <a href="mailto:{settings.SENDGRID_FROM_EMAIL}" style="color:#3a5bd9;text-decoration:none;">{settings.SENDGRID_FROM_EMAIL}</a>
-                and we'll take care of it right away.
+            </td>
+          </tr>
+
+          <!-- ── Footer ── -->
+          <tr>
+            <td style="padding:20px 40px 28px;text-align:center;">
+              <p style="margin:0 0 6px;font-size:12px;color:#aaaaaa;line-height:1.8;">
+                You received this email because you signed up for {settings.SENDGRID_FROM_NAME}.
+                <a href="{frontend_url}/unsubscribe" style="color:#aaaaaa;text-decoration:underline;">Unsubscribe</a>
               </p>
             </td>
           </tr>
