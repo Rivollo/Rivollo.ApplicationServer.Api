@@ -144,16 +144,17 @@ def _banner_header(from_name: str) -> str:
           </tr>"""
 
 
-def _footer(from_name: str, from_email: str) -> str:
+def _footer(from_name: str) -> str:
     """Shared footer row for every email."""
     current_year = date.today().year
+    support_email = settings.SUPPORT_EMAIL
     return f"""
           <!-- ── Footer ── -->
           <tr>
             <td style="background-color:#f8f9ff;padding:20px 40px;text-align:center;border-top:1px solid #e8eaf4;">
               <p style="margin:0 0 6px;font-size:12px;color:#aaaaaa;line-height:1.6;">
                 Need help? Reach us at
-                <a href="mailto:{from_email}" style="color:#3a5bd9;text-decoration:none;">{from_email}</a>
+                <a href="mailto:{support_email}" style="color:#3a5bd9;text-decoration:none;">{support_email}</a>
               </p>
               <p style="margin:0;font-size:11px;color:#cccccc;">
                 &copy; {current_year} {from_name}. All rights reserved.
@@ -164,7 +165,7 @@ def _footer(from_name: str, from_email: str) -> str:
 
 def _otp_template(name: str, otp: str, expires_minutes: int) -> str:
     banner = _banner_header(settings.SENDGRID_FROM_NAME)
-    footer = _footer(settings.SENDGRID_FROM_NAME, settings.SENDGRID_FROM_EMAIL)
+    footer = _footer(settings.SENDGRID_FROM_NAME)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -259,7 +260,7 @@ def _otp_template(name: str, otp: str, expires_minutes: int) -> str:
 
 def _reset_success_template(name: str, frontend_url: str) -> str:
     banner = _banner_header(settings.SENDGRID_FROM_NAME)
-    footer = _footer(settings.SENDGRID_FROM_NAME, settings.SENDGRID_FROM_EMAIL)
+    footer = _footer(settings.SENDGRID_FROM_NAME)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -338,7 +339,7 @@ def _reset_success_template(name: str, frontend_url: str) -> str:
                   <td style="background-color:#fff1f2;border-left:3px solid #f43f5e;border-radius:4px;padding:12px 16px;">
                     <p style="margin:0;font-size:13px;color:#9f1239;line-height:1.6;">
                       <strong>Wasn't you?</strong> If you did not make this change, please
-                      <a href="mailto:{settings.SENDGRID_FROM_EMAIL}" style="color:#9f1239;">contact our support team</a>
+                      <a href="mailto:{settings.SUPPORT_EMAIL}" style="color:#9f1239;">contact our support team</a>
                       immediately to secure your account.
                     </p>
                   </td>
@@ -361,7 +362,7 @@ def _reset_success_template(name: str, frontend_url: str) -> str:
 
 def _welcome_template(name: str, frontend_url: str) -> str:
     banner = _banner_header(settings.SENDGRID_FROM_NAME)
-    footer = _footer(settings.SENDGRID_FROM_NAME, settings.SENDGRID_FROM_EMAIL)
+    footer = _footer(settings.SENDGRID_FROM_NAME)
     font_stack = "-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif"
     return f"""<!DOCTYPE html>
 <html lang="en">
