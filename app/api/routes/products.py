@@ -71,7 +71,7 @@ from app.services.licensing_service import LicensingService
 from app.services.product_service import product_service
 from app.services.dimension_service import DimensionService
 from app.services.product_validation_service import ProductValidationService
-from app.utils.envelopes import api_success
+from app.utils.envelopes import api_error, api_success
 from app.models.models import PublishLink
 from app.services.product_service import ProductService
 
@@ -306,9 +306,13 @@ async def create_product_with_image(
             product_name=name,
         )
     except ValueError as e:
-        raise HTTPException(
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
-            detail=str(e),
+            content=api_error(
+                code="DUPLICATE_PRODUCT_NAME",
+                message=str(e),
+            ),
         )
 
    # Check if user has enough quota
