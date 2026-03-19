@@ -92,6 +92,13 @@ class EmailService:
         html_body = _welcome_template(name=name, frontend_url=settings.FRONTEND_URL)
         await _send(to_email=to_email, to_name=name, subject=subject, html_body=html_body)
 
+    @staticmethod
+    async def send_signup_verification_otp(to_email: str, otp: str, expires_minutes: int) -> None:
+        """Send the signup email verification OTP."""
+        subject = f"{settings.SENDGRID_FROM_NAME} — Verify Your Email"
+        html_body = _signup_otp_template(otp=otp, expires_minutes=expires_minutes)
+        await _send(to_email=to_email, to_name=to_email, subject=subject, html_body=html_body)
+
 # ---------------------------------------------------------------------------
 # Email templates
 # ---------------------------------------------------------------------------
@@ -345,6 +352,97 @@ def _reset_success_template(name: str, frontend_url: str) -> str:
                   </td>
                 </tr>
               </table>
+
+            </td>
+          </tr>
+
+          {footer}
+
+        </table>
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>"""
+
+
+def _signup_otp_template(otp: str, expires_minutes: int) -> str:
+    banner = _banner_header(settings.SENDGRID_FROM_NAME)
+    footer = _footer(settings.SENDGRID_FROM_NAME)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Verify Your Email</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f0f2f8;font-family:Arial,sans-serif;">
+
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f2f8;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+
+          {banner}
+
+          <!-- ── Body ── -->
+          <tr>
+            <td style="padding:40px 40px 32px;">
+
+              <p style="margin:0 0 8px;font-size:11px;letter-spacing:2.5px;color:#3a5bd9;text-transform:uppercase;font-weight:600;">
+                Email Verification
+              </p>
+
+              <p style="margin:0 0 16px;font-size:22px;color:#1a1a4e;font-weight:700;line-height:1.3;">
+                Verify your email address
+              </p>
+
+              <p style="margin:0 0 28px;font-size:14px;color:#666666;line-height:1.8;">
+                Use the one-time code below to verify your email and complete your sign-up.
+                For your security, this code expires in
+                <strong style="color:#3a5bd9;">{expires_minutes} minutes</strong>.
+              </p>
+
+              <!-- OTP Box -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 28px;">
+                <tr>
+                  <td align="center">
+                    <table cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td style="background-color:#eef1fc;border:2px solid #3a5bd9;border-radius:12px;padding:20px 52px;text-align:center;">
+                          <span style="font-size:42px;font-weight:700;letter-spacing:16px;color:#1a1a4e;font-family:'Courier New',Courier,monospace;">
+                            {otp}
+                          </span>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Tip box -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+                <tr>
+                  <td style="background-color:#fff8e6;border-left:3px solid #f59e0b;border-radius:4px;padding:12px 16px;">
+                    <p style="margin:0;font-size:13px;color:#92400e;line-height:1.6;">
+                      <strong>Security tip:</strong> Never share this code with anyone.
+                      {settings.SENDGRID_FROM_NAME} will never ask for your OTP via phone or chat.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Divider -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+                <tr>
+                  <td style="border-top:1px solid #eeeeee;font-size:0;line-height:0;">&nbsp;</td>
+                </tr>
+              </table>
+
+              <p style="margin:0;font-size:12px;color:#999999;line-height:1.7;">
+                If you did not attempt to create an account, you can safely ignore this email.
+              </p>
 
             </td>
           </tr>

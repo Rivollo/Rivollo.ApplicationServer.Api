@@ -9,8 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.security import create_access_token, generate_token, hash_password, verify_password
-from app.models.models import AuthIdentity, AuthProvider, PasswordReset, User
+from app.core.security import create_access_token, decode_access_token, generate_token, hash_password, verify_password
+from app.models.models import AuthIdentity, AuthProvider, PasswordReset, SignupOtp, User
 from app.services.licensing_service import LicensingService
 
 
@@ -144,6 +144,66 @@ class AuthService:
         return create_access_token(
             data={"sub": str(user_id)},
             expires_delta=expires_delta,
+        )
+
+    @staticmethod
+    async def create_signup_otp(db: AsyncSession, email: str) -> str:
+        """Generate a 6-digit OTP for signup email verification and store it.
+
+        Returns the OTP string. Expires in SIGNUP_OTP_EXPIRES_MINUTES.
+        """
+        otp = str(random.randint(100000, 999999))
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.SIGNUP_OTP_EXPIRES_MINUTES)
+
+        record = SignupOtp(
+            email=email.lower(),
+            otp=otp,
+            expires_at=expires_at,
+        )
+        db.add(record)
+        await db.commit()
+
+        return otp
+
+    @staticmethod
+    async def verify_signup_otp(db: AsyncSession, email: str, otp: str) -> Optional[str]:
+        """Verify the signup OTP for the given email.
+
+        Returns a short-lived JWT signup_token on success, or None if invalid/expired.
+        """
+        now = datetime.now(timezone.utc)
+
+        result = await db.execute(
+            select(SignupOtp).where(
+                SignupOtp.email == email.lower(),
+                SignupOtp.otp == otp,
+                SignupOtp.isactive.is_(True),
+                SignupOtp.expires_at > now,
+            )
+        )
+        record = result.scalar_one_or_none()
+        if not record:
+            return None
+
+        record.used_at = now
+        record.isactive = False
+        await db.commit()
+
+        signup_token = create_access_token(
+            data={"sub": email.lower(), "type": "email_verified"},
+            expires_delta=timedelta(minutes=settings.SIGNUP_TOKEN_EXPIRES_MINUTES),
+        )
+        return signup_token
+
+    @staticmethod
+    def validate_signup_token(signup_token: str, email: str) -> bool:
+        """Return True if the signup_token is valid for the given email."""
+        payload = decode_access_token(signup_token)
+        if not payload:
+            return False
+        return (
+            payload.get("type") == "email_verified"
+            and payload.get("sub", "").lower() == email.lower()
         )
 
     @staticmethod

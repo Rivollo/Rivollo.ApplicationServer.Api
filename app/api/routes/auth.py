@@ -14,9 +14,11 @@ from app.schemas.auth import (
     GoogleAuthRequest,
     LoginRequest,
     ResetPasswordRequest,
+    SendSignupOtpRequest,
     SignupRequest,
     UserResponse,
     VerifyOTPRequest,
+    VerifySignupOtpRequest,
 )
 from app.services.activity_service import ActivityService
 from app.services.auth_service import AuthService
@@ -27,13 +29,57 @@ from app.core.config import settings
 router = APIRouter(tags=["auth"])
 
 
+@router.post("/auth/send-signup-otp", response_model=dict)
+async def send_signup_otp(
+    payload: SendSignupOtpRequest,
+    db: DB,
+):
+    """Send a 6-digit OTP to the given email to verify it before signup."""
+    existing_user = await AuthService.get_user_by_email(db, payload.email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered",
+        )
+
+    otp = await AuthService.create_signup_otp(db, payload.email)
+    await EmailService.send_signup_verification_otp(
+        to_email=payload.email,
+        otp=otp,
+        expires_minutes=settings.SIGNUP_OTP_EXPIRES_MINUTES,
+    )
+    return api_success({"message": "OTP sent to your email", "expires_in_minutes": settings.SIGNUP_OTP_EXPIRES_MINUTES})
+
+
+@router.post("/auth/verify-signup-otp", response_model=dict)
+async def verify_signup_otp(
+    payload: VerifySignupOtpRequest,
+    db: DB,
+):
+    """Verify the signup OTP. Returns a signup_token required to complete registration."""
+    signup_token = await AuthService.verify_signup_otp(db, payload.email, payload.otp)
+    if signup_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OTP",
+        )
+    return api_success({"signup_token": signup_token, "expires_in_minutes": settings.SIGNUP_TOKEN_EXPIRES_MINUTES})
+
+
 @router.post("/auth/signup", response_model=dict)
 async def signup(
     payload: SignupRequest,
     request: Request,
     db: DB,
 ):
-    """Create new user account."""
+    """Create new user account. Requires a valid signup_token from /auth/verify-signup-otp."""
+    # Validate email verification token
+    if not AuthService.validate_signup_token(payload.signup_token, payload.email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired email verification token. Please verify your email first.",
+        )
+
     # Check if user already exists
     existing_user = await AuthService.get_user_by_email(db, payload.email)
     if existing_user:
