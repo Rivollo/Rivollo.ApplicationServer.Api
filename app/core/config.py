@@ -22,6 +22,10 @@ class Settings(BaseSettings):
 	PASSWORD_RESET_OTP_EXPIRES_MINUTES: int = Field(default=10)
 	PASSWORD_RESET_TOKEN_EXPIRES_MINUTES: int = Field(default=15)
 
+	# Signup email verification OTP
+	SIGNUP_OTP_EXPIRES_MINUTES: int = Field(default=10)
+	SIGNUP_TOKEN_EXPIRES_MINUTES: int = Field(default=15)
+
 	# SendGrid email
 	SENDGRID_API_KEY: str = Field(default="")
 	SENDGRID_FROM_EMAIL: str = Field(default="noreply@rivollomail.com")

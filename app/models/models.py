@@ -629,6 +629,17 @@ class PasswordReset(UUIDMixin, Base):
     used_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
 
 
+class SignupOtp(UUIDMixin, Base):
+    """Stores OTPs for email verification during signup (no user FK — user doesn't exist yet)."""
+    __tablename__ = "tbl_signup_otps"
+
+    email: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    otp: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    used_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
+    isactive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+
+
 class ActivityLog(UUIDMixin, AuditMixin, Base):
     __tablename__ = "tbl_activity_logs"
     __table_args__ = (Index("ix_activity_logs_org_occurred_at", "org_id", "occurred_at"),)
