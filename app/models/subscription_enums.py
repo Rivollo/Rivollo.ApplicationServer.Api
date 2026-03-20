@@ -11,6 +11,7 @@ import enum
 class SubscriptionStatus(str, enum.Enum):
     """Status of a subscription."""
 
+    PENDING = "pending"
     TRIALING = "trialing"
     ACTIVE = "active"
     CANCELED = "canceled"

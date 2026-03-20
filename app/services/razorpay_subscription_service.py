@@ -261,28 +261,24 @@ async def create_subscription(
     }
 
     if existing_sub is not None:
-        # Update existing subscription row
+        # Update existing subscription row — keep status PENDING until payment is verified
         existing_sub.plan_id = plan.id
-        existing_sub.status = SubscriptionStatus.ACTIVE
+        existing_sub.status = SubscriptionStatus.PENDING
         existing_sub.razorpay_subscription_id = rz_subscription_id
         existing_sub.razorpay_customer_id = rz_customer_id
-        existing_sub.current_period_start = now
-        existing_sub.current_period_end = now + timedelta(days=period_days)
         existing_sub.billing = json.dumps(billing_data)
         existing_sub.updated_by = user_id
         existing_sub.updated_date = now
         subscription = existing_sub
     else:
-        # Create new subscription row
+        # Create new subscription row — PENDING until payment is verified
         subscription = Subscription(
             user_id=user_id,
             plan_id=plan.id,
-            status=SubscriptionStatus.ACTIVE,
+            status=SubscriptionStatus.PENDING,
             seats_purchased=1,
             razorpay_subscription_id=rz_subscription_id,
             razorpay_customer_id=rz_customer_id,
-            current_period_start=now,
-            current_period_end=now + timedelta(days=period_days),
             billing=json.dumps(billing_data),
             created_by=user_id,
         )
@@ -290,14 +286,8 @@ async def create_subscription(
         await db.flush()
         await db.refresh(subscription)
 
-    # ── 4. Create/update license assignment ───────────────────────────────────
-    await _upsert_license(
-        db,
-        subscription=subscription,
-        user_id=user_id,
-        limits=limits,
-        reset_usage=(existing_sub is None),
-    )
+    # NOTE: License and period dates are NOT set here.
+    # They will be activated in verify_subscription() after payment confirmation.
 
     await db.commit()
 
@@ -368,7 +358,7 @@ async def verify_subscription(
             detail="Subscription not found for this user.",
         )
 
-    # ── 3. Confirm subscription is active ────────────────────────────────────
+    # ── 3. Activate subscription — payment is now verified ──────────────────
     now = datetime.now(timezone.utc)
     billing_info = json.loads(subscription.billing) if subscription.billing else {}
     billing_interval = billing_info.get("billing_interval", "monthly")
@@ -378,6 +368,16 @@ async def verify_subscription(
     subscription.current_period_start = now
     subscription.current_period_end = now + timedelta(days=period_days)
     subscription.updated_date = now
+
+    # ── 3b. Create/update license — user gets Pro access only now ─────────
+    plan, limits = await _get_plan_with_features(db, billing_info.get("plan_code", "pro"))
+    await _upsert_license(
+        db,
+        subscription=subscription,
+        user_id=user_id,
+        limits=limits,
+        reset_usage=True,
+    )
 
     # ── 4. Save payment record ───────────────────────────────────────────────
     payment = Payment(

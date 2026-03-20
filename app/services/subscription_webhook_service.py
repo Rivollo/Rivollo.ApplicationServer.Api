@@ -178,7 +178,12 @@ async def _revoke_license(
 async def _handle_subscription_authenticated(
     db: AsyncSession, rz_subscription_id: str, payload_entity: dict
 ) -> None:
-    """subscription.authenticated — user completed checkout, card verified."""
+    """subscription.authenticated — user completed checkout, card verified.
+
+    This event means the card was verified, NOT that payment was charged.
+    Subscription stays PENDING — activation happens in subscription.activated
+    or via verify_subscription() after the frontend callback.
+    """
     subscription = await _get_subscription_by_rz_id(db, rz_subscription_id)
     if not subscription:
         _logger.warning(
@@ -187,16 +192,23 @@ async def _handle_subscription_authenticated(
         )
         return
 
-    # Subscription should already be in ACTIVE state from create_subscription
+    # Do NOT activate here — payment has not been charged yet.
     _logger.info(
-        "Webhook authenticated: rz_sub_id=%s confirmed.", rz_subscription_id
+        "Webhook authenticated: rz_sub_id=%s card verified, awaiting payment.",
+        rz_subscription_id,
     )
 
 
 async def _handle_subscription_activated(
     db: AsyncSession, rz_subscription_id: str, payload_entity: dict
 ) -> None:
-    """subscription.activated — first payment charged successfully."""
+    """subscription.activated — first payment charged successfully.
+
+    Acts as a safety net: if verify_subscription() already activated the
+    subscription and created the license, this handler is idempotent.
+    If the user closed their browser before /verify was called, this
+    ensures the subscription is still properly activated.
+    """
     subscription = await _get_subscription_by_rz_id(db, rz_subscription_id)
     if not subscription:
         _logger.warning(
@@ -212,6 +224,41 @@ async def _handle_subscription_activated(
     subscription.current_period_start = now
     subscription.current_period_end = now + timedelta(days=period_days)
     subscription.updated_date = now
+
+    # Create/update license — ensures user gets access even if /verify was missed
+    limits = await _get_plan_limits(db, subscription.plan_id)
+    if limits:
+        result = await db.execute(
+            select(LicenseAssignment).where(
+                LicenseAssignment.subscription_id == subscription.id,
+                LicenseAssignment.user_id == subscription.user_id,
+            )
+        )
+        existing_license = result.scalar_one_or_none()
+
+        if existing_license is not None:
+            existing_license.status = LicenseStatus.ACTIVE
+            existing_license.limit_max_products = limits.get("max_products", 0)
+            existing_license.limit_max_ai_credits = limits.get("max_ai_credits_month", 0)
+            existing_license.limit_max_public_views = limits.get("max_public_views", 0)
+            existing_license.limit_max_galleries = limits.get("max_galleries", 0)
+        else:
+            license_obj = LicenseAssignment(
+                subscription_id=subscription.id,
+                user_id=subscription.user_id,
+                status=LicenseStatus.ACTIVE,
+                limit_max_products=limits.get("max_products", 0),
+                limit_max_ai_credits=limits.get("max_ai_credits_month", 0),
+                limit_max_public_views=limits.get("max_public_views", 0),
+                limit_max_galleries=limits.get("max_galleries", 0),
+                usage_products=0,
+                usage_ai_credits=0,
+                usage_public_views=0,
+                usage_galleries=0,
+            )
+            db.add(license_obj)
+
+        await db.flush()
 
     # Save payment record
     payment_entity = payload_entity.get("payment", {}).get("entity", {})
