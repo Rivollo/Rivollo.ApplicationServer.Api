@@ -77,8 +77,8 @@ async def list_plans(
                 )
 
         # Build pricing options based on configured Razorpay plan IDs
-        monthly_price = getattr(p, "price_inr", 0)
-        yearly_price = getattr(p, "price_inr_yearly", 0)
+        monthly_price = getattr(p, "price_inr", None) or 0
+        yearly_price = getattr(p, "price_inr_yearly", None) or 0
         has_monthly = bool(getattr(p, "razorpay_plan_id", None))
         has_yearly = bool(getattr(p, "razorpay_plan_id_yearly", None))
 
