@@ -24,6 +24,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import LicenseAssignment, Plan, Subscription
+from app.models.subscription_enums import SubscriptionStatus
 from app.schemas.subscriptions import QuotaInfo, QuotaUsage, SubscriptionMe, TrialInfo
 from app.services.licensing_service import LicensingService
 from app.database.subscription_repo import SubscriptionRepository
@@ -217,6 +218,12 @@ class SubscriptionService:
             )
 
         subscription, plan = subscription_plan
+
+        # ── Subscription status check ────────────────────────────────────────
+        # Only ACTIVE subscriptions grant plan access.
+        # PENDING (awaiting payment), CANCELED, etc. should fall back to free.
+        if subscription.status != SubscriptionStatus.ACTIVE:
+            return await SubscriptionService._get_free_plan_defaults(db)
 
         # ── Realtime expiry check ────────────────────────────────────────────
         # The background job deactivates expired subscriptions every 5 minutes,
