@@ -1660,10 +1660,10 @@ async def disable_product(
     |-------------|---------------------|-------------------------------------------|
     | ``true``    | any except archived | → ``archived``; publish link deactivated  |
     | ``true``    | ``archived``        | 409 – already disabled                    |
-    | ``false``   | ``archived``        | → ``draft``                               |
+    | ``false``   | ``archived``        | → ``ready``                               |
     | ``false``   | anything else       | 409 – product is not disabled             |
 
-    Re-enabling always lands on ``draft``. Use ``POST /products/{id}/publish``
+    Re-enabling always lands on ``ready``. Use ``POST /products/{id}/publish``
     to make the product public again.
     """
     # ── Validate & parse UUID from request body ───────────────────────────────
@@ -1724,7 +1724,7 @@ async def disable_product(
                 detail=f"Product is not disabled (current status: {product.status.value})",
             )
 
-        product.status       = ProductStatus.DRAFT
+        product.status       = ProductStatus.READY
         product.updated_by   = current_user.id
         product.updated_date = now
 
