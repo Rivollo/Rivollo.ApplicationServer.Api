@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import Support
 from app.repositories.support_repository import SupportRepository
+from app.services.email_service import EmailService
 
 
 class SupportService:
@@ -21,6 +22,7 @@ class SupportService:
         fullname: str,
         comment: Optional[str],
         user_id: Optional[UUID],
+        user_email: Optional[str] = None,
     ) -> Support:
         """Create a new support request with business logic validation."""
         # Validate fullname
@@ -37,6 +39,12 @@ class SupportService:
             fullname=fullname,
             comment=comment,
             user_id=user_id,
+        )
+
+        await EmailService.send_support_contact_email(
+            fullname=fullname,
+            comment=comment,
+            user_email=user_email or "",
         )
 
         return support_entry

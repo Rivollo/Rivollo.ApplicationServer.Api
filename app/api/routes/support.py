@@ -44,6 +44,7 @@ async def create_support_contact(
             fullname=payload.fullname,
             comment=payload.comment,
             user_id=user_id,
+            user_email=current_user.email,
         )
 
         # Build response
