@@ -5,6 +5,7 @@ Gracefully skips sending if SENDGRID_API_KEY is not configured.
 
 import logging
 from datetime import date
+from typing import Optional
 
 import httpx
 
@@ -16,14 +17,9 @@ _SENDGRID_URL = settings.SENDGRID_URL
 
 
 async def _send(to_email: str, to_name: str, subject: str, html_body: str) -> None:
-    """Send an email via SendGrid. No-op if API key is not configured."""
+    """Send an email via SendGrid."""
     if not settings.SENDGRID_API_KEY:
-        logger.warning(
-            "SENDGRID_API_KEY not configured — skipping email to %s | subject: %s",
-            to_email,
-            subject,
-        )
-        return
+        raise RuntimeError("SENDGRID_API_KEY is not configured.")
 
     payload = {
         "personalizations": [{"to": [{"email": to_email, "name": to_name}]}],
@@ -39,34 +35,25 @@ async def _send(to_email: str, to_name: str, subject: str, html_body: str) -> No
                 json=payload,
                 headers={"Authorization": f"Bearer {settings.SENDGRID_API_KEY}"},
             )
-        if resp.status_code not in (200, 202):
-            try:
-                error_detail = resp.json()
-            except Exception:
-                error_detail = resp.text
-
-            logger.error(
-                "SendGrid failed to send email to %s | subject: %s | status: %s | error: %s",
-                to_email,
-                subject,
-                resp.status_code,
-                error_detail,
-            )
-            raise RuntimeError(
-                f"Failed to send email via SendGrid (status {resp.status_code}): {error_detail}"
-            )
-        logger.info("Email sent successfully to %s | subject: %s", to_email, subject)
     except httpx.TimeoutException:
-        logger.error("SendGrid request timed out for email to %s | subject: %s", to_email, subject)
-        raise RuntimeError("Failed to send email: request timed out. Please try again later.")
+        logger.error("SendGrid timeout | to: %s | subject: %s", to_email, subject)
+        raise RuntimeError("Failed to send email: request timed out.")
     except httpx.RequestError as exc:
+        logger.error("SendGrid network error | to: %s | subject: %s | error: %s", to_email, subject, exc)
+        raise RuntimeError(f"Failed to send email: network error — {exc}")
+
+    if resp.status_code not in (200, 202):
+        try:
+            error_detail = resp.json()
+        except Exception:
+            error_detail = resp.text
         logger.error(
-            "SendGrid network error for email to %s | subject: %s | error: %s",
-            to_email,
-            subject,
-            exc,
+            "SendGrid error | to: %s | subject: %s | status: %s | detail: %s",
+            to_email, subject, resp.status_code, error_detail,
         )
-        raise RuntimeError("Failed to send email: a network error occurred. Please try again later.")
+        raise RuntimeError(f"SendGrid error (status {resp.status_code}): {error_detail}")
+
+    logger.info("Email sent | to: %s | subject: %s", to_email, subject)
 
 
 class EmailService:
@@ -84,6 +71,15 @@ class EmailService:
         subject = f"{settings.SENDGRID_FROM_NAME} — Password Reset Successful"
         html_body = _reset_success_template(name=name, frontend_url=settings.FRONTEND_URL)
         await _send(to_email=to_email, to_name=name, subject=subject, html_body=html_body)
+
+    @staticmethod
+    async def send_support_contact_email(fullname: str, comment: Optional[str], user_email: str) -> None:
+        """Send a support contact notification to the support team."""
+        if not settings.SUPPORT_EMAIL:
+            raise RuntimeError("SUPPORT_EMAIL is not configured.")
+        subject = f"New Support Request from {fullname}"
+        html_body = _support_contact_template(fullname=fullname, comment=comment, user_email=user_email)
+        await _send(to_email=settings.SUPPORT_EMAIL, to_name="Support Team", subject=subject, html_body=html_body)
 
     @staticmethod
     async def send_welcome_email(to_email: str, name: str) -> None:
@@ -600,6 +596,69 @@ def _welcome_template(name: str, frontend_url: str) -> str:
                 You received this email because you signed up for {settings.SENDGRID_FROM_NAME}.
                 <a href="{frontend_url}/unsubscribe" style="color:#aaaaaa;text-decoration:underline;">Unsubscribe</a>
               </p>
+            </td>
+          </tr>
+
+          {footer}
+
+        </table>
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>"""
+
+
+def _support_contact_template(fullname: str, comment: Optional[str], user_email: str) -> str:
+    banner = _banner_header(settings.SENDGRID_FROM_NAME)
+    footer = _footer(settings.SENDGRID_FROM_NAME)
+    comment_html = comment.replace("\n", "<br/>") if comment else "<em style='color:#999999;'>No message provided.</em>"
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>New Support Request</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f0f2f8;font-family:Arial,sans-serif;">
+
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f2f8;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+
+          {banner}
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:40px 40px 32px;">
+
+              <p style="margin:0 0 8px;font-size:11px;letter-spacing:2.5px;color:#3a5bd9;text-transform:uppercase;font-weight:600;">
+                Support Request
+              </p>
+
+              <p style="margin:0 0 24px;font-size:22px;color:#1a1a4e;font-weight:700;line-height:1.3;">
+                New message from {fullname}
+              </p>
+
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;border:1px solid #e8eaf4;border-radius:8px;overflow:hidden;">
+                <tr>
+                  <td style="background-color:#f8f9ff;padding:10px 16px;font-size:12px;color:#888888;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:120px;">Name</td>
+                  <td style="padding:10px 16px;font-size:14px;color:#1a1a4e;">{fullname}</td>
+                </tr>
+                <tr>
+                  <td style="background-color:#f8f9ff;padding:10px 16px;font-size:12px;color:#888888;font-weight:600;text-transform:uppercase;letter-spacing:1px;border-top:1px solid #e8eaf4;">Email</td>
+                  <td style="padding:10px 16px;font-size:14px;color:#1a1a4e;border-top:1px solid #e8eaf4;">
+                    <a href="mailto:{user_email}" style="color:#3a5bd9;text-decoration:none;">{user_email}</a>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="background-color:#f8f9ff;padding:10px 16px;font-size:12px;color:#888888;font-weight:600;text-transform:uppercase;letter-spacing:1px;border-top:1px solid #e8eaf4;vertical-align:top;">Message</td>
+                  <td style="padding:10px 16px;font-size:14px;color:#333333;line-height:1.7;border-top:1px solid #e8eaf4;">{comment_html}</td>
+                </tr>
+              </table>
+
             </td>
           </tr>
 
