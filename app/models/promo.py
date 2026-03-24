@@ -77,6 +77,11 @@ class PromoCode(Base):
         nullable=False,
     )
 
+    description = Column(
+        String(255),
+        nullable=True,
+    )
+
     razorpay_offer_id = Column(
         String(255),
         nullable=True,

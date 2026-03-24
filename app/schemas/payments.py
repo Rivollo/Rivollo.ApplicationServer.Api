@@ -170,6 +170,7 @@ class ValidatePromoResponse(_CamelModel):
     code: str = Field(..., description="The promo code that was validated.")
     discount_type: Optional[str] = Field(None, description="'percentage' or 'fixed'.")
     discount_value: Optional[int] = Field(None, description="Discount amount or percentage.")
+    description: Optional[str] = Field(None, description="Human-readable description of the promo code.")
     razorpay_offer_id: Optional[str] = Field(
         None,
         description="Razorpay offer ID to pass in the checkout payload (if applicable).",
