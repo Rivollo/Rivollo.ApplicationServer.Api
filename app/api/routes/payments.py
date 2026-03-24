@@ -91,6 +91,7 @@ async def validate_promo_code(
         code=promo.code,
         discount_type=promo.discount_type,
         discount_value=promo.discount_value,
+        description=promo.description,
         razorpay_offer_id=promo.razorpay_offer_id,
         message="Promo code is valid.",
     )
