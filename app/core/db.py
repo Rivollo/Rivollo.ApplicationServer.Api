@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import AsyncGenerator, Optional
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
@@ -41,6 +42,24 @@ def _ensure_async_url(url: str) -> str:
 	return url
 
 
+def _attach_managed_identity_token_refresh(engine: AsyncEngine) -> None:
+	"""Register a SQLAlchemy event that injects a fresh Azure AD token as the
+	password before every new database connection is opened.
+
+	DefaultAzureCredential caches the token internally and only calls Azure when
+	the token is close to expiry (~5 min before the 1-hour lifetime ends), so
+	this is cheap to call on every new connection.
+	"""
+	from azure.identity import ManagedIdentityCredential
+
+	_credential = ManagedIdentityCredential(client_id=settings.MANAGED_IDENTITY_CLIENT_ID)
+
+	@event.listens_for(engine.sync_engine, "do_connect")
+	def _inject_token(dialect, conn_rec, cargs, cparams):  # noqa: ANN001
+		token = _credential.get_token(settings.MANAGED_IDENTITY_TOKEN_SCOPE)
+		cparams["password"] = token.token
+
+
 def init_engine_and_session() -> None:
 	global _engine, _SessionLocal
 	if _engine is not None:
@@ -49,6 +68,12 @@ def init_engine_and_session() -> None:
 		raise RuntimeError("DATABASE_URL is not configured. Set it in the environment or .env file.")
 	database_url = _ensure_async_url(settings.DATABASE_URL)
 	_engine = create_async_engine(database_url, pool_pre_ping=True, future=True)
+
+	if settings.USE_MANAGED_IDENTITY:
+		# Attach the event listener that refreshes the Azure AD token before
+		# each new connection.  No password is needed in DATABASE_URL.
+		_attach_managed_identity_token_refresh(_engine)
+
 	_SessionLocal = async_sessionmaker(bind=_engine, expire_on_commit=False)
 
 

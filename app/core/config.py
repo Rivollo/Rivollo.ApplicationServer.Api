@@ -1,6 +1,5 @@
-import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, AliasChoices
+from pydantic import Field, AliasChoices, model_validator
 
 
 class Settings(BaseSettings):
@@ -12,6 +11,23 @@ class Settings(BaseSettings):
 
 	# Database
 	DATABASE_URL: str = Field(default="")
+	# Set to True on Azure (App Service / Container App) to use Managed Identity
+	# instead of a hardcoded password in DATABASE_URL.
+	# The DATABASE_URL should then have NO password, e.g.:
+	#   postgresql+asyncpg://your-app-name@server.postgres.database.azure.com:5432/dbname?ssl=require
+	USE_MANAGED_IDENTITY: bool = Field(default=False)
+	MANAGED_IDENTITY_TOKEN_SCOPE: str = Field(default="https://ossrdbms-aad.database.windows.net/.default")
+	# Required for User-Assigned Managed Identity.
+	MANAGED_IDENTITY_CLIENT_ID: str = Field(default="")
+
+	@model_validator(mode="after")
+	def _require_client_id_for_managed_identity(self) -> "Settings":
+		if self.USE_MANAGED_IDENTITY and not self.MANAGED_IDENTITY_CLIENT_ID:
+			raise ValueError(
+				"MANAGED_IDENTITY_CLIENT_ID must be set when USE_MANAGED_IDENTITY is true. "
+				"Find it in Azure Portal → Managed Identities → your identity → Overview → Client ID."
+			)
+		return self
 
 	# Auth / JWT
 	JWT_SECRET: str = Field(default="dev-change-me")
