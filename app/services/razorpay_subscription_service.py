@@ -148,7 +148,7 @@ async def create_subscription(
 
     payload: dict[str, Any] = {
     "plan_id": razorpay_plan_id,
-    "total_count": 0,
+    "total_count": plan_price.total_count,
     "customer_notify": 1,
     "notes": {
         "user_id": str(user_id),
