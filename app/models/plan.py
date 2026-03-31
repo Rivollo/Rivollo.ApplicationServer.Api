@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text , UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,6 +44,28 @@ class PlanFeature(Base):
     plan: Mapped["Plan"] = relationship("Plan", back_populates="plan_features")
     feature: Mapped["Feature"] = relationship("Feature", back_populates="plan_features")
 
+class PlanPrice(Base):
+    """Pricing for a plan at a specific billing interval."""
+
+    __tablename__ = "tbl_plan_prices"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "billing_interval", name="tbl_plan_prices_plan_interval_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plan_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("tbl_mstr_plans.id", ondelete="CASCADE"), nullable=False)
+    billing_interval: Mapped[str] = mapped_column(String(20), nullable=False)
+    price_inr: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="INR")
+    razorpay_plan_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    trial_period_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    isactive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_date: Mapped[datetime] = mapped_column(nullable=False, default=datetime.utcnow)
+
+    plan: Mapped["Plan"] = relationship("Plan", back_populates="plan_prices")
+
+
 
 class Plan(UUIDMixin, AuditMixin, Base):
     """Subscription plan model (Free, Pro, Enterprise).
@@ -59,12 +81,9 @@ class Plan(UUIDMixin, AuditMixin, Base):
     # The legacy 'quotas' JSON column has been removed in favor of normalized plan_features.
     # New normalized columns
     description: Mapped[Optional[str]] = mapped_column(Text)
-    price_inr: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     is_featured: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     isactive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
-    price_inr_yearly: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    razorpay_plan_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    razorpay_plan_id_yearly: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
 
     # Property for backward compatibility
     @property
@@ -73,4 +92,6 @@ class Plan(UUIDMixin, AuditMixin, Base):
 
     subscriptions: Mapped[list["Subscription"]] = relationship("Subscription", back_populates="plan")
     plan_features: Mapped[list["PlanFeature"]] = relationship("PlanFeature", back_populates="plan", cascade="all, delete-orphan")
+    plan_prices: Mapped[list["PlanPrice"]] = relationship("PlanPrice", back_populates="plan", cascade="all, delete-orphan")
+
 

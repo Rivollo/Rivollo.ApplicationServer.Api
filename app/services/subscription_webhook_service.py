@@ -22,7 +22,7 @@ import hmac
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import select
@@ -38,19 +38,7 @@ from app.models.subscription_enums import LicenseStatus, SubscriptionStatus
 
 _logger = logging.getLogger("rivollo.subscription_webhook_service")
 
-_PERIOD_DAYS = {"monthly": 30, "yearly": 365}
 
-
-def _get_period_days(subscription: "Subscription") -> int:
-    """Read billing_interval from subscription billing JSON and return period days."""
-    if subscription.billing:
-        try:
-            billing_info = json.loads(subscription.billing)
-            interval = billing_info.get("billing_interval", "monthly")
-            return _PERIOD_DAYS.get(interval, 30)
-        except (json.JSONDecodeError, TypeError):
-            pass
-    return 30
 
 
 def _verify_webhook_signature(payload_bytes: bytes, signature_header: str) -> bool:
@@ -99,22 +87,6 @@ async def _get_plan_limits(db: AsyncSession, plan_id: uuid.UUID) -> dict:
             limits[pf.feature.code] = pf.limit_value
     return limits
 
-
-async def _reset_monthly_quotas(
-    db: AsyncSession, subscription_id: uuid.UUID, user_id: uuid.UUID
-) -> None:
-    """Reset monthly usage counters (AI credits, public views) on new billing cycle."""
-    result = await db.execute(
-        select(LicenseAssignment).where(
-            LicenseAssignment.subscription_id == subscription_id,
-            LicenseAssignment.user_id == user_id,
-        )
-    )
-    license_obj = result.scalar_one_or_none()
-    if license_obj:
-        license_obj.usage_ai_credits = 0
-        license_obj.usage_public_views = 0
-        await db.flush()
 
 
 async def _save_payment_from_webhook(
@@ -170,6 +142,49 @@ async def _revoke_license(
         await db.flush()
 
 
+async def _upsert_license(
+    db: AsyncSession,
+    *,
+    subscription: Subscription,
+    user_id: uuid.UUID,
+    limits: dict,
+    reset_usage: bool = False,
+) -> None:
+    """Create or update license assignment for a subscription."""
+    result = await db.execute(
+        select(LicenseAssignment).where(
+            LicenseAssignment.subscription_id == subscription.id,
+            LicenseAssignment.user_id == user_id,
+        )
+    )
+    existing = result.scalar_one_or_none()
+
+    if existing is not None:
+        existing.status = LicenseStatus.ACTIVE
+        existing.limit_max_products = limits.get("max_products", 0)
+        existing.limit_max_ai_credits = limits.get("max_ai_credits_month", 0)
+        existing.limit_max_public_views = limits.get("max_public_views", 0)
+        existing.limit_max_galleries = limits.get("max_galleries", 0)
+        if reset_usage:
+            existing.usage_ai_credits = 0
+            existing.usage_public_views = 0
+    else:
+        db.add(LicenseAssignment(
+            subscription_id=subscription.id,
+            user_id=user_id,
+            status=LicenseStatus.ACTIVE,
+            limit_max_products=limits.get("max_products", 0),
+            limit_max_ai_credits=limits.get("max_ai_credits_month", 0),
+            limit_max_public_views=limits.get("max_public_views", 0),
+            limit_max_galleries=limits.get("max_galleries", 0),
+            usage_products=0,
+            usage_ai_credits=0,
+            usage_public_views=0,
+            usage_galleries=0,
+        ))
+
+    await db.flush()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Event handlers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,10 +219,8 @@ async def _handle_subscription_activated(
 ) -> None:
     """subscription.activated — first payment charged successfully.
 
-    Acts as a safety net: if verify_subscription() already activated the
-    subscription and created the license, this handler is idempotent.
-    If the user closed their browser before /verify was called, this
-    ensures the subscription is still properly activated.
+    Source of truth for period dates, license and payment record.
+    Safe to run multiple times — idempotent.
     """
     subscription = await _get_subscription_by_rz_id(db, rz_subscription_id)
     if not subscription:
@@ -217,58 +230,40 @@ async def _handle_subscription_activated(
         )
         return
 
+    subscription_entity = payload_entity.get("subscription", {}).get("entity", {})
+
+    # ── Update customer_id if not yet stored ────────────────────────────────
+    customer_id = subscription_entity.get("customer_id")
+    if customer_id and not subscription.razorpay_customer_id:
+        subscription.razorpay_customer_id = customer_id
+
+    # ── Set period dates from Razorpay (not computed locally) ────────────────
+    current_start = subscription_entity.get("current_start")
+    current_end = subscription_entity.get("current_end")
     now = datetime.now(timezone.utc)
-    period_days = _get_period_days(subscription)
 
     subscription.status = SubscriptionStatus.ACTIVE
-    subscription.current_period_start = now
-    subscription.current_period_end = now + timedelta(days=period_days)
+    subscription.current_period_start = datetime.fromtimestamp(current_start, tz=timezone.utc) if current_start else now
+    subscription.current_period_end = datetime.fromtimestamp(current_end, tz=timezone.utc) if current_end else None
     subscription.updated_date = now
 
-    # Create/update license — ensures user gets access even if /verify was missed
+    # ── Create/update license ────────────────────────────────────────────────
     limits = await _get_plan_limits(db, subscription.plan_id)
     if limits:
-        result = await db.execute(
-            select(LicenseAssignment).where(
-                LicenseAssignment.subscription_id == subscription.id,
-                LicenseAssignment.user_id == subscription.user_id,
-            )
+        await _upsert_license(
+            db,
+            subscription=subscription,
+            user_id=subscription.user_id,
+            limits=limits,
+            reset_usage=True,
         )
-        existing_license = result.scalar_one_or_none()
 
-        if existing_license is not None:
-            existing_license.status = LicenseStatus.ACTIVE
-            existing_license.limit_max_products = limits.get("max_products", 0)
-            existing_license.limit_max_ai_credits = limits.get("max_ai_credits_month", 0)
-            existing_license.limit_max_public_views = limits.get("max_public_views", 0)
-            existing_license.limit_max_galleries = limits.get("max_galleries", 0)
-        else:
-            license_obj = LicenseAssignment(
-                subscription_id=subscription.id,
-                user_id=subscription.user_id,
-                status=LicenseStatus.ACTIVE,
-                limit_max_products=limits.get("max_products", 0),
-                limit_max_ai_credits=limits.get("max_ai_credits_month", 0),
-                limit_max_public_views=limits.get("max_public_views", 0),
-                limit_max_galleries=limits.get("max_galleries", 0),
-                usage_products=0,
-                usage_ai_credits=0,
-                usage_public_views=0,
-                usage_galleries=0,
-            )
-            db.add(license_obj)
-
-        await db.flush()
-
-    # Save payment record
+    # ── Save payment record ──────────────────────────────────────────────────
     payment_entity = payload_entity.get("payment", {}).get("entity", {})
     rz_payment_id = payment_entity.get("id", "")
     amount = payment_entity.get("amount", 0)
-    plan_code = (
-        json.loads(subscription.billing).get("plan_code", "pro")
-        if subscription.billing
-        else "pro"
-    )
+    billing_info = json.loads(subscription.billing) if subscription.billing else {}
+    plan_code = billing_info.get("plan_code", "unknown")
 
     if rz_payment_id:
         await _save_payment_from_webhook(
@@ -281,9 +276,7 @@ async def _handle_subscription_activated(
             plan_code=plan_code,
         )
 
-    _logger.info(
-        "Webhook activated: rz_sub_id=%s status=active", rz_subscription_id
-    )
+    _logger.info("Webhook activated: rz_sub_id=%s status=active", rz_subscription_id)
 
 
 async def _handle_subscription_charged(
@@ -298,44 +291,40 @@ async def _handle_subscription_charged(
         )
         return
 
-    now = datetime.now(timezone.utc)
-    period_days = _get_period_days(subscription)
+    subscription_entity = payload_entity.get("subscription", {}).get("entity", {})
 
-    # Extend subscription period
+    # ── Update customer_id if not yet stored ────────────────────────────────
+    customer_id = subscription_entity.get("customer_id")
+    if customer_id and not subscription.razorpay_customer_id:
+        subscription.razorpay_customer_id = customer_id
+
+    # ── Extend period from Razorpay payload ──────────────────────────────────
+    current_start = subscription_entity.get("current_start")
+    current_end = subscription_entity.get("current_end")
+    now = datetime.now(timezone.utc)
+
     subscription.status = SubscriptionStatus.ACTIVE
-    subscription.current_period_start = now
-    subscription.current_period_end = now + timedelta(days=period_days)
+    subscription.current_period_start = datetime.fromtimestamp(current_start, tz=timezone.utc) if current_start else now
+    subscription.current_period_end = datetime.fromtimestamp(current_end, tz=timezone.utc) if current_end else None
     subscription.updated_date = now
 
-    # Reset monthly usage quotas
-    await _reset_monthly_quotas(db, subscription.id, subscription.user_id)
-
-    # Refresh license limits (in case plan features changed)
+    # ── Reset monthly quotas and refresh limits ───────────────────────────────
     limits = await _get_plan_limits(db, subscription.plan_id)
     if limits:
-        result = await db.execute(
-            select(LicenseAssignment).where(
-                LicenseAssignment.subscription_id == subscription.id,
-                LicenseAssignment.user_id == subscription.user_id,
-            )
+        await _upsert_license(
+            db,
+            subscription=subscription,
+            user_id=subscription.user_id,
+            limits=limits,
+            reset_usage=True,
         )
-        license_obj = result.scalar_one_or_none()
-        if license_obj:
-            license_obj.status = LicenseStatus.ACTIVE
-            license_obj.limit_max_products = limits.get("max_products", 0)
-            license_obj.limit_max_ai_credits = limits.get("max_ai_credits_month", 0)
-            license_obj.limit_max_public_views = limits.get("max_public_views", 0)
-            license_obj.limit_max_galleries = limits.get("max_galleries", 0)
 
-    # Save payment record
+    # ── Save payment record ──────────────────────────────────────────────────
     payment_entity = payload_entity.get("payment", {}).get("entity", {})
     rz_payment_id = payment_entity.get("id", "")
     amount = payment_entity.get("amount", 0)
-    plan_code = (
-        json.loads(subscription.billing).get("plan_code", "pro")
-        if subscription.billing
-        else "pro"
-    )
+    billing_info = json.loads(subscription.billing) if subscription.billing else {}
+    plan_code = billing_info.get("plan_code", "unknown")
 
     if rz_payment_id:
         await _save_payment_from_webhook(
@@ -351,7 +340,7 @@ async def _handle_subscription_charged(
     _logger.info(
         "Webhook charged: rz_sub_id=%s period extended to %s",
         rz_subscription_id,
-        subscription.current_period_end.isoformat(),
+        subscription.current_period_end,
     )
 
 

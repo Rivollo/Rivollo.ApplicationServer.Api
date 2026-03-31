@@ -77,20 +77,17 @@ async def list_plans(
                 )
 
         # Build pricing options based on configured Razorpay plan IDs
-        monthly_price = getattr(p, "price_inr", None) or 0
-        yearly_price = getattr(p, "price_inr_yearly", None) or 0
-        has_monthly = bool(getattr(p, "razorpay_plan_id", None))
-        has_yearly = bool(getattr(p, "razorpay_plan_id_yearly", None))
-
-        pricing = []
-        if has_monthly or monthly_price > 0:
-            pricing.append(
-                PlanPricing(interval="monthly", priceINR=monthly_price, available=has_monthly)
+        pricing = [
+            PlanPricing(
+                interval=pp.billing_interval,
+                priceINR=pp.price_inr,
+                available=bool(pp.razorpay_plan_id),
             )
-        if has_yearly or yearly_price > 0:
-            pricing.append(
-                PlanPricing(interval="yearly", priceINR=yearly_price, available=has_yearly)
-            )
+            for pp in sorted(p.plan_prices, key=lambda x: x.billing_interval)
+            if pp.isactive
+        ]
+        monthly_price = next((pp.price_inr for pp in p.plan_prices if pp.billing_interval == "monthly"), 0)
+        yearly_price = next((pp.price_inr for pp in p.plan_prices if pp.billing_interval == "yearly"), 0)
 
         # Append to response list using pure database values
         plans_data.append(

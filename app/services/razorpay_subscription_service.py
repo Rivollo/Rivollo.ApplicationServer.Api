@@ -18,7 +18,7 @@ import hmac
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -28,16 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.models.license_assignment import LicenseAssignment
-from app.models.payment import Payment, PaymentStatus
-from app.models.plan import Plan, PlanFeature
+from app.models.plan import Plan, PlanFeature , PlanPrice
 from app.models.subscription import Subscription
-from app.models.subscription_enums import LicenseStatus, SubscriptionStatus
+from app.models.subscription_enums import  SubscriptionStatus
 
 _logger = logging.getLogger("rivollo.razorpay_subscription_service")
 
-_PERIOD_DAYS = {"monthly": 30, "yearly": 365}
-_TOTAL_COUNT = {"monthly": 12, "yearly": 5}
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,20 +72,36 @@ def _verify_subscription_signature(
 
 
 async def _get_plan_with_features(
-    db: AsyncSession, plan_code: str
-) -> tuple[Plan, dict]:
-    """Fetch plan by code with its feature limits."""
-    result = await db.execute(
+    db: AsyncSession, plan_code: str, billing_interval: str = "monthly"
+) -> tuple[Plan, PlanPrice, dict]:
+    """Fetch plan with features and the specific interval pricing."""
+
+    # Load plan + features
+    plan_result = await db.execute(
         select(Plan)
         .where(Plan.code == plan_code, Plan.isactive == True)
         .options(selectinload(Plan.plan_features).selectinload(PlanFeature.feature))
     )
-    plan = result.scalar_one_or_none()
-
+    plan = plan_result.scalar_one_or_none()
     if plan is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Plan '{plan_code}' not found or is no longer active.",
+        )
+
+    # Load pricing for the requested interval
+    price_result = await db.execute(
+        select(PlanPrice).where(
+            PlanPrice.plan_id == plan.id,
+            PlanPrice.billing_interval == billing_interval,
+            PlanPrice.isactive == True,
+        )
+    )
+    plan_price = price_result.scalar_one_or_none()
+    if plan_price is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Plan '{plan_code}' is not available for {billing_interval} billing.",
         )
 
     limits = {}
@@ -96,54 +109,7 @@ async def _get_plan_with_features(
         if pf.feature and pf.limit_value is not None:
             limits[pf.feature.code] = pf.limit_value
 
-    return plan, limits
-
-
-async def _upsert_license(
-    db: AsyncSession,
-    *,
-    subscription: Subscription,
-    user_id: uuid.UUID,
-    limits: dict,
-    reset_usage: bool = False,
-) -> LicenseAssignment:
-    """Create or update license assignment for a subscription."""
-    result = await db.execute(
-        select(LicenseAssignment).where(
-            LicenseAssignment.subscription_id == subscription.id,
-            LicenseAssignment.user_id == user_id,
-        )
-    )
-    existing = result.scalar_one_or_none()
-
-    if existing is not None:
-        existing.status = LicenseStatus.ACTIVE
-        existing.limit_max_products = limits.get("max_products", 0)
-        existing.limit_max_ai_credits = limits.get("max_ai_credits_month", 0)
-        existing.limit_max_public_views = limits.get("max_public_views", 0)
-        existing.limit_max_galleries = limits.get("max_galleries", 0)
-        if reset_usage:
-            existing.usage_ai_credits = 0
-            existing.usage_public_views = 0
-        license_obj = existing
-    else:
-        license_obj = LicenseAssignment(
-            subscription_id=subscription.id,
-            user_id=user_id,
-            status=LicenseStatus.ACTIVE,
-            limit_max_products=limits.get("max_products", 0),
-            limit_max_ai_credits=limits.get("max_ai_credits_month", 0),
-            limit_max_public_views=limits.get("max_public_views", 0),
-            limit_max_galleries=limits.get("max_galleries", 0),
-            usage_products=0,
-            usage_ai_credits=0,
-            usage_public_views=0,
-            usage_galleries=0,
-        )
-        db.add(license_obj)
-
-    await db.flush()
-    return license_obj
+    return plan, plan_price, limits
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,29 +137,26 @@ async def create_subscription(
     _check_credentials()
 
     # ── 1. Get plan from DB ──────────────────────────────────────────────────
-    plan, limits = await _get_plan_with_features(db, plan_code)
-
-    # ── Pick the correct Razorpay plan ID based on billing interval ─────────
-    if billing_interval == "yearly":
-        razorpay_plan_id = plan.razorpay_plan_id_yearly
-    else:
-        razorpay_plan_id = plan.razorpay_plan_id
-
+    plan, plan_price, limits = await _get_plan_with_features(db, plan_code, billing_interval)
+    razorpay_plan_id = plan_price.razorpay_plan_id
     if not razorpay_plan_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Plan '{plan_code}' is not configured for {billing_interval} billing.",
         )
 
-    period_days = _PERIOD_DAYS[billing_interval]
-    total_count = _TOTAL_COUNT[billing_interval]
 
-    # ── 2. Call Razorpay API — create subscription ───────────────────────────
     payload: dict[str, Any] = {
-        "plan_id": razorpay_plan_id,
-        "total_count": total_count,
-        "customer_notify": 1,
-    }
+    "plan_id": razorpay_plan_id,
+    "total_count": 0,
+    "customer_notify": 1,
+    "notes": {
+        "user_id": str(user_id),
+        "plan_code": plan_code,
+        "billing_interval": billing_interval,
+    },
+}
+
 
     if offer_id:
         payload["offer_id"] = offer_id
@@ -317,22 +280,18 @@ async def verify_subscription(
 ) -> dict[str, Any]:
     """Verify Razorpay subscription payment signature and confirm activation.
 
-    Flow:
-        1. Verify HMAC-SHA256 signature (msg = payment_id|subscription_id)
-        2. Find subscription in DB by razorpay_subscription_id
-        3. Confirm subscription is active
-        4. Save payment record
-        5. Return verification result
+    Deliberately thin — only verifies signature and sets status ACTIVE.
+    Period dates, license creation and payment record are handled by
+    the subscription.activated webhook which arrives seconds later.
     """
     _check_credentials()
 
-    # ── 1. Verify signature ──────────────────────────────────────────────────
+    # ── 1. Verify HMAC signature ─────────────────────────────────────────────
     is_valid = _verify_subscription_signature(
         razorpay_payment_id=razorpay_payment_id,
         razorpay_subscription_id=razorpay_subscription_id,
         razorpay_signature=razorpay_signature,
     )
-
     if not is_valid:
         _logger.warning(
             "Subscription signature verification FAILED for rz_sub_id: %s",
@@ -351,48 +310,15 @@ async def verify_subscription(
         )
     )
     subscription = result.scalar_one_or_none()
-
     if subscription is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Subscription not found for this user.",
         )
 
-    # ── 3. Activate subscription — payment is now verified ──────────────────
-    now = datetime.now(timezone.utc)
-    billing_info = json.loads(subscription.billing) if subscription.billing else {}
-    billing_interval = billing_info.get("billing_interval", "monthly")
-    period_days = _PERIOD_DAYS.get(billing_interval, 30)
-
+    # ── 3. Mark active — webhook handles period dates, license, payment record
     subscription.status = SubscriptionStatus.ACTIVE
-    subscription.current_period_start = now
-    subscription.current_period_end = now + timedelta(days=period_days)
-    subscription.updated_date = now
-
-    # ── 3b. Create/update license — user gets Pro access only now ─────────
-    plan, limits = await _get_plan_with_features(db, billing_info.get("plan_code", "pro"))
-    await _upsert_license(
-        db,
-        subscription=subscription,
-        user_id=user_id,
-        limits=limits,
-        reset_usage=True,
-    )
-
-    # ── 4. Save payment record ───────────────────────────────────────────────
-    payment = Payment(
-        user_id=user_id,
-        subscription_id=subscription.id,
-        razorpay_order_id=f"sub_{razorpay_subscription_id}_{razorpay_payment_id}",
-        razorpay_payment_id=razorpay_payment_id,
-        razorpay_signature=razorpay_signature,
-        razorpay_subscription_id=razorpay_subscription_id,
-        amount=0,  # actual amount comes from webhook
-        currency="INR",
-        plan_code=subscription.billing and json.loads(subscription.billing).get("plan_code", "pro") or "pro",
-        status=PaymentStatus.CAPTURED,
-    )
-    db.add(payment)
+    subscription.updated_date = datetime.now(timezone.utc)
 
     await db.commit()
 
@@ -402,13 +328,15 @@ async def verify_subscription(
         user_id,
     )
 
+    billing_info = json.loads(subscription.billing) if subscription.billing else {}
+
     return {
         "verified": True,
         "message": "Payment verified. Your subscription is now active!",
-        "plan": subscription.billing and json.loads(subscription.billing).get("plan_code", "pro") or "pro",
+        "plan": billing_info.get("plan_code", "pro"),
         "subscriptionId": str(subscription.id),
-        "periodEnd": subscription.current_period_end,
     }
+
 
 
 async def cancel_subscription(
