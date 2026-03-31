@@ -64,6 +64,7 @@ class PlanPrice(Base):
     created_date: Mapped[datetime] = mapped_column(nullable=False, default=datetime.utcnow)
 
     plan: Mapped["Plan"] = relationship("Plan", back_populates="plan_prices")
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1200")
 
 
 
