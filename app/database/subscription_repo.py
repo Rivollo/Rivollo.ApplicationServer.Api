@@ -18,7 +18,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import LicenseAssignment, Product, Subscription
-from app.models.plan import Plan, PlanFeature
+from app.models.plan import Plan, PlanFeature , PlanPrice
 from app.queries.subscription_queries import (
     DEACTIVATE_EXPIRED_SUBSCRIPTIONS,
     REVOKE_LICENSES_FOR_SUBSCRIPTIONS,
@@ -99,7 +99,8 @@ class SubscriptionRepository:
             select(Plan)
             .where(Plan.code == plan_code)
             .options(
-                selectinload(Plan.plan_features).selectinload(PlanFeature.feature)
+                selectinload(Plan.plan_features).selectinload(PlanFeature.feature),
+                selectinload(Plan.plan_prices)
             )
         )
         return result.scalar_one_or_none()
@@ -119,7 +120,8 @@ class SubscriptionRepository:
             select(Plan)
             .where(Plan.isactive == True)
             .options(
-                selectinload(Plan.plan_features).selectinload(PlanFeature.feature)
+                selectinload(Plan.plan_features).selectinload(PlanFeature.feature),
+                selectinload(Plan.plan_prices)
             )
             .order_by(Plan.created_date.asc())
         )
