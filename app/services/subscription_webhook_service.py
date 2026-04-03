@@ -25,7 +25,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -35,6 +36,7 @@ from app.models.payment import Payment, PaymentStatus
 from app.models.plan import Plan, PlanFeature
 from app.models.subscription import Subscription
 from app.models.subscription_enums import LicenseStatus, SubscriptionStatus
+from app.models.webhook_event import WebhookEvent
 
 _logger = logging.getLogger("rivollo.subscription_webhook_service")
 
@@ -439,14 +441,13 @@ async def handle_subscription_webhook(
         return {"status": "ok"}
 
     event: str = payload.get("event", "")
-    _logger.info("Subscription webhook received: event=%s", event)
+    event_id: str = payload.get("id", "")
+    _logger.info("Subscription webhook received: event=%s id=%s", event, event_id)
 
     # ── 3. Route to appropriate handler ──────────────────────────────────────
     handler = _EVENT_HANDLERS.get(event)
 
     if handler is None:
-        # Not a subscription event — could be payment.captured from old flow
-        # Pass through to existing payment webhook handler
         _logger.info("Webhook event '%s' not a subscription event — skipping.", event)
         return {"status": "ok", "skipped": True}
 
@@ -464,11 +465,44 @@ async def handle_subscription_webhook(
         _logger.error("Webhook payload structure error: %s", exc)
         return {"status": "ok"}
 
-    # ── 5. Process the event ─────────────────────────────────────────────────
+    # ── 5. Save event log (idempotency — skip if already processed) ──────────
+    if event_id:
+        stmt = (
+            pg_insert(WebhookEvent)
+            .values(
+                event_id=event_id,
+                event=event,
+                rz_sub_id=rz_subscription_id,
+                payload=payload,
+                processed=False,
+            )
+            .on_conflict_do_nothing(index_elements=["event_id"])
+        )
+        result = await db.execute(stmt)
+        await db.flush()
+
+        # If nothing was inserted, this event was already processed — skip
+        if result.rowcount == 0:
+            _logger.info("Webhook event_id=%s already processed — skipping.", event_id)
+            return {"status": "ok"}
+
+    # ── 6. Process the event ─────────────────────────────────────────────────
+    error_message: Optional[str] = None
     try:
         await handler(db, rz_subscription_id, payload_data)
+
+        # Mark event as successfully processed
+        if event_id:
+            await db.execute(
+                update(WebhookEvent)
+                .where(WebhookEvent.event_id == event_id)
+                .values(processed=True)
+            )
+
         await db.commit()
+
     except Exception as exc:
+        error_message = str(exc)
         _logger.exception(
             "Webhook handler failed for event=%s rz_sub_id=%s: %s",
             event,
@@ -476,5 +510,17 @@ async def handle_subscription_webhook(
             exc,
         )
         await db.rollback()
+
+        # Save error on the event log row in a new transaction
+        if event_id:
+            try:
+                await db.execute(
+                    update(WebhookEvent)
+                    .where(WebhookEvent.event_id == event_id)
+                    .values(error=error_message)
+                )
+                await db.commit()
+            except Exception:
+                pass
 
     return {"status": "ok"}

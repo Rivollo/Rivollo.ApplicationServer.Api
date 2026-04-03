@@ -7,6 +7,7 @@ from . import subscription  # noqa: F401
 from . import license_assignment  # noqa: F401
 from . import subscription_enums  # noqa: F401
 from . import link_share_log  # noqa: F401
+from . import webhook_event  # noqa: F401
 
 
 __all__ = ["Base"]
