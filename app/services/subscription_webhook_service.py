@@ -63,9 +63,9 @@ async def _get_subscription_by_rz_id(
 ) -> Optional[Subscription]:
     """Find subscription by Razorpay subscription ID."""
     result = await db.execute(
-        select(Subscription).where(
-            Subscription.razorpay_subscription_id == rz_subscription_id
-        )
+        select(Subscription)
+        .where(Subscription.razorpay_subscription_id == rz_subscription_id)
+        .options(selectinload(Subscription.plan))
     )
     return result.scalar_one_or_none()
 
@@ -262,8 +262,7 @@ async def _handle_subscription_activated(
     payment_entity = payload_entity.get("payment", {}).get("entity", {})
     rz_payment_id = payment_entity.get("id", "")
     amount = payment_entity.get("amount", 0)
-    billing_info = json.loads(subscription.billing) if subscription.billing else {}
-    plan_code = billing_info.get("plan_code", "unknown")
+    plan_code = subscription.plan.code if subscription.plan else "unknown"
 
     if rz_payment_id:
         await _save_payment_from_webhook(
@@ -323,8 +322,7 @@ async def _handle_subscription_charged(
     payment_entity = payload_entity.get("payment", {}).get("entity", {})
     rz_payment_id = payment_entity.get("id", "")
     amount = payment_entity.get("amount", 0)
-    billing_info = json.loads(subscription.billing) if subscription.billing else {}
-    plan_code = billing_info.get("plan_code", "unknown")
+    plan_code = subscription.plan.code if subscription.plan else "unknown"
 
     if rz_payment_id:
         await _save_payment_from_webhook(

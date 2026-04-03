@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Enum, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import Enum, ForeignKey, Index, Integer, String, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, column_property, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -47,8 +47,8 @@ class Subscription(UUIDMixin, Base):
         Enum(SubscriptionStatus, name="subscription_status", native_enum=False), nullable=False
     )
     seats_purchased: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
-    # billing column is TEXT in database, but we treat it as JSONB in Python
-    billing: Mapped[Optional[str]] = mapped_column(Text)
+    billing_interval: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    offer_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # These columns exist in the database as nullable timestamps
     current_period_start: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
