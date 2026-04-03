@@ -15,7 +15,7 @@ Security:
 
 import hashlib
 import hmac
-import json
+
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -137,7 +137,7 @@ async def create_subscription(
     _check_credentials()
 
     # ── 1. Get plan from DB ──────────────────────────────────────────────────
-    plan, plan_price, limits = await _get_plan_with_features(db, plan_code, billing_interval)
+    plan, plan_price, _ = await _get_plan_with_features(db, plan_code, billing_interval)
     razorpay_plan_id = plan_price.razorpay_plan_id
     if not razorpay_plan_id:
         raise HTTPException(
@@ -215,21 +215,14 @@ async def create_subscription(
     )
     existing_sub = existing_result.scalar_one_or_none()
 
-    billing_data = {
-        "razorpay_subscription_id": rz_subscription_id,
-        "plan_code": plan_code,
-        "billing_interval": billing_interval,
-        "offer_id": offer_id,
-        "created_at": now.isoformat(),
-    }
-
     if existing_sub is not None:
         # Update existing subscription row — keep status PENDING until payment is verified
         existing_sub.plan_id = plan.id
         existing_sub.status = SubscriptionStatus.PENDING
         existing_sub.razorpay_subscription_id = rz_subscription_id
         existing_sub.razorpay_customer_id = rz_customer_id
-        existing_sub.billing = json.dumps(billing_data)
+        existing_sub.billing_interval = billing_interval
+        existing_sub.offer_id = offer_id
         existing_sub.updated_by = user_id
         existing_sub.updated_date = now
         subscription = existing_sub
@@ -242,7 +235,8 @@ async def create_subscription(
             seats_purchased=1,
             razorpay_subscription_id=rz_subscription_id,
             razorpay_customer_id=rz_customer_id,
-            billing=json.dumps(billing_data),
+            billing_interval=billing_interval,
+            offer_id=offer_id,
             created_by=user_id,
         )
         db.add(subscription)
@@ -304,10 +298,12 @@ async def verify_subscription(
 
     # ── 2. Find subscription in DB ───────────────────────────────────────────
     result = await db.execute(
-        select(Subscription).where(
+        select(Subscription)
+        .where(
             Subscription.razorpay_subscription_id == razorpay_subscription_id,
             Subscription.user_id == user_id,
         )
+        .options(selectinload(Subscription.plan))
     )
     subscription = result.scalar_one_or_none()
     if subscription is None:
@@ -328,12 +324,10 @@ async def verify_subscription(
         user_id,
     )
 
-    billing_info = json.loads(subscription.billing) if subscription.billing else {}
-
     return {
         "verified": True,
         "message": "Payment verified. Your subscription is now active!",
-        "plan": billing_info.get("plan_code", "pro"),
+        "plan": subscription.plan.code if subscription.plan else "pro",
         "subscriptionId": str(subscription.id),
     }
 
