@@ -466,25 +466,26 @@ async def handle_subscription_webhook(
         return {"status": "ok"}
 
     # ── 5. Save event log (idempotency — skip if already processed) ──────────
-    if event_id:
-        stmt = (
-            pg_insert(WebhookEvent)
-            .values(
-                event_id=event_id,
-                event=event,
-                rz_sub_id=rz_subscription_id,
-                payload=payload,
-                processed=False,
-            )
-            .on_conflict_do_nothing(index_elements=["event_id"])
+    # Use Razorpay event_id if present, otherwise fall back to a generated UUID
+    effective_event_id = event_id or str(uuid.uuid4())
+    stmt = (
+        pg_insert(WebhookEvent)
+        .values(
+            event_id=effective_event_id,
+            event=event,
+            rz_sub_id=rz_subscription_id,
+            payload=payload,
+            processed=False,
         )
-        result = await db.execute(stmt)
-        await db.flush()
+        .on_conflict_do_nothing(index_elements=["event_id"])
+    )
+    result = await db.execute(stmt)
+    await db.flush()
 
-        # If nothing was inserted, this event was already processed — skip
-        if result.rowcount == 0:
-            _logger.info("Webhook event_id=%s already processed — skipping.", event_id)
-            return {"status": "ok"}
+    # If nothing was inserted, this event was already processed — skip
+    if result.rowcount == 0:
+        _logger.info("Webhook event_id=%s already processed — skipping.", effective_event_id)
+        return {"status": "ok"}
 
     # ── 6. Process the event ─────────────────────────────────────────────────
     error_message: Optional[str] = None
@@ -492,12 +493,11 @@ async def handle_subscription_webhook(
         await handler(db, rz_subscription_id, payload_data)
 
         # Mark event as successfully processed
-        if event_id:
-            await db.execute(
-                update(WebhookEvent)
-                .where(WebhookEvent.event_id == event_id)
-                .values(processed=True)
-            )
+        await db.execute(
+            update(WebhookEvent)
+            .where(WebhookEvent.event_id == effective_event_id)
+            .values(processed=True)
+        )
 
         await db.commit()
 
@@ -512,15 +512,14 @@ async def handle_subscription_webhook(
         await db.rollback()
 
         # Save error on the event log row in a new transaction
-        if event_id:
-            try:
-                await db.execute(
-                    update(WebhookEvent)
-                    .where(WebhookEvent.event_id == event_id)
-                    .values(error=error_message)
-                )
-                await db.commit()
-            except Exception:
-                pass
+        try:
+            await db.execute(
+                update(WebhookEvent)
+                .where(WebhookEvent.event_id == effective_event_id)
+                .values(error=error_message)
+            )
+            await db.commit()
+        except Exception:
+            pass
 
     return {"status": "ok"}
