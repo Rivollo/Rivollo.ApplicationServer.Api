@@ -467,7 +467,7 @@ async def handle_subscription_webhook(
 
     # ── 5. Save event log (idempotency — skip if already processed) ──────────
     # Use Razorpay event_id if present, otherwise fall back to a generated UUID
-    effective_event_id = event_id or str(uuid.uuid4())
+    effective_event_id = event_id or f"{event}_{rz_subscription_id}"
     stmt = (
         pg_insert(WebhookEvent)
         .values(
