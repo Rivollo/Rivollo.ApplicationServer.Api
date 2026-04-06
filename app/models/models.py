@@ -729,9 +729,12 @@ class Upload(UUIDMixin, CreatedAtMixin, Base):
     __tablename__ = "uploads"
 
     filename: Mapped[str] = mapped_column(String, nullable=False)
-    upload_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # Nullable: direct server-side uploads have no presigned upload URL
+    upload_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     file_url: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[str] = mapped_column(String, nullable=False)
+    # Stores ancillary data: blob_url, conversion metadata, etc.
+    meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
 
 class AssetPart(UUIDMixin, CreatedAtMixin, Base):
@@ -742,9 +745,16 @@ class AssetPart(UUIDMixin, CreatedAtMixin, Base):
     )
     part_name: Mapped[str] = mapped_column(String, nullable=False)
     storage: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'azure_blob'"))
+    # CDN-fronted public URL served to clients
     url: Mapped[str] = mapped_column(Text, nullable=False)
+    # Raw Azure blob URL — used internally for re-processing / downloads
+    blob_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     mime_type: Mapped[Optional[str]] = mapped_column(String)
     size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger)
+    # Display / sort order within an asset
+    position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Arbitrary metadata (format, conversion info, etc.)
+    meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
 
 # Alias for backwards compatibility

@@ -63,7 +63,7 @@ class ProductService:
         image_content_type: Optional[str] = None,
         image_size_bytes: Optional[int] = None,
 
-        # ✅ NEW MASK PARAMETERS
+        #  NEW MASK PARAMETERS
         mask_stream: Optional[BinaryIO] = None,
         mask_filename: Optional[str] = None,
         mask_content_type: Optional[str] = None,
@@ -95,36 +95,37 @@ class ProductService:
         # -------------------------------
         # 2. Upload original image
         # -------------------------------
-        blob_url = f"https://placeholder.dev/{user_id_str}/{product_id}/{image_filename}"
         try:
             image_stream.seek(0)
-            _, blob_url = storage_service.upload_product_image(
+            cdn_url, blob_url = storage_service.upload_product_image(
                 user_id=user_id_str,
                 product_id=product_id,
                 filename=image_filename,
                 content_type=image_content_type,
                 stream=image_stream,
             )
-            logger.info("Image uploaded: %s", blob_url)
+            logger.info("Image uploaded: cdn=%s blob=%s", cdn_url, blob_url)
         except Exception as e:
-            logger.error("Image upload failed, using placeholder: %s", e)
+            logger.exception("Image upload failed")
+            raise RuntimeError("Failed to upload product image") from e
 
         # -------------------------------
         # 3. Upload MASK image (NEW)
         # -------------------------------
-        mask_blob_url = f"https://placeholder.dev/{user_id_str}/{product_id}/{mask_filename}"
+        mask_cdn_url: Optional[str] = None
+        mask_blob_url: Optional[str] = None
 
         if mask_stream and mask_filename:
             try:
                 mask_stream.seek(0)
-                _, mask_blob_url = storage_service.upload_product_image(
+                mask_cdn_url, mask_blob_url = storage_service.upload_product_image(
                     user_id=user_id_str,
                     product_id=product_id,
                     filename=f"mask_{mask_filename}",
                     content_type=mask_content_type,
                     stream=mask_stream,
                 )
-                logger.info("Mask uploaded: %s", mask_blob_url)
+                logger.info("Mask uploaded: cdn=%s blob=%s", mask_cdn_url, mask_blob_url)
             except Exception as e:
                 logger.exception("Mask upload failed")
                 raise RuntimeError("Failed to upload mask image") from e
@@ -133,9 +134,10 @@ class ProductService:
         # 4. Create ProductAsset + Mapping
         # -------------------------------
         try:
+            # Store CDN URL in DB — this is what gets served to end users
             product_asset = ProductAsset(
                 asset_id=asset_id,
-                image=blob_url,
+                image=cdn_url,
                 size_bytes=image_size_bytes,
                 created_by=user_id,
             )
@@ -155,10 +157,10 @@ class ProductService:
             # -------------------------------
             # 5. Create ProductAsset (MASK) - NEW
             # -------------------------------
-            if mask_blob_url:
+            if mask_cdn_url:
                 mask_asset = ProductAsset(
                     asset_id=mesh_asset_id,
-                    image=mask_blob_url,
+                    image=mask_cdn_url,
                     size_bytes=mask_size_bytes,
                     created_by=user_id,
                 )
@@ -199,6 +201,7 @@ class ProductService:
                     mesh_asset_id=mesh_asset_id,
                     name=name,
                     target_format=target_format,
+                    # Pass raw blob URL to internal 3D API — avoids CDN cache/auth issues
                     blob_url=blob_url,
                     mask_blob_url=mask_blob_url,
                 )
@@ -212,6 +215,7 @@ class ProductService:
                 payload = {
                     "product_id": str(product.id),
                     "user_id": str(user_id),
+                    # Blob URLs for internal worker — not CDN, avoids cache
                     "blob_url": blob_url,
                     "mask_blob_url": mask_blob_url,
                     "target_format": target_format,
@@ -226,8 +230,8 @@ class ProductService:
                         product.id,
                     )
 
-        # ✅ FINAL RETURN — glb_url is set for PRO, None for FREE
-        return product, blob_url, mask_blob_url, glb_url
+        # Return CDN URL to callers — blob_url kept for internal use only
+        return product, cdn_url, mask_cdn_url, glb_url
 
     @staticmethod
     async def generate_3d_and_finalize(
@@ -359,19 +363,18 @@ class ProductService:
         # -------------------------------
         # 1. Upload background image
         # -------------------------------
-        blob_url = f"https://placeholder.dev/{user_id}/{product_id}/backgrounds/{image_filename}"
         try:
             image_stream.seek(0)
-            _, blob_url = storage_service.upload_background_image(
+            cdn_url, _blob_url = storage_service.upload_background_image(
                 user_id=str(user_id),
                 product_id=str(product_id),
                 filename=image_filename,
                 content_type=image_content_type,
                 stream=image_stream,
             )
-            logger.info("Background image uploaded: %s", blob_url)
+            logger.info("Background image uploaded: %s", cdn_url)
         except Exception as e:
-            logger.error("Background image upload failed, using placeholder: %s", e)
+            logger.exception("Background image upload failed")
             raise RuntimeError("Failed to upload background image") from e
         
         # -------------------------------
@@ -395,7 +398,7 @@ class ProductService:
                 background_type_id=2,  # image type
                 name=f"Background Image {image_filename}",
                 description="Uploaded background image",
-                image=blob_url,
+                image=cdn_url,  # CDN URL stored in DB — served directly to clients
                 isactive=True,
                 created_by=user_id,
                 created_date=datetime.utcnow(),
@@ -407,8 +410,8 @@ class ProductService:
             logger.exception("Failed to create Background record")
             await db.rollback()
             raise RuntimeError("Failed to create Background record") from e
-        
-        return next_id, blob_url
+
+        return next_id, cdn_url
 
     @staticmethod
     async def update_product_background_color(

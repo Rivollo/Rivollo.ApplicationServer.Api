@@ -154,7 +154,8 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 				glb_asset_part = AssetPart(
 					asset_id=asset.id,
 					part_name="model_glb",
-					file_url=glb_url,
+					url=glb_url,
+					blob_url=glb_blob_url,
 					mime_type=content_type or "model/gltf-binary",
 					size_bytes=len(resp.content),
 					position=0,
@@ -162,29 +163,24 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 						"format": "glb",
 						"has_converted_formats": True,
 						"converted_formats": ["usdz"],
-						"usdz_url": usdz_url,
-						"blob_url": glb_blob_url,
-						"asset_url_base": asset_url_base
-					}
+						"asset_url_base": asset_url_base,
+					},
 				)
 				db.add(glb_asset_part)
-				
 				# Create asset part record for USDZ
 				usdz_asset_part = AssetPart(
 					asset_id=asset.id,
 					part_name="model_usdz",
-					file_url=usdz_url,
+					url=usdz_url,
+					blob_url=usdz_blob_url,
 					mime_type=usdz_content_type,
 					size_bytes=len(usdz_bytes),
 					position=1,
 					meta={
 						"format": "usdz",
 						"converted_from": "glb",
-						"source_file_url": glb_url,
-						"is_converted_format": True,
-						"blob_url": usdz_blob_url,
-						"asset_url_base": asset_url_base
-					}
+						"asset_url_base": asset_url_base,
+					},
 				)
 				db.add(usdz_asset_part)
 				
@@ -210,20 +206,19 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 					job.id, asset.id, glb_url, usdz_url
 				)
 				
-				# Return the job status with blob URLs instead of CDN URLs
 				return api_success({
 					"id": _job_public_id(job.id),
 					"status": job.status.value,
 					"assetId": str(asset.id),
-					"glburl": glb_blob_url,
-					"usdzURL": usdz_blob_url,
+					"glburl": glb_url,
+					"usdzURL": usdz_url,
 					"conversionStatus": {
 						"usdz": {
 							"attempted": True,
 							"successful": True,
-							"error": None
+							"error": None,
 						}
-					}
+					},
 				})
 				
 			except Exception as e:
@@ -245,7 +240,8 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 				asset_part = AssetPart(
 					asset_id=asset.id,
 					part_name=part_name,
-					file_url=file_url,
+					url=file_url,
+					blob_url=blob_url,
 					mime_type=content_type or "model/gltf-binary",
 					size_bytes=len(resp.content),
 					position=0,
@@ -254,8 +250,7 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 						"conversion_attempted": True,
 						"conversion_failed": True,
 						"conversion_error": str(e),
-						"blob_url": blob_url
-					}
+					},
 				)
 				db.add(asset_part)
 				
@@ -275,20 +270,19 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 					job.id, file_url
 				)
 				
-				# Return the job status with blob URL and conversion failure info
 				return api_success({
 					"id": _job_public_id(job.id),
 					"status": job.status.value,
 					"assetId": str(asset.id),
-					"glburl": blob_url,
+					"glburl": file_url,
 					"usdzURL": None,
 					"conversionStatus": {
 						"usdz": {
 							"attempted": True,
 							"successful": False,
-							"error": str(e)
+							"error": str(e),
 						}
-					}
+					},
 				})
 		else:
 			# Handle non-GLB files normally (GLTF, etc.)
@@ -305,14 +299,12 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 			asset_part = AssetPart(
 				asset_id=asset.id,
 				part_name=part_name,
-				file_url=file_url,
+				url=file_url,
+				blob_url=blob_url,
 				mime_type=content_type or "model/gltf-binary",
 				size_bytes=len(resp.content),
 				position=0,
-				meta={
-					"format": original_extension,
-					"blob_url": blob_url
-				}
+				meta={"format": original_extension},
 			)
 			db.add(asset_part)
 		
@@ -330,13 +322,12 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 			logger.info("Successfully processed completed job %s, created asset %s with streaming URL %s", 
 					   job.id, asset.id, file_url)
 			
-			# Return the job status with blob URL instead of CDN URL
 			return api_success({
 				"id": _job_public_id(job.id),
 				"status": job.status.value,
 				"assetId": str(asset.id),
-				"glburl": blob_url,
-				"usdzURL": None
+				"glburl": file_url,
+				"usdzURL": None,
 			})
 		
 	except Exception as ex:
@@ -380,12 +371,12 @@ def create_job(payload: CreateJobRequest, user_id: str = Depends(get_current_use
         except Exception:
             logger.exception("Failed to mark job as failed in DB")
 
-    # 1) Download the image from the provided URL (prefer Azure if URL matches our CDN)
+    # 1) Download the image from the provided URL (prefer Azure blob if URL matches our CDN)
     try:
         image_bytes: bytes
         content_type: str
         filename: str
-        base = (settings.CDN_BASE_URL or "").rstrip("/")
+        base = settings.CDN_BASE_URL.rstrip("/") if settings.CDN_BASE_URL else ""
         if base and image_url.startswith(f"{base}/"):
             image_bytes, ct, filename = storage_service.download_upload_blob_bytes(image_url)
             content_type = ct or "application/octet-stream"
@@ -631,37 +622,33 @@ def get_job(id: str, user_id: str = Depends(get_current_user_id), db: Session = 
 			asset_id = str(asset.id)
 			logger.info("Found asset %s for job %s", asset_id, job.id)
 			
-			# Get all asset parts
+			# Get all asset parts ordered by position
 			asset_parts = db.query(AssetPart).filter(AssetPart.asset_id == asset.id).order_by(AssetPart.position.asc()).all()
-			
+
 			formats = {}
 			for part in asset_parts:
 				part_meta = part.meta or {}
 				part_format = part_meta.get("format", "unknown")
-				formats[part_format] = part.file_url
-				
-				# Store blob URLs if available
-				if "blob_url" in part_meta:
-					blob_urls[part_format] = part_meta["blob_url"]
-				
+				# part.url is always the CDN URL
+				formats[part_format] = part.url
+
 				# Store asset base URL if available
-				if "asset_url_base" in part_meta and not asset_url:
+				if part_meta.get("asset_url_base") and not asset_url:
 					asset_url = part_meta["asset_url_base"]
-				
-				# Set primary file URL (GLB takes precedence)
+
+				# Set primary CDN URL (GLB takes precedence)
 				if part_format == "glb" or file_url is None:
-					file_url = part.file_url
-				
-				# Set USDZ URL if available
+					file_url = part.url
+
+				# Set USDZ CDN URL if available
 				if part_format == "usdz":
-					usdz_url = part.file_url
-			
+					usdz_url = part.url
+
 			has_multiple_formats = len(formats) > 1
 			logger.info("Asset %s has formats: %s", asset_id, list(formats.keys()))
-	
-	# Use blob URLs if available, otherwise fall back to CDN URLs
-	glb_response_url = blob_urls.get("glb", file_url)
-	usdz_response_url = blob_urls.get("usdz", usdz_url)
+
+	glb_response_url = file_url
+	usdz_response_url = usdz_url
 	
 	response_data = {
 		"id": _job_public_id(job.id), 

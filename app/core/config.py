@@ -52,13 +52,32 @@ class Settings(BaseSettings):
 	# Frontend base URL (used in email links)
 	FRONTEND_URL: str = Field(default="http://localhost:3000")
 
-	# Storage / CDN placeholders (wire Azure later)
-	CDN_BASE_URL: str = Field(default="https://cdn.example")
+	# Storage / CDN — set CDN_BASE_URL to your Azure CDN / Front Door hostname (no trailing slash)
+	CDN_BASE_URL: str = Field(default="")
 	STORAGE_CONTAINER_UPLOADS: str = Field(default="uploads")
 	STORAGE_CONTAINER_MEDIA: str = Field(default="")  # product/background images; falls back to STORAGE_CONTAINER_UPLOADS
 	AZURE_STORAGE_ACCOUNT: str = Field(default="")
 	AZURE_STORAGE_KEY: str = Field(default="")
 	AZURE_STORAGE_CONN_STRING: str = Field(default="")
+
+	# Azure Blob Storage base URL — used by CDN middleware to rewrite blob URLs in responses.
+	# Set explicitly in .env, or leave blank to auto-derive from AZURE_STORAGE_ACCOUNT.
+	AZURE_BLOB_BASE_URL: str = Field(default="")
+
+	@model_validator(mode="after")
+	def _derive_blob_base_url(self) -> "Settings":
+		if self.AZURE_BLOB_BASE_URL:
+			return self
+		if self.AZURE_STORAGE_ACCOUNT:
+			self.AZURE_BLOB_BASE_URL = f"https://{self.AZURE_STORAGE_ACCOUNT}.blob.core.windows.net"
+			return self
+		for part in self.AZURE_STORAGE_CONN_STRING.split(";"):
+			if part.startswith("AccountName="):
+				account = part[len("AccountName="):]
+				if account:
+					self.AZURE_BLOB_BASE_URL = f"https://{account}.blob.core.windows.net"
+					return self
+		return self
 
 	# External model service endpoint
 	MODEL_SERVICE_URL: str = Field(default="mock://local")
