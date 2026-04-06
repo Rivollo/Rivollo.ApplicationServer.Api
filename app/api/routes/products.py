@@ -382,7 +382,7 @@ async def create_product_with_image(
 
     # Use ProductService to create product and upload image
     try:
-        product, blob_url, mask_blob_url, glb_url = await product_service.create_product_with_image(
+        product, image_url, mask_image_url, glb_url = await product_service.create_product_with_image(
             db=db,
             user_id=user_uuid,
             name=name,
@@ -437,10 +437,10 @@ async def create_product_with_image(
     )
 
     response_dict = response_data.model_dump(exclude_none=True)
-    response_dict["image_blob_url"] = blob_url
+    response_dict["imageURL"] = image_url
     if glb_url:
         # PRO users: 3D generation ran synchronously, GLB is ready now
-        response_dict["glb_url"] = glb_url
+        response_dict["glbURL"] = glb_url
 
     return api_success(response_dict)
 
@@ -1397,7 +1397,7 @@ async def update_product_details(
             product.description = description
 
         # Handle background with priority system
-        background_blob_url = None
+        background_image_url = None
         
         # Priority 1: Background image file upload
         if background_image and background_image.filename:
@@ -1423,7 +1423,7 @@ async def update_product_details(
                 image_stream = io.BytesIO(image_bytes)
                 
                 # Use ProductService
-                background_id, background_blob_url = await product_service.update_product_background_image(
+                background_id, background_image_url = await product_service.update_product_background_image(
                     db=db,
                     product_id=prod_uuid,
                     user_id=current_user.id,

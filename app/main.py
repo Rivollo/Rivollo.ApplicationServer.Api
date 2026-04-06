@@ -33,6 +33,7 @@ from app.api.routes.razorpay_subscriptions import router as razorpay_subscriptio
 from app.api.routes.payments import router as payments_router
 from app.utils.envelopes import api_success, api_error
 from app.core.db import init_engine_and_session
+from app.middleware.cdn import BlobToCdnMiddleware
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +149,10 @@ app.add_middleware(
 	allow_methods=["*"],
 	allow_headers=["*"],
 )
+
+# Rewrite Azure Blob Storage URLs → CDN URLs in all JSON responses.
+# No-op when AZURE_STORAGE_ACCOUNT or CDN_BASE_URL is not configured.
+app.add_middleware(BlobToCdnMiddleware)
 
 # Normalize API prefix (must not end with '/')
 _api_prefix = settings.API_PREFIX.rstrip("/")
