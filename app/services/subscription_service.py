@@ -150,22 +150,33 @@ class SubscriptionService:
             SubscriptionMe with free plan defaults
         """
         from app.database.subscription_repo import SubscriptionRepository
-        # We don't really rely on the plan object anymore since quotas was dropped.
-        # We manually provide the baseline here, or could fetch from tbl_plan_features later.
-        # For performance, returning hardcoded defaults for users purely without any license row.
-        
+
+        # Safety defaults — used only if free plan is missing from DB
+        limits = {
+            "max_ai_credits_month": 5,
+            "max_public_views": 1000,
+            "max_products": 2,
+            "max_galleries": 0,
+        }
+
+        free_plan = await SubscriptionRepository.get_plan_with_features(db, "free")
+        if free_plan:
+            for pf in free_plan.plan_features:
+                if pf.feature and pf.limit_value is not None:
+                    limits[pf.feature.code] = pf.limit_value
+
         return SubscriptionMe(
             plan="free",
             trial=TrialInfo(active=False, daysRemaining=0, startedAt=None),
             quotas={
                 "aiCredits": QuotaUsage(
-                    included=5, purchased=0, used=0
+                    included=limits["max_ai_credits_month"], purchased=0, used=0
                 ).model_dump(),
                 "publicViews": QuotaUsage(
-                    included=1000, purchased=0, used=0
+                    included=limits["max_public_views"], purchased=0, used=0
                 ).model_dump(),
-                "products": QuotaInfo(used=0, limit=2).model_dump(),
-                "galleries": QuotaInfo(used=0, limit=0).model_dump(),
+                "products": QuotaInfo(used=0, limit=limits["max_products"]).model_dump(),
+                "galleries": QuotaInfo(used=0, limit=limits["max_galleries"]).model_dump(),
             },
         )
 
