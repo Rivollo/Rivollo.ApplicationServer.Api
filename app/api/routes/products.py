@@ -481,8 +481,6 @@ async def get_hotspot_types(db: DB):
     return api_success(HotspotTypesResponse(items=items).model_dump())
 
 
-
-
 @router.get("/products/{product_id}", response_model=dict)
 async def get_product(
     product_id: str,
