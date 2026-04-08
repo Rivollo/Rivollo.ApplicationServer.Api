@@ -115,6 +115,25 @@ class Settings(BaseSettings):
 	RAZORPAY_KEY_SECRET: str = Field(default="")
 	# Webhook secret — must match the value set in Razorpay Dashboard → Settings → Webhooks
 	RAZORPAY_WEBHOOK_SECRET: str = Field(default="")
+
+	# OpenAI — GPT-4o Vision for AI suggestions
+	# In Azure App Service, override via env vars: OPENAI_API_KEY, OPENAI_MODEL, OPENAI_MAX_TOKENS
+	OPENAI_API_KEY: str = Field(default="")
+	OPENAI_CHAT_URL: str = Field(default="https://api.openai.com/v1/chat/completions")
+	OPENAI_MODEL: str = Field(default="gpt-4o")
+	OPENAI_USE_AZURE: bool = Field(default=False)
+	OPENAI_MAX_TOKENS: int = Field(default=200)
+	# Max AI calls per user per minute before HTTP 429 is returned
+	OPENAI_RATE_LIMIT_PER_MINUTE: int = Field(default=5)
+	# Max retry attempts on OpenAI 429/5xx before giving up
+	OPENAI_MAX_RETRIES: int = Field(default=3)
+	# Per-request HTTP timeout in seconds (applies to each attempt, not the total)
+	OPENAI_TIMEOUT_SECONDS: int = Field(default=30)
+	# Input length caps
+	AI_USER_PROMPT_MAX_CHARS: int = Field(default=500)
+	AI_USER_INPUT_NAME_MAX_CHARS: int = Field(default=100)
+	AI_USER_INPUT_DESC_MAX_CHARS: int = Field(default=500)
+	AI_LINK_URL_MAX_CHARS: int = Field(default=500)
 	
 
 
