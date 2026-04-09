@@ -37,7 +37,8 @@ dependencies = [
 	"orjson>=3.10,<4",
 	"geoalchemy2>=0.14,<0.15",
 	"rembg>=2.0,<3",
-	"pillow>=10.0,<12"
+	"pillow>=10.0,<12",
+	"tenacity>=8.2,<9"
 ]
 
 [project.optional-dependencies]
