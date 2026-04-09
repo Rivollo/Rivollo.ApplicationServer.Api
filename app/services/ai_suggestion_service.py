@@ -1,5 +1,6 @@
 """AI suggestion service — GPT-4o Vision with retry, validation, and usage logging."""
 
+import asyncio
 import json
 import logging
 import posixpath
@@ -82,56 +83,25 @@ def _openai_wait(retry_state) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Response validators
+# List extractors — pull and clean a string list from an OpenAI JSON response
 # ---------------------------------------------------------------------------
 
-def _validate_product_response(data: dict) -> dict:
-    """Ensure the parsed JSON has non-empty name + description strings."""
-    name = data.get("name")
-    description = data.get("description")
-
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError(f"Missing or empty 'name' in OpenAI response: {data}")
-    if not isinstance(description, str) or not description.strip():
-        raise ValueError(f"Missing or empty 'description' in OpenAI response: {data}")
-
-    # Soft-trim to word limits — never fail the user for a slightly wordy response
-    return {
-        "name": " ".join(name.strip().split()[:6]),
-        "description": " ".join(description.strip().split()[:50]),
-    }
-
-
-def _validate_link_response(data: dict) -> dict:
-    """Ensure the parsed JSON has non-empty name + description strings."""
-    name = data.get("name")
-    description = data.get("description")
-
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError(f"Missing or empty 'name' in OpenAI response: {data}")
-    if not isinstance(description, str) or not description.strip():
-        raise ValueError(f"Missing or empty 'description' in OpenAI response: {data}")
-
-    return {
-        "name": " ".join(name.strip().split()[:6]),
-        "description": " ".join(description.strip().split()[:30]),
-    }
-
-
-def _validate_hotspot_response(data: dict) -> dict:
-    """Ensure the parsed JSON has non-empty title + description strings."""
-    title = data.get("title")
-    description = data.get("description")
-
-    if not isinstance(title, str) or not title.strip():
-        raise ValueError(f"Missing or empty 'title' in OpenAI response: {data}")
-    if not isinstance(description, str) or not description.strip():
-        raise ValueError(f"Missing or empty 'description' in OpenAI response: {data}")
-
-    return {
-        "title": " ".join(title.strip().split()[:5]),
-        "description": " ".join(description.strip().split()[:30]),
-    }
+def _extract_strings(data: dict, key: str, max_words: int, limit: int = 5) -> list[str]:
+    """
+    Pull `key` from data, expect a list of strings.
+    Soft-trims each item to max_words and returns up to `limit` non-empty strings.
+    """
+    items = data.get(key, [])
+    if not isinstance(items, list):
+        return []
+    result = []
+    for item in items:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        result.append(" ".join(item.strip().split()[:max_words]))
+        if len(result) == limit:
+            break
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +111,7 @@ def _validate_hotspot_response(data: dict) -> dict:
 class AiSuggestionService:
 
     # ------------------------------------------------------------------
-    # Feature 1 — Product name + description
+    # Feature 1 — Product names + descriptions (5 each, 2 concurrent calls)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -152,22 +122,9 @@ class AiSuggestionService:
         user_prompt: Optional[str] = None,
     ) -> dict:
         """
-        Suggest a product name (max 6 words) and description (max 50 words).
-
-        Modes:
-          - ai_suggest  : AI analyses the image (+ notes the GLB if provided).
-          - user_prompt : User hint is prepended so AI can tailor the suggestion.
-
-        Returns {"name": "...", "description": "..."}
+        Returns {"names": [5 strings], "descriptions": [5 strings]}.
+        Two concurrent OpenAI calls — one for names, one for descriptions.
         """
-        json_format = (
-            '{"name": "<product name, max 6 words>", '
-            '"description": "<product description, max 50 words>"}'
-        )
-
-        # GPT-4o Vision cannot read binary GLB files, but the filename
-        # often carries useful context (e.g. "leather-sofa-v2.glb").
-        # We extract it and pass it as a text hint.
         glb_note = ""
         if glb_url:
             glb_name = _glb_display_name(glb_url)
@@ -177,48 +134,63 @@ class AiSuggestionService:
                 else " The product also has a 3D model (GLB format)."
             )
 
+        prefix = ""
         if mode == "user_prompt" and user_prompt:
             safe_prompt = user_prompt.strip()[:_USER_PROMPT_MAX_CHARS].replace('"', "'")
-            prompt_text = (
-                f"The user describes the product as: '{safe_prompt}'\n\n"
-                f"Look at the product image{glb_note} and return JSON in exactly this format:\n"
-                f"{json_format}"
-            )
-        else:
-            prompt_text = (
-                f"Look at the product image{glb_note} and return JSON in exactly this format:\n"
-                f"{json_format}"
-            )
+            prefix = f"The user describes the product as: '{safe_prompt}'\n\n"
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a professional product copywriter. "
-                    "You always respond with ONLY a valid JSON object — no markdown, no extra text."
-                ),
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": image_url, "detail": "low"}},
-                ],
-            },
+        system_msg = {
+            "role": "system",
+            "content": (
+                "You are a professional product copywriter. "
+                "You always respond with ONLY a valid JSON object — no markdown, no extra text."
+            ),
+        }
+        image_part = {"type": "image_url", "image_url": {"url": image_url, "detail": "low"}}
+
+        names_messages = [
+            system_msg,
+            {"role": "user", "content": [
+                {"type": "text", "text": (
+                    f"{prefix}Look at the product image{glb_note} and return exactly 5 different "
+                    f"product name suggestions in this JSON format:\n"
+                    '{"names": ["<name1, max 6 words>", "<name2>", "<name3>", "<name4>", "<name5>"]}'
+                )},
+                image_part,
+            ]},
+        ]
+        descs_messages = [
+            system_msg,
+            {"role": "user", "content": [
+                {"type": "text", "text": (
+                    f"{prefix}Look at the product image{glb_note} and return exactly 5 different "
+                    f"product description suggestions in this JSON format:\n"
+                    '{"descriptions": ["<desc1, max 50 words>", "<desc2>", "<desc3>", "<desc4>", "<desc5>"]}'
+                )},
+                image_part,
+            ]},
         ]
 
-        raw = await AiSuggestionService._call_openai(messages, context="product-suggest")
-        try:
-            return _validate_product_response(raw)
-        except ValueError as exc:
-            logger.error("product-suggest response validation failed: %s", exc)
+        names_out, descs_out = await asyncio.gather(
+            AiSuggestionService._call_openai(names_messages, "product-names"),
+            AiSuggestionService._call_openai(descs_messages, "product-descriptions"),
+            return_exceptions=True,
+        )
+        names_raw = AiSuggestionService._unwrap(names_out, "product-names")
+        descs_raw = AiSuggestionService._unwrap(descs_out, "product-descriptions")
+
+        names = _extract_strings(names_raw, "names", max_words=6)
+        descriptions = _extract_strings(descs_raw, "descriptions", max_words=50)
+
+        if not names or not descriptions:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="AI returned an unexpected response. Please try again.",
             )
+        return {"names": names, "descriptions": descriptions}
 
     # ------------------------------------------------------------------
-    # Feature 2 — Hotspot title + description
+    # Feature 2 — Hotspot titles + descriptions (5 each, 2 concurrent calls)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -231,21 +203,10 @@ class AiSuggestionService:
         user_prompt: Optional[str] = None,
     ) -> dict:
         """
-        Suggest a hotspot title (max 5 words) and description (max 30 words).
-
-        Modes:
-          - ai_suggest  : AI analyses the image in product context.
-          - user_prompt : User hint is prepended so AI can tailor the suggestion.
-
-        Fetches product name + existing hotspot labels from DB to avoid duplicates.
-        Returns {"title": "...", "description": "..."}
+        Returns {"titles": [5 strings], "descriptions": [5 strings]}.
+        DB queries run once; two concurrent OpenAI calls for titles and descriptions.
         """
-        json_format = (
-            '{"title": "<hotspot title, max 5 words>", '
-            '"description": "<hotspot description, max 30 words>"}'
-        )
-
-        # Fetch product name — also enforces ownership (created_by = user_id)
+        # Fetch product name — enforces ownership
         product_result = await db.execute(
             select(Product.name).where(
                 Product.id == product_id,
@@ -254,8 +215,6 @@ class AiSuggestionService:
         )
         product_name: Optional[str] = product_result.scalar_one_or_none()
         if product_name is None:
-            # Return 404 in both "not found" and "not owned" cases —
-            # never leak whether the product exists to a different user.
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Product not found",
@@ -267,7 +226,6 @@ class AiSuggestionService:
         )
         existing_titles: list[str] = [row[0] for row in hotspot_result.fetchall()]
 
-        # Build system context
         context_parts = [f'Product name: "{product_name}"']
         if existing_titles:
             titles_str = ", ".join(f'"{t}"' for t in existing_titles)
@@ -276,49 +234,64 @@ class AiSuggestionService:
             )
         system_context = "\n".join(context_parts)
 
-        # Build user prompt text based on mode
+        prefix = ""
         if mode == "user_prompt" and user_prompt:
             safe_prompt = user_prompt.strip()[:_USER_PROMPT_MAX_CHARS].replace('"', "'")
-            prompt_text = (
-                f"The user points to a part of the image and says: '{safe_prompt}'\n\n"
-                f"Look at the image and return JSON in exactly this format:\n{json_format}"
-            )
-        else:
-            prompt_text = (
-                f"Look at the image and suggest a title and description for a notable feature or part.\n"
-                f"Return JSON in exactly this format:\n{json_format}"
-            )
+            prefix = f"The user points to a part of the image and says: '{safe_prompt}'\n\n"
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a professional product annotator. "
-                    "You always respond with ONLY a valid JSON object — no markdown, no extra text.\n"
-                    f"{system_context}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": image_url, "detail": "low"}},
-                ],
-            },
+        system_msg = {
+            "role": "system",
+            "content": (
+                "You are a professional product annotator. "
+                "You always respond with ONLY a valid JSON object — no markdown, no extra text.\n"
+                f"{system_context}"
+            ),
+        }
+        image_part = {"type": "image_url", "image_url": {"url": image_url, "detail": "low"}}
+
+        titles_messages = [
+            system_msg,
+            {"role": "user", "content": [
+                {"type": "text", "text": (
+                    f"{prefix}Look at the image and return exactly 5 different hotspot title "
+                    f"suggestions for a notable feature or part:\n"
+                    '{"titles": ["<title1, max 5 words>", "<title2>", "<title3>", "<title4>", "<title5>"]}'
+                )},
+                image_part,
+            ]},
+        ]
+        descs_messages = [
+            system_msg,
+            {"role": "user", "content": [
+                {"type": "text", "text": (
+                    f"{prefix}Look at the image and return exactly 5 different hotspot description "
+                    f"suggestions for a notable feature or part:\n"
+                    '{"descriptions": ["<desc1, max 30 words>", "<desc2>", "<desc3>", "<desc4>", "<desc5>"]}'
+                )},
+                image_part,
+            ]},
         ]
 
-        raw = await AiSuggestionService._call_openai(messages, context="hotspot-suggest")
-        try:
-            return _validate_hotspot_response(raw)
-        except ValueError as exc:
-            logger.error("hotspot-suggest response validation failed: %s", exc)
+        titles_out, descs_out = await asyncio.gather(
+            AiSuggestionService._call_openai(titles_messages, "hotspot-titles"),
+            AiSuggestionService._call_openai(descs_messages, "hotspot-descriptions"),
+            return_exceptions=True,
+        )
+        titles_raw = AiSuggestionService._unwrap(titles_out, "hotspot-titles")
+        descs_raw = AiSuggestionService._unwrap(descs_out, "hotspot-descriptions")
+
+        titles = _extract_strings(titles_raw, "titles", max_words=5)
+        descriptions = _extract_strings(descs_raw, "descriptions", max_words=30)
+
+        if not titles or not descriptions:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="AI returned an unexpected response. Please try again.",
             )
+        return {"titles": titles, "descriptions": descriptions}
 
     # ------------------------------------------------------------------
-    # Feature 3 — Product link name + description
+    # Feature 3 — Link names + descriptions (5 each, 2 concurrent calls)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -332,23 +305,10 @@ class AiSuggestionService:
         user_prompt: Optional[str] = None,
     ) -> dict:
         """
-        Suggest a link name (max 6 words) and description (max 30 words)
-        for a ProductLink URL being added to a product.
-
-        Modes:
-          - ai_suggest  : AI analyses the URL + product context.
-          - user_prompt : User hint is prepended to tailor the suggestion.
-
-        Fetches product name + existing link names from DB to avoid duplicates.
-        Optionally accepts an imageUrl for additional visual context.
-        Returns {"name": "...", "description": "..."}
+        Returns {"names": [5 strings], "descriptions": [5 strings]}.
+        DB queries run once; two concurrent OpenAI calls for names and descriptions.
         """
-        json_format = (
-            '{"name": "<link display name, max 6 words>", '
-            '"description": "<link description, max 30 words>"}'
-        )
-
-        # Fetch product name — also enforces ownership (created_by = user_id)
+        # Fetch product name — enforces ownership
         product_result = await db.execute(
             select(Product.name).where(
                 Product.id == product_id,
@@ -357,15 +317,12 @@ class AiSuggestionService:
         )
         product_name: Optional[str] = product_result.scalar_one_or_none()
         if product_name is None:
-            # Return 404 in both "not found" and "not owned" cases —
-            # never leak whether the product exists to a different user.
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Product not found",
             )
 
-        # Sanitise link_url before embedding in prompt — cap length and
-        # escape quotes to prevent prompt injection via a crafted URL.
+        # Sanitise link_url before embedding in prompt
         safe_link_url = link_url[:_LINK_URL_MAX_CHARS].replace('"', "'")
 
         # Fetch existing link names for this product to avoid duplicates
@@ -377,7 +334,6 @@ class AiSuggestionService:
         )
         existing_names: list[str] = [row[0] for row in link_result.fetchall()]
 
-        # Build system context
         context_parts = [f'Product name: "{product_name}"']
         if existing_names:
             names_str = ", ".join(f'"{n}"' for n in existing_names)
@@ -386,49 +342,77 @@ class AiSuggestionService:
             )
         system_context = "\n".join(context_parts)
 
-        # Build prompt text based on mode
+        prefix = ""
         if mode == "user_prompt" and user_prompt:
             safe_prompt = user_prompt.strip()[:_USER_PROMPT_MAX_CHARS].replace('"', "'")
-            prompt_text = (
-                f"The user describes this link as: '{safe_prompt}'\n"
-                f"Link URL: {safe_link_url}\n\n"
-                f"Return JSON in exactly this format:\n{json_format}"
-            )
-        else:
-            prompt_text = (
-                f"Suggest a display name and short description for this link.\n"
-                f"Link URL: {safe_link_url}\n\n"
-                f"Return JSON in exactly this format:\n{json_format}"
-            )
+            prefix = f"The user describes this link as: '{safe_prompt}'\n"
 
-        # Build message content — include image if provided
-        user_content: list[dict] = [{"type": "text", "text": prompt_text}]
-        if image_url:
-            user_content.append(
-                {"type": "image_url", "image_url": {"url": image_url, "detail": "low"}}
-            )
+        system_msg = {
+            "role": "system",
+            "content": (
+                "You are a professional product copywriter. "
+                "You always respond with ONLY a valid JSON object — no markdown, no extra text.\n"
+                f"{system_context}"
+            ),
+        }
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a professional product copywriter. "
-                    "You always respond with ONLY a valid JSON object — no markdown, no extra text.\n"
-                    f"{system_context}"
-                ),
-            },
-            {"role": "user", "content": user_content},
+        def _user_content(extra_text: str) -> list[dict]:
+            content: list[dict] = [{"type": "text", "text": extra_text}]
+            if image_url:
+                content.append({"type": "image_url", "image_url": {"url": image_url, "detail": "low"}})
+            return content
+
+        names_messages = [
+            system_msg,
+            {"role": "user", "content": _user_content(
+                f"{prefix}Link URL: {safe_link_url}\n\n"
+                "Return exactly 5 different display name suggestions for this link:\n"
+                '{"names": ["<name1, max 6 words>", "<name2>", "<name3>", "<name4>", "<name5>"]}'
+            )},
+        ]
+        descs_messages = [
+            system_msg,
+            {"role": "user", "content": _user_content(
+                f"{prefix}Link URL: {safe_link_url}\n\n"
+                "Return exactly 5 different description suggestions for this link:\n"
+                '{"descriptions": ["<desc1, max 30 words>", "<desc2>", "<desc3>", "<desc4>", "<desc5>"]}'
+            )},
         ]
 
-        raw = await AiSuggestionService._call_openai(messages, context="link-suggest")
-        try:
-            return _validate_link_response(raw)
-        except ValueError as exc:
-            logger.error("link-suggest response validation failed: %s", exc)
+        names_out, descs_out = await asyncio.gather(
+            AiSuggestionService._call_openai(names_messages, "link-names"),
+            AiSuggestionService._call_openai(descs_messages, "link-descriptions"),
+            return_exceptions=True,
+        )
+        names_raw = AiSuggestionService._unwrap(names_out, "link-names")
+        descs_raw = AiSuggestionService._unwrap(descs_out, "link-descriptions")
+
+        names = _extract_strings(names_raw, "names", max_words=6)
+        descriptions = _extract_strings(descs_raw, "descriptions", max_words=30)
+
+        if not names or not descriptions:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="AI returned an unexpected response. Please try again.",
             )
+        return {"names": names, "descriptions": descriptions}
+
+    # ------------------------------------------------------------------
+    # Error unwrapper — surfaces real errors from gather return_exceptions
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _unwrap(outcome, context: str) -> dict:
+        """Raise a clean HTTPException if an OpenAI call failed."""
+        if isinstance(outcome, HTTPException):
+            raise outcome
+        if isinstance(outcome, Exception):
+            logger.error("[%s] OpenAI call failed: %s", context, outcome)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="AI service is temporarily unavailable. Please try again shortly.",
+            )
+        return outcome
 
     # ------------------------------------------------------------------
     # Core OpenAI call — retry, Retry-After, usage logging, choices guard

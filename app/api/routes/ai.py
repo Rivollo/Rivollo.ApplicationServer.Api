@@ -51,10 +51,10 @@ class _RateLimiter:
     def __init__(self) -> None:
         self._counter: dict[tuple[str, str], int] = defaultdict(int)
 
-    def check(self, user_id: str) -> None:
+    def check(self, user_id: str, count: int = 1) -> None:
         """
         Raises HTTP 429 if the user has exceeded OPENAI_RATE_LIMIT_PER_MINUTE
-        AI calls within the current UTC minute.
+        AI calls within the current UTC minute.  Pass count > 1 for batch calls.
         """
         limit = settings.OPENAI_RATE_LIMIT_PER_MINUTE
         current_bucket = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
@@ -64,7 +64,7 @@ class _RateLimiter:
             del self._counter[k]
 
         key = (user_id, current_bucket)
-        self._counter[key] += 1
+        self._counter[key] += count
 
         if self._counter[key] > limit:
             logger.warning(
@@ -248,15 +248,15 @@ async def product_suggest(
             "description": payload.userDescription.strip(),
         })
 
-    _rate_limiter.check(str(current_user.id))
+    _rate_limiter.check(str(current_user.id), count=2)
 
-    result = await ai_suggestion_service.suggest_product(
+    results = await ai_suggestion_service.suggest_product(
         image_url=payload.imageUrl,
         glb_url=payload.glbUrl,
         mode=payload.mode,
         user_prompt=payload.userPrompt,
     )
-    return api_success(result)
+    return api_success(results)
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +290,9 @@ async def hotspot_suggest(
             "description": payload.userDescription.strip(),
         })
 
-    _rate_limiter.check(str(current_user.id))
+    _rate_limiter.check(str(current_user.id), count=2)
 
-    result = await ai_suggestion_service.suggest_hotspot(
+    results = await ai_suggestion_service.suggest_hotspot(
         db=db,
         product_id=product_uuid,
         user_id=current_user.id,
@@ -300,7 +300,7 @@ async def hotspot_suggest(
         mode=payload.mode,
         user_prompt=payload.userPrompt,
     )
-    return api_success(result)
+    return api_success(results)
 
 
 # ---------------------------------------------------------------------------
@@ -334,9 +334,9 @@ async def link_suggest(
             "description": payload.userDescription.strip(),
         })
 
-    _rate_limiter.check(str(current_user.id))
+    _rate_limiter.check(str(current_user.id), count=2)
 
-    result = await ai_suggestion_service.suggest_link(
+    results = await ai_suggestion_service.suggest_link(
         db=db,
         product_id=product_uuid,
         user_id=current_user.id,
@@ -345,4 +345,4 @@ async def link_suggest(
         mode=payload.mode,
         user_prompt=payload.userPrompt,
     )
-    return api_success(result)
+    return api_success(results)
