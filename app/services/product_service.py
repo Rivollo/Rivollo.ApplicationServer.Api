@@ -185,50 +185,20 @@ class ProductService:
             pass
 
         # -------------------------------
-        # 7. Route by subscription plan
+        # 7. Direct 3D generation for all subscription types
         # -------------------------------
-        plan_code = await SubscriptionRepository.get_user_plan_code(db, user_id)
-        logger.info("User %s plan: %s", user_id, plan_code)
-
-        match plan_code:
-            case "pro":
-                logger.info("PRO user → Direct VM execution for product %s", product.id)
-                glb_url = await ProductService.generate_3d_and_finalize(
-                    db=db,
-                    user_id=user_id,
-                    product_id=product.id,
-                    asset_id=asset_id,
-                    mesh_asset_id=mesh_asset_id,
-                    name=name,
-                    target_format=target_format,
-                    # Pass raw blob URL to internal 3D API — avoids CDN cache/auth issues
-                    blob_url=blob_url,
-                    mask_blob_url=mask_blob_url,
-                )
-
-            case "free" | _:
-                logger.info(
-                    "FREE/unknown plan ('%s') → Service Bus queue for product %s",
-                    plan_code, product.id,
-                )
-                glb_url = None
-                payload = {
-                    "product_id": str(product.id),
-                    "user_id": str(user_id),
-                    # Blob URLs for internal worker — not CDN, avoids cache
-                    "blob_url": blob_url,
-                    "mask_blob_url": mask_blob_url,
-                    "target_format": target_format,
-                    "asset_id": asset_id,
-                    "mesh_asset_id": mesh_asset_id,
-                    "name": name,
-                }
-                published = await ServiceBusPublisher.publish(payload)
-                if not published:
-                    logger.warning(
-                        "Service Bus publish failed for product %s — staying in QUEUE status",
-                        product.id,
-                    )
+        logger.info("Direct VM execution for product %s", product.id)
+        glb_url = await ProductService.generate_3d_and_finalize(
+            db=db,
+            user_id=user_id,
+            product_id=product.id,
+            asset_id=asset_id,
+            mesh_asset_id=mesh_asset_id,
+            name=name,
+            target_format=target_format,
+            blob_url=blob_url,
+            mask_blob_url=mask_blob_url,
+        )
 
         # Return CDN URL to callers — blob_url kept for internal use only
         return product, cdn_url, mask_cdn_url, glb_url
