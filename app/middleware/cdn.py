@@ -35,21 +35,28 @@ from app.core.config import settings
 
 
 class BlobToCdnMiddleware:
-    """Pure ASGI middleware — rewrites Azure Blob URLs to CDN URLs in JSON responses."""
+    """Pure ASGI middleware — rewrites Azure Blob URLs to CDN URLs in JSON responses.
+
+    Supports multiple storage accounts: configure AZURE_BLOB_BASE_URL for the
+    primary account and AZURE_BLOB_BASE_URLS (comma-separated) for any additional
+    accounts.  All matching blob URLs in every JSON response are replaced with the
+    single CDN base URL.
+    """
 
     def __init__(self, app: Callable) -> None:
         self.app = app
 
-        # Pre-compute and encode once at startup — zero per-request overhead.
-        blob_base = settings.AZURE_BLOB_BASE_URL  # e.g. "https://rivollodevstg.blob.core.windows.net"
-        cdn_base = (settings.CDN_BASE_URL or "").rstrip("/")  # e.g. "https://cdn.example.net"
+        cdn_base = (settings.CDN_BASE_URL or "").rstrip("/")
+        cdn_bytes = cdn_base.encode() if cdn_base else b""
 
-        if blob_base and cdn_base and blob_base != cdn_base:
-            self._from: bytes = blob_base.encode()
-            self._to: bytes = cdn_base.encode()
-            self._active = True
-        else:
-            self._active = False
+        # Build one (from, to) pair per distinct blob base URL.
+        # Pre-encoded once at startup — zero per-request overhead.
+        self._replacements: list[tuple[bytes, bytes]] = [
+            (blob_base.encode(), cdn_bytes)
+            for blob_base in settings.all_blob_base_urls()
+            if blob_base and cdn_bytes and blob_base.encode() != cdn_bytes
+        ]
+        self._active = bool(self._replacements)
 
     async def __call__(self, scope, receive, send) -> None:
         if not self._active or scope["type"] != "http":
@@ -57,19 +64,18 @@ class BlobToCdnMiddleware:
             return
 
         # Intercept send to inspect and rewrite the response.
-        sender = _CdnRewriteSender(send, self._from, self._to)
+        sender = _CdnRewriteSender(send, self._replacements)
         await self.app(scope, receive, sender)
 
 
 class _CdnRewriteSender:
     """Wraps the ASGI send callable to rewrite blob URLs in JSON response bodies."""
 
-    __slots__ = ("_send", "_from", "_to", "_is_json", "_headers_message", "_body_parts")
+    __slots__ = ("_send", "_replacements", "_is_json", "_headers_message", "_body_parts")
 
-    def __init__(self, send: Callable, from_bytes: bytes, to_bytes: bytes) -> None:
+    def __init__(self, send: Callable, replacements: list[tuple[bytes, bytes]]) -> None:
         self._send = send
-        self._from = from_bytes
-        self._to = to_bytes
+        self._replacements = replacements
         self._is_json = False
         self._headers_message: dict = {}
         # Collect body chunks — JSON responses are always fully in memory already.
@@ -101,9 +107,10 @@ class _CdnRewriteSender:
 
             more_body = message.get("more_body", False)
             if not more_body:
-                # All chunks received — rewrite and flush.
-                full_body = b"".join(self._body_parts)
-                rewritten = full_body.replace(self._from, self._to)
+                # All chunks received — apply all blob→CDN replacements and flush.
+                rewritten = b"".join(self._body_parts)
+                for from_bytes, to_bytes in self._replacements:
+                    rewritten = rewritten.replace(from_bytes, to_bytes)
 
                 # Patch content-length to match the rewritten body size.
                 raw_headers: list[tuple[bytes, bytes]] = list(self._headers_message.get("headers", []))

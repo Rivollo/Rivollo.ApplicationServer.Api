@@ -61,7 +61,10 @@ class Settings(BaseSettings):
 	AZURE_STORAGE_CONN_STRING: str = Field(default="")
 
 	# Azure Blob Storage base URL — used by CDN middleware to rewrite blob URLs in responses.
+	# Supports a single URL or comma-separated list for multiple storage accounts.
 	# Set explicitly in .env, or leave blank to auto-derive from AZURE_STORAGE_ACCOUNT.
+	# Example (single):   https://account1.blob.core.windows.net
+	# Example (multiple): https://account1.blob.core.windows.net,https://account2.blob.core.windows.net
 	AZURE_BLOB_BASE_URL: str = Field(default="")
 
 	@model_validator(mode="after")
@@ -78,6 +81,19 @@ class Settings(BaseSettings):
 					self.AZURE_BLOB_BASE_URL = f"https://{account}.blob.core.windows.net"
 					return self
 		return self
+
+	def all_blob_base_urls(self) -> list[str]:
+		"""Return every blob base URL that should be rewritten to the CDN URL.
+
+		AZURE_BLOB_BASE_URL supports a comma-separated list for multiple storage
+		accounts.  Duplicates and empty strings are removed automatically.
+		"""
+		urls: list[str] = []
+		for raw in self.AZURE_BLOB_BASE_URL.split(","):
+			url = raw.strip().rstrip("/")
+			if url and url not in urls:
+				urls.append(url)
+		return urls
 
 	# External model service endpoint
 	MODEL_SERVICE_URL: str = Field(default="mock://local")
