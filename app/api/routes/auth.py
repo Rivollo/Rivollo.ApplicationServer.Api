@@ -9,6 +9,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import DB
 from app.schemas.auth import (
+    AppTokenRequest,
+    AppTokenResponse,
     AuthResponse,
     ForgotPasswordRequest,
     GoogleAuthRequest,
@@ -361,5 +363,24 @@ async def google_auth(
         AuthResponse(
             user=user_data,
             token=token,
+        ).model_dump()
+    )
+
+
+@router.post("/auth/apptoken", response_model=dict)
+def app_token(payload: AppTokenRequest):
+    """Issue a JWT for a registered client application."""
+    if not AuthService.is_valid_client_key(payload.clientKey):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid client key",
+        )
+
+    token = AuthService.generate_app_token(payload.clientKey)
+    return api_success(
+        AppTokenResponse(
+            token=token,
+            client_key=payload.clientKey.lower(),
+            expires_in_minutes=settings.APP_TOKEN_EXPIRES_MINUTES,
         ).model_dump()
     )

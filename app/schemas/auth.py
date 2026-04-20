@@ -222,3 +222,13 @@ class ResetPasswordRequest(BaseModel):
             raise ValueError("Passwords do not match")
         return self
 
+
+class AppTokenRequest(BaseModel):
+    clientKey: str = Field(..., min_length=1, max_length=100)
+
+
+class AppTokenResponse(BaseModel):
+    token: str
+    client_key: str
+    expires_in_minutes: int
+

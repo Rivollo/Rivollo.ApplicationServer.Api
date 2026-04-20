@@ -147,6 +147,22 @@ class AuthService:
         )
 
     @staticmethod
+    def is_valid_client_key(client_key: str) -> bool:
+        """Check if the client_key is in the configured allowed list."""
+        return client_key.lower() in settings.get_allowed_client_keys()
+
+    @staticmethod
+    def generate_app_token(client_key: str) -> str:
+        """Generate a stateless JWT for the given client_key."""
+        return create_access_token(
+            data={
+                "sub": client_key.lower(),
+                "type": "app_token",
+            },
+            expires_delta=timedelta(minutes=settings.APP_TOKEN_EXPIRES_MINUTES),
+        )
+
+    @staticmethod
     async def create_signup_otp(db: AsyncSession, email: str) -> str:
         """Generate a 6-digit OTP for signup email verification and store it.
 
