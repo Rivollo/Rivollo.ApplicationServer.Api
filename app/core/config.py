@@ -34,7 +34,7 @@ class Settings(BaseSettings):
 	JWT_ALGORITHM: str = Field(default="HS256")
 	ACCESS_TOKEN_EXPIRES_MINUTES: int = Field(default=60)
 	APP_TOKEN_EXPIRES_MINUTES: int = Field(default=1440)  # 24 hours
-	APP_CLIENT_KEYS: str = Field(default="web,android,ios,truck")  # comma-separated allowed client keys
+	APP_CLIENT_KEYS: str = Field(default="")  # comma-separated allowed client keys
 
 	def get_allowed_client_keys(self) -> set[str]:
 		return {k.strip().lower() for k in self.APP_CLIENT_KEYS.split(",") if k.strip()}
