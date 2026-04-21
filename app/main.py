@@ -13,7 +13,7 @@ from opentelemetry.trace import get_current_span
 from app.core.config import settings
 from app.api.routes.auth import router as auth_router
 from app.api.routes.users import router as users_router
-from app.api.routes.products import router as products_router, public_router as public_products_router, public_noauth_router as public_products_noauth_router
+from app.api.routes.products import router as products_router, public_router as public_products_router, public_noauth_router as public_products_noauth_router, v2_router as products_v2_router
 from app.api.routes.uploads import router as uploads_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.assets import router as assets_router
@@ -166,6 +166,7 @@ app.include_router(subscriptions_router, prefix=_api_prefix)
 app.include_router(products_router, prefix=_api_prefix)
 app.include_router(public_products_router, prefix=_api_prefix)
 app.include_router(public_products_noauth_router, prefix=_api_prefix)
+app.include_router(products_v2_router, prefix=f"{_api_prefix}/v2")
 app.include_router(galleries_router, prefix=_api_prefix)
 app.include_router(branding_router, prefix=_api_prefix)
 app.include_router(analytics_router, prefix=_api_prefix)
