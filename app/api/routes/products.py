@@ -1661,6 +1661,7 @@ async def get_my_products_v2(
     page_size: int = Query(20, ge=1, le=100, alias="pageSize", description="Items per page"),
     q: Optional[str] = Query(None, max_length=200, description="Search by product name"),
     status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
+    sort_by_updated_date: bool = Query(False, alias="sortByUpdatedDate", description="Sort by updated date descending"),
 ):
     """List current user's products with pagination (v2).
 
@@ -1669,6 +1670,7 @@ async def get_my_products_v2(
     - **pageSize** – items per page, max 100 (default: 20)
     - **q** – optional name search
     - **status** – optional status filter (draft, ready, published, archived …)
+    - **sortByUpdatedDate** – when true, sort by updated_date descending
     """
     # Base query scoped to the authenticated user
     base_query = select(Product).where(
@@ -1687,10 +1689,13 @@ async def get_my_products_v2(
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
 
-    # Sort: most-recently-updated first, fall back to created date
-    base_query = base_query.order_by(
-        func.coalesce(Product.updated_date, Product.created_date).desc()
-    )
+    # Sort
+    if sort_by_updated_date:
+        base_query = base_query.order_by(
+            func.coalesce(Product.updated_date, Product.created_date).desc()
+        )
+    else:
+        base_query = base_query.order_by(Product.created_date.desc())
 
     # Paginate
     offset = (page - 1) * page_size
