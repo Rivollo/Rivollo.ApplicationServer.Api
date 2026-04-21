@@ -74,6 +74,7 @@ from app.services.product_validation_service import ProductValidationService
 from app.utils.envelopes import api_error, api_success
 from app.models.models import PublishLink
 from app.services.product_service import ProductService
+from app.database.products_repo import ProductRepository
 
 
 router = APIRouter(tags=["products"], dependencies=[Depends(get_current_user)])
@@ -1644,6 +1645,105 @@ async def update_product_details(
     
 
     #make product deactivate
+
+
+# ---------------------------------------------------------------------------
+# API v2 router — versioned endpoints
+# ---------------------------------------------------------------------------
+v2_router = APIRouter(tags=["products v2"], dependencies=[Depends(get_current_user)])
+
+
+@v2_router.get("/me/products", response_model=dict)
+async def get_my_products_v2(
+    current_user: CurrentUser,
+    db: DB,
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, alias="pageSize", description="Items per page"),
+    q: Optional[str] = Query(None, max_length=200, description="Search by product name"),
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
+):
+    """List current user's products with pagination (v2).
+
+    Query params:
+    - **page** – page number, starts at 1 (default: 1)
+    - **pageSize** – items per page, max 100 (default: 20)
+    - **q** – optional name search
+    - **status** – optional status filter (draft, ready, published, archived …)
+    """
+    # Base query scoped to the authenticated user
+    base_query = select(Product).where(
+        Product.created_by == current_user.id,
+        Product.deleted_at.is_(None),
+    )
+
+    if q:
+        base_query = base_query.where(Product.name.ilike(f"%{q}%"))
+
+    if status_filter:
+        base_query = base_query.where(Product.status == status_filter)
+
+    # Total count before pagination
+    count_query = select(func.count()).select_from(base_query.subquery())
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    # Sort: most-recently-updated first, fall back to created date
+    base_query = base_query.order_by(
+        func.coalesce(Product.updated_date, Product.created_date).desc()
+    )
+
+    # Paginate
+    offset = (page - 1) * page_size
+    base_query = base_query.offset(offset).limit(page_size)
+
+    result = await db.execute(base_query)
+    products = list(result.scalars().all())
+
+    # Bulk-fetch public_ids for any published products on this page
+    published_ids = [p.id for p in products if p.status.value == "published"]
+    public_id_map = await ProductRepository.get_public_ids_for_products(db, published_ids)
+
+    items: list[ProductWithPrimaryAsset] = []
+    for product in products:
+        asset_data = await ProductRepository.get_primary_asset_for_product(db, product.id)
+
+        image = asset_type = asset_type_id = None
+        if asset_data:
+            image, asset_type, asset_type_id = asset_data
+
+        public_id = public_id_map.get(product.id) if product.status.value == "published" else None
+
+        items.append(
+            ProductWithPrimaryAsset(
+                id=str(product.id),
+                name=product.name,
+                status=product.status.value,
+                image=image,
+                asset_type=asset_type,
+                asset_type_id=asset_type_id,
+                description=product.description,
+                price=float(product.price) if product.price is not None else None,
+                currency_type=str(product.currency_type) if product.currency_type is not None else None,
+                background_type=str(product.background_type) if product.background_type is not None else None,
+                created_at=product.created_at,
+                updated_at=product.updated_at,
+                public_id=public_id,
+            )
+        )
+
+    total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+
+    return api_success(
+        {
+            "items": [item.model_dump(exclude_none=True) for item in items],
+            "meta": {
+                "page": page,
+                "pageSize": page_size,
+                "total": total,
+                "totalPages": total_pages,
+            },
+        }
+    )
 
 
 @router.post("/products/{product_id}/disable", response_model=dict)
