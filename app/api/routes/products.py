@@ -1740,7 +1740,7 @@ async def get_my_products_v2(
 
     return api_success(
         {
-            "items": [item.model_dump(exclude_none=True) for item in items],
+            "items": [item.model_dump() for item in items],
             "meta": {
                 "page": page,
                 "pageSize": page_size,
