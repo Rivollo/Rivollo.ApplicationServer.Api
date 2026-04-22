@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 
-from app.api.deps import DB
+from app.api.deps import DB, AppTokenVerified
 from app.schemas.auth import (
     AppTokenRequest,
     AppTokenResponse,
@@ -73,6 +73,7 @@ async def signup(
     payload: SignupRequest,
     request: Request,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Create new user account. Requires a valid signup_token from /auth/verify-signup-otp."""
     # Validate email verification token
@@ -150,6 +151,7 @@ async def login(
     payload: LoginRequest,
     request: Request,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Login with email and password."""
     # Authenticate user
@@ -368,15 +370,24 @@ async def google_auth(
 
 
 @router.post("/auth/apptoken", response_model=dict)
-def app_token(payload: AppTokenRequest):
-    """Issue a JWT for a registered client application."""
+async def app_token(payload: AppTokenRequest, request: Request, db: DB):
+    """Issue a JWT for a registered client application and persist it."""
     if not AuthService.is_valid_client_key(payload.clientKey):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid client key",
         )
 
-    token = AuthService.generate_app_token(payload.clientKey)
+    token = await AuthService.generate_app_token(db, payload.clientKey)
+
+    await ActivityService.log_activity(
+        db=db,
+        action="apptoken.issued",
+        target_type="app_token",
+        metadata={"client_key": payload.clientKey.lower()},
+        request=request,
+    )
+
     return api_success(
         AppTokenResponse(
             token=token,

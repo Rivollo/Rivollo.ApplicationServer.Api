@@ -3,7 +3,7 @@
 import uuid
 from typing import Annotated, Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.core.security import decode_access_token
 from app.models.models import User
+from app.services.activity_service import ActivityService
+from app.services.auth_service import AuthService
 
 bearer_scheme = HTTPBearer(auto_error=False)
 security = HTTPBearer()
@@ -89,7 +91,44 @@ async def get_current_user_id(
     return str(user.id)
 
 
+async def verify_app_token(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Verify that the request carries a valid app token stored in the database."""
+    invalid_exc = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing app token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    token = credentials.credentials
+    payload = decode_access_token(token)
+
+    if payload is None or payload.get("type") != "app_token":
+        await ActivityService.log_activity(
+            db=db,
+            action="apptoken.validation_failed",
+            target_type="app_token",
+            metadata={"reason": "invalid_jwt"},
+            request=request,
+        )
+        raise invalid_exc
+
+    if not await AuthService.validate_app_token(db, token):
+        await ActivityService.log_activity(
+            db=db,
+            action="apptoken.validation_failed",
+            target_type="app_token",
+            metadata={"reason": "token_not_found_or_inactive", "client_key": payload.get("sub")},
+            request=request,
+        )
+        raise invalid_exc
+
+
 # Convenience type aliases
 CurrentUser = Annotated[User, Depends(get_current_user)]
 OptionalUser = Annotated[Optional[User], Depends(get_current_user_optional)]
 DB = Annotated[AsyncSession, Depends(get_db)]
+AppTokenVerified = Annotated[None, Depends(verify_app_token)]
