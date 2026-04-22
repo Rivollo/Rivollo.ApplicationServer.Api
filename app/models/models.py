@@ -640,6 +640,17 @@ class SignupOtp(UUIDMixin, Base):
     isactive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
 
+class AppToken(UUIDMixin, AuditMixin, Base):
+    """Stores issued app tokens for registered client applications. One row per client_key."""
+    __tablename__ = "tbl_app_tokens"
+    __table_args__ = (UniqueConstraint("client_key", name="uq_app_tokens_client_key"),)
+
+    client_key: Mapped[str] = mapped_column(String, nullable=False)
+    token: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    isactive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+
+
 class ActivityLog(UUIDMixin, AuditMixin, Base):
     __tablename__ = "tbl_activity_logs"
     __table_args__ = (Index("ix_activity_logs_org_occurred_at", "org_id", "occurred_at"),)

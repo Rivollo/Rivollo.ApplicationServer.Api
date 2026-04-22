@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 
-from app.api.deps import DB
+from app.api.deps import DB, AppTokenVerified
 from app.schemas.auth import (
     AppTokenRequest,
     AppTokenResponse,
@@ -35,6 +35,7 @@ router = APIRouter(tags=["auth"])
 async def send_signup_otp(
     payload: SendSignupOtpRequest,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Send a 6-digit OTP to the given email to verify it before signup."""
     existing_user = await AuthService.get_user_by_email(db, payload.email)
@@ -57,6 +58,7 @@ async def send_signup_otp(
 async def verify_signup_otp(
     payload: VerifySignupOtpRequest,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Verify the signup OTP. Returns a signup_token required to complete registration."""
     signup_token = await AuthService.verify_signup_otp(db, payload.email, payload.otp)
@@ -73,6 +75,7 @@ async def signup(
     payload: SignupRequest,
     request: Request,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Create new user account. Requires a valid signup_token from /auth/verify-signup-otp."""
     # Validate email verification token
@@ -150,6 +153,7 @@ async def login(
     payload: LoginRequest,
     request: Request,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Login with email and password."""
     # Authenticate user
@@ -198,6 +202,7 @@ async def login(
 async def forgot_password(
     payload: ForgotPasswordRequest,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Initiate a password reset by sending a 6-digit OTP to the user's email."""
     user = await AuthService.get_user_by_email(db, payload.email)
@@ -221,6 +226,7 @@ async def forgot_password(
 async def verify_otp(
     payload: VerifyOTPRequest,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Verify the OTP and return a secure reset token to use in reset-password."""
     reset_token = await AuthService.verify_otp(db, payload.email, payload.otp)
@@ -236,6 +242,7 @@ async def verify_otp(
 async def reset_password(
     payload: ResetPasswordRequest,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Reset password using the verified reset token."""
     user = await AuthService.reset_password(db, payload.token, payload.new_password)
@@ -258,6 +265,7 @@ async def google_auth(
     payload: GoogleAuthRequest,
     request: Request,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Login or signup with Google OAuth."""
     logger = logging.getLogger(__name__)
@@ -368,15 +376,24 @@ async def google_auth(
 
 
 @router.post("/auth/apptoken", response_model=dict)
-def app_token(payload: AppTokenRequest):
-    """Issue a JWT for a registered client application."""
+async def app_token(payload: AppTokenRequest, request: Request, db: DB):
+    """Issue a JWT for a registered client application and persist it."""
     if not AuthService.is_valid_client_key(payload.clientKey):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid client key",
         )
 
-    token = AuthService.generate_app_token(payload.clientKey)
+    token = await AuthService.generate_app_token(db, payload.clientKey)
+
+    await ActivityService.log_activity(
+        db=db,
+        action="apptoken.issued",
+        target_type="app_token",
+        metadata={"client_key": payload.clientKey.lower()},
+        request=request,
+    )
+
     return api_success(
         AppTokenResponse(
             token=token,

@@ -6,11 +6,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.security import create_access_token, decode_access_token, generate_token, hash_password, verify_password
-from app.models.models import AuthIdentity, AuthProvider, PasswordReset, SignupOtp, User
+from app.core.security import create_access_token, decode_access_token, generate_token, hash_password, hash_token, verify_password
+from app.models.models import AppToken, AuthIdentity, AuthProvider, PasswordReset, SignupOtp, User
 from app.services.licensing_service import LicensingService
 
 
@@ -152,15 +153,52 @@ class AuthService:
         return client_key.lower() in settings.get_allowed_client_keys()
 
     @staticmethod
-    def generate_app_token(client_key: str) -> str:
-        """Generate a stateless JWT for the given client_key."""
-        return create_access_token(
+    async def generate_app_token(db: AsyncSession, client_key: str) -> str:
+        """Upsert a JWT for the given client_key — one row per client, updated in place.
+        Only the SHA-256 hash of the token is persisted; the raw JWT is returned to the caller.
+        """
+        expires_delta = timedelta(minutes=settings.APP_TOKEN_EXPIRES_MINUTES)
+        token = create_access_token(
             data={
                 "sub": client_key.lower(),
                 "type": "app_token",
             },
-            expires_delta=timedelta(minutes=settings.APP_TOKEN_EXPIRES_MINUTES),
+            expires_delta=expires_delta,
         )
+        expires_at = datetime.now(timezone.utc) + expires_delta
+        token_hash = hash_token(token)
+
+        stmt = pg_insert(AppToken).values(
+            client_key=client_key.lower(),
+            token=token_hash,
+            expires_at=expires_at,
+            isactive=True,
+        ).on_conflict_do_update(
+            constraint="uq_app_tokens_client_key",
+            set_={
+                "token": token_hash,
+                "expires_at": expires_at,
+                "isactive": True,
+                "updated_date": datetime.now(timezone.utc),
+            },
+        )
+        await db.execute(stmt)
+        await db.commit()
+        return token
+
+    @staticmethod
+    async def validate_app_token(db: AsyncSession, token: str) -> bool:
+        """Return True if the token hash exists in DB, is active, and is not expired."""
+        now = datetime.now(timezone.utc)
+        token_hash = hash_token(token)
+        result = await db.execute(
+            select(AppToken).where(
+                AppToken.token == token_hash,
+                AppToken.isactive.is_(True),
+                AppToken.expires_at > now,
+            )
+        )
+        return result.scalar_one_or_none() is not None
 
     @staticmethod
     async def create_signup_otp(db: AsyncSession, email: str) -> str:
