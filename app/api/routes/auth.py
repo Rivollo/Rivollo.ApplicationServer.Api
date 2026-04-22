@@ -35,6 +35,7 @@ router = APIRouter(tags=["auth"])
 async def send_signup_otp(
     payload: SendSignupOtpRequest,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Send a 6-digit OTP to the given email to verify it before signup."""
     existing_user = await AuthService.get_user_by_email(db, payload.email)
@@ -57,6 +58,7 @@ async def send_signup_otp(
 async def verify_signup_otp(
     payload: VerifySignupOtpRequest,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Verify the signup OTP. Returns a signup_token required to complete registration."""
     signup_token = await AuthService.verify_signup_otp(db, payload.email, payload.otp)
@@ -200,6 +202,7 @@ async def login(
 async def forgot_password(
     payload: ForgotPasswordRequest,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Initiate a password reset by sending a 6-digit OTP to the user's email."""
     user = await AuthService.get_user_by_email(db, payload.email)
@@ -223,6 +226,7 @@ async def forgot_password(
 async def verify_otp(
     payload: VerifyOTPRequest,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Verify the OTP and return a secure reset token to use in reset-password."""
     reset_token = await AuthService.verify_otp(db, payload.email, payload.otp)
@@ -238,6 +242,7 @@ async def verify_otp(
 async def reset_password(
     payload: ResetPasswordRequest,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Reset password using the verified reset token."""
     user = await AuthService.reset_password(db, payload.token, payload.new_password)
@@ -260,6 +265,7 @@ async def google_auth(
     payload: GoogleAuthRequest,
     request: Request,
     db: DB,
+    _: AppTokenVerified,
 ):
     """Login or signup with Google OAuth."""
     logger = logging.getLogger(__name__)
