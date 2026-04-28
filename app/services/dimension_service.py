@@ -153,77 +153,62 @@ class DimensionService:
             Dictionary with dimensions data if found, None otherwise.
             Format: {"dimensions": {dimension_type: {value, unit, hotspots}, ...}}
         """
-        # Fetch dimension groups
-        groups = await DimensionRepository.get_dimension_groups(db, product_id)
+        # Single JOIN query: groups + dimensions + both hotspots
+        rows = await DimensionRepository.get_dimensions_with_hotspots(db, product_id)
 
-        if not groups:
+        if not rows:
             return None
 
-        # Take the first group (can extend to support multiple groups later)
-        group = groups[0]
-
-        # Fetch dimensions for this group
-        dimensions = await DimensionRepository.get_dimensions_by_group(db, group.id)
-
-        if not dimensions:
-            return None
+        # Take only the first group (rows are ordered by group.order_index)
+        first_group = rows[0][0]
+        group_rows = [r for r in rows if r[0].id == first_group.id]
 
         dimensions_dict: dict[str, Any] = {}
-
-        # Group dimensions by type and take the first one of each type
         seen_types: set[str] = set()
-        for dim in dimensions:
-            dim_type = dim.dimension_type.lower() if dim.dimension_type else dim.dimension_name.lower() if dim.dimension_name else "unknown"
 
-            # Only take the first dimension of each type (lowest order_index)
+        for group, dim, start_hotspot, end_hotspot in group_rows:
+            dim_type = (
+                dim.dimension_type.lower()
+                if dim.dimension_type
+                else dim.dimension_name.lower()
+                if dim.dimension_name
+                else "unknown"
+            )
+
             if dim_type in seen_types:
                 continue
             seen_types.add(dim_type)
 
-            # Build hotspots for this dimension
             dim_hotspots = []
-            if dim.start_hotspot_id:
-                start_hotspot = await DimensionRepository.get_hotspot(
-                    db, dim.start_hotspot_id
-                )
-                if start_hotspot:
-                    dim_hotspots.append({
-                        "id": str(start_hotspot.id),
-                        "title": start_hotspot.label,
-                        "position": {
-                            "x": start_hotspot.pos_x,
-                            "y": start_hotspot.pos_y,
-                            "z": start_hotspot.pos_z,
-                        },
-                    })
-            if dim.end_hotspot_id:
-                end_hotspot = await DimensionRepository.get_hotspot(
-                    db, dim.end_hotspot_id
-                )
-                if end_hotspot:
-                    dim_hotspots.append({
-                        "id": str(end_hotspot.id),
-                        "title": end_hotspot.label,
-                        "position": {
-                            "x": end_hotspot.pos_x,
-                            "y": end_hotspot.pos_y,
-                            "z": end_hotspot.pos_z,
-                        },
-                    })
+            if start_hotspot:
+                dim_hotspots.append({
+                    "id": str(start_hotspot.id),
+                    "title": start_hotspot.label,
+                    "position": {
+                        "x": start_hotspot.pos_x,
+                        "y": start_hotspot.pos_y,
+                        "z": start_hotspot.pos_z,
+                    },
+                })
+            if end_hotspot:
+                dim_hotspots.append({
+                    "id": str(end_hotspot.id),
+                    "title": end_hotspot.label,
+                    "position": {
+                        "x": end_hotspot.pos_x,
+                        "y": end_hotspot.pos_y,
+                        "z": end_hotspot.pos_z,
+                    },
+                })
 
-            # Create dimension data as a single object (not array)
-            dim_data = {
+            dimensions_dict[dim_type] = {
                 "value": float(dim.value),
                 "unit": dim.unit or "cm",
                 "hotspots": dim_hotspots,
             }
 
-            # Store as single object, not array
-            dimensions_dict[dim_type] = dim_data
-
         if dimensions_dict:
-            # Add dimension_name (group name) at the top level of dimensions
-            dimensions_dict["dimension_name"] = group.name
+            dimensions_dict["dimension_name"] = first_group.name
             return {"dimensions": dimensions_dict}
 
         return None
