@@ -67,7 +67,7 @@ def init_engine_and_session() -> None:
 	if not settings.DATABASE_URL:
 		raise RuntimeError("DATABASE_URL is not configured. Set it in the environment or .env file.")
 	database_url = _ensure_async_url(settings.DATABASE_URL)
-	_engine = create_async_engine(database_url, pool_pre_ping=False, future=True)
+	_engine = create_async_engine(database_url, pool_size=20, max_overflow=10, pool_recycle=1800, pool_pre_ping=False, future=True)
 
 	if settings.USE_MANAGED_IDENTITY:
 		# Attach the event listener that refreshes the Azure AD token before

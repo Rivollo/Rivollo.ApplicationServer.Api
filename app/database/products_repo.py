@@ -58,6 +58,54 @@ class ProductRepository:
         return None
 
     @staticmethod
+    async def get_primary_assets_for_products(
+        db: AsyncSession, product_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[str, str, int]]:
+        """Bulk-fetch primary assets for multiple products in a single DB call.
+
+        Replaces the N+1 pattern of calling get_primary_asset_for_product in a loop.
+        Returns mapping of product_id -> (image_url, asset_type_name, asset_type_id).
+        """
+        if not product_ids:
+            return {}
+
+        str_ids = [str(pid) for pid in product_ids]
+
+        subq = (
+            select(
+                ProductAssetMapping.productid.label("productid"),
+                ProductAsset.image.label("image"),
+                AssetStatic.name.label("asset_name"),
+                ProductAsset.asset_id.label("asset_id"),
+                func.row_number().over(
+                    partition_by=ProductAssetMapping.productid,
+                    order_by=ProductAssetMapping.created_date.desc(),
+                ).label("rn"),
+            )
+            .join(ProductAsset, ProductAsset.id == ProductAssetMapping.product_asset_id)
+            .join(AssetStatic, ProductAsset.asset_id == AssetStatic.id)
+            .where(
+                ProductAssetMapping.productid.in_(str_ids),
+                ProductAsset.asset_id == 1,
+                ProductAssetMapping.isactive.is_(True),
+            )
+        ).subquery()
+
+        result = await db.execute(
+            select(
+                subq.c.productid,
+                subq.c.image,
+                subq.c.asset_name,
+                subq.c.asset_id,
+            ).where(subq.c.rn == 1)
+        )
+
+        return {
+            uuid.UUID(str(row.productid)): (row.image, row.asset_name, row.asset_id)
+            for row in result.all()
+        }
+
+    @staticmethod
     async def get_public_ids_for_products(
         db: AsyncSession, product_ids: list[uuid.UUID]
     ) -> dict[uuid.UUID, str]:
