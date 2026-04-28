@@ -865,37 +865,21 @@ async def get_products_by_user(userId: str, db: DB):
         products_result = await db.execute(products_query)
         products = products_result.scalars().all()
         
-        # Build response items
+        # Single bulk call — replaces N per-product asset queries
+        asset_map = await ProductRepository.get_primary_assets_for_products(
+            db, [p.id for p in products]
+        )
+
         items: list[ProductWithPrimaryAsset] = []
-        
         for product in products:
-            # Fetch primary asset (asset_id = 1) for this product
-            asset_query = (
-                select(
-                    ProductAsset.image,
-                    AssetStatic.name.label("asset_name"),
-                    ProductAsset.asset_id,
-                )
-                .join(ProductAssetMapping, ProductAsset.id == ProductAssetMapping.product_asset_id)
-                .join(AssetStatic, ProductAsset.asset_id == AssetStatic.id)
-                .where(
-                    ProductAssetMapping.productid == str(product.id),  # Cast to string
-                    ProductAsset.asset_id == 1,  # Primary asset
-                    ProductAssetMapping.isactive == True,
-                )
-                .order_by(ProductAssetMapping.created_date.desc())
-                .limit(1)
-            )
-            
-            asset_result = await db.execute(asset_query)
-            asset_row = asset_result.first()
-            
+            asset_data = asset_map.get(product.id)
+
             image = None
             asset_type = None
             asset_type_id = None
-            
-            if asset_row:
-                image, asset_type, asset_type_id = asset_row
+
+            if asset_data:
+                image, asset_type, asset_type_id = asset_data
             
             items.append(
                 ProductWithPrimaryAsset(
@@ -1704,13 +1688,18 @@ async def get_my_products_v2(
     result = await db.execute(base_query)
     products = list(result.scalars().all())
 
-    # Bulk-fetch public_ids for any published products on this page
-    published_ids = [p.id for p in products if p.status.value == "published"]
-    public_id_map = await ProductRepository.get_public_ids_for_products(db, published_ids)
+    all_ids = [p.id for p in products]
+
+    # Two sequential bulk calls — replaces N per-product asset queries
+    # Sequential (not gather) because both share the same AsyncSession
+    asset_map = await ProductRepository.get_primary_assets_for_products(db, all_ids)
+    public_id_map = await ProductRepository.get_public_ids_for_products(
+        db, [p.id for p in products if p.status.value == "published"]
+    )
 
     items: list[ProductWithPrimaryAsset] = []
     for product in products:
-        asset_data = await ProductRepository.get_primary_asset_for_product(db, product.id)
+        asset_data = asset_map.get(product.id)
 
         image = asset_type = asset_type_id = None
         if asset_data:
