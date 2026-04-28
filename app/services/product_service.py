@@ -470,8 +470,11 @@ class ProductService:
         
         items: list[ProductWithPrimaryAsset] = []
 
+        product_ids = [p.id for p in products]
+        asset_map = await ProductRepository.get_primary_assets_for_products(db, product_ids)
+
         for product in products:
-            asset_data = await ProductRepository.get_primary_asset_for_product(db, product.id)
+            asset_data = asset_map.get(product.id)
             
             image = None
             asset_type = None
