@@ -33,7 +33,7 @@ from app.api.routes.razorpay_subscriptions import router as razorpay_subscriptio
 from app.api.routes.payments import router as payments_router
 from app.api.routes.ai import router as ai_router
 from app.utils.envelopes import api_success, api_error
-from app.core.db import init_engine_and_session
+from app.core.db import init_engine_and_session, token_refresh_loop, dispose_engine
 from app.middleware.cdn import BlobToCdnMiddleware
 
 
@@ -82,9 +82,13 @@ async def lifespan(app: FastAPI):
     # --- Startup ---
     init_engine_and_session()
 
-    # Launch background deactivation task
     deactivation_task = asyncio.create_task(_deactivation_loop())
     _logger.info("Background subscription deactivation task started.")
+
+    _token_task = None
+    if settings.USE_MANAGED_IDENTITY:
+        _token_task = asyncio.create_task(token_refresh_loop())
+        _logger.info("Managed Identity token refresh task started.")
 
     yield  # <-- app is live here
 
@@ -93,6 +97,14 @@ async def lifespan(app: FastAPI):
     with suppress(asyncio.CancelledError):
         await deactivation_task
     _logger.info("Background subscription deactivation task stopped.")
+
+    if _token_task is not None:
+        _token_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _token_task
+        _logger.info("Managed Identity token refresh task stopped.")
+
+    await dispose_engine()
 
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
