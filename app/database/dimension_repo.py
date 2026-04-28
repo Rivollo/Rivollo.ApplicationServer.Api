@@ -7,6 +7,7 @@ from typing import Optional
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models.models import (
     Hotspot,
@@ -187,3 +188,25 @@ class DimensionRepository:
         Get a hotspot by ID.
         """
         return await db.get(Hotspot, hotspot_id)
+
+    @staticmethod
+    async def get_dimensions_with_hotspots(
+        db: AsyncSession, product_id: uuid.UUID
+    ) -> list:
+        """Fetch all dimension groups, dimensions, and both hotspots in one JOIN query.
+
+        Returns rows of (ProductDimensionGroup, ProductDimensions, start_hotspot, end_hotspot).
+        start_hotspot and end_hotspot are None when the foreign key is NULL.
+        """
+        start_hs = aliased(Hotspot, name="start_hotspot")
+        end_hs = aliased(Hotspot, name="end_hotspot")
+
+        result = await db.execute(
+            select(ProductDimensionGroup, ProductDimensions, start_hs, end_hs)
+            .join(ProductDimensions, ProductDimensions.dimension_group_id == ProductDimensionGroup.id)
+            .outerjoin(start_hs, start_hs.id == ProductDimensions.start_hotspot_id)
+            .outerjoin(end_hs, end_hs.id == ProductDimensions.end_hotspot_id)
+            .where(ProductDimensionGroup.product_id == product_id)
+            .order_by(ProductDimensionGroup.order_index, ProductDimensions.order_index)
+        )
+        return result.all()

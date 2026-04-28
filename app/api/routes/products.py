@@ -620,65 +620,49 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
             detail="Product not found.",
         )
 
-    # Query 1: Mesh / 3D assets (tbl_asset.assetid = 2) — classified at SQL level
-    mesh_stmt = (
-        select(
-            ProductAsset.asset_id,
-            ProductAsset.image,
-        )
-        .join(ProductAssetMapping, ProductAsset.id == ProductAssetMapping.product_asset_id)
-        .join(AssetStatic, ProductAsset.asset_id == AssetStatic.id)
-        .where(ProductAssetMapping.productid == str(product_uuid))
-        .where(ProductAssetMapping.isactive == True)
-        .where(AssetStatic.assetid == 2)
-        .order_by(ProductAssetMapping.created_date.desc())
-    )
-    mesh_result = await db.execute(mesh_stmt)
-    mesh = [
-        ProductMeshItem(asset_id=row.asset_id, url=row.image)
-        for row in mesh_result.all()
-    ]
-
-    # Query 2: Image assets (tbl_asset.assetid = 1) — classified at SQL level
-    image_stmt = (
+    # Single query for both mesh (assetid=2) and image (assetid=1) assets
+    assets_stmt = (
         select(
             ProductAsset.asset_id,
             ProductAsset.image,
             AssetStatic.name.label("asset_name"),
+            AssetStatic.assetid,
         )
         .join(ProductAssetMapping, ProductAsset.id == ProductAssetMapping.product_asset_id)
         .join(AssetStatic, ProductAsset.asset_id == AssetStatic.id)
         .where(ProductAssetMapping.productid == str(product_uuid))
         .where(ProductAssetMapping.isactive == True)
-        .where(AssetStatic.assetid == 1)
+        .where(AssetStatic.assetid.in_([1, 2]))
         .order_by(ProductAssetMapping.created_date.desc())
     )
-    image_result = await db.execute(image_stmt)
+    assets_result = await db.execute(assets_stmt)
+    all_asset_rows = assets_result.all()
+
+    mesh_urls: set[str] = set()
+    mesh = []
+    for row in all_asset_rows:
+        if row.assetid == 2:
+            mesh.append(ProductMeshItem(asset_id=row.asset_id, url=row.image))
+            mesh_urls.add(row.image)
 
     # Deduplicate: exclude image entries whose URL already exists in mesh.
-    # This guards against corrupted mappings where mesh file URLs were also
-    # stored under image-type asset_ids in tbl_product_asset_mapping.
-    mesh_urls = {item.url for item in mesh}
+    # Guards against corrupted mappings where mesh URLs were stored under image asset_ids.
     images = [
         ProductImageItem(asset_id=row.asset_id, url=row.image, type=row.asset_name)
-        for row in image_result.all()
-        if row.image not in mesh_urls
+        for row in all_asset_rows
+        if row.assetid == 1 and row.image not in mesh_urls
     ]
 
-    # Fetch background data if background_type exists
+    # Fetch background + background_type in one LEFT JOIN query
     background_data = None
     if product.background_type:
-        background_result = await db.execute(
-            select(Background).where(Background.id == product.background_type)
-        )
-        background = background_result.scalar_one_or_none()
-        if background:
-            # Also fetch background type
-            background_type_result = await db.execute(
-                select(BackgroundType).where(BackgroundType.id == background.background_type_id)
-            )
-            background_type = background_type_result.scalar_one_or_none()
-            
+        bg_row = (await db.execute(
+            select(Background, BackgroundType)
+            .outerjoin(BackgroundType, BackgroundType.id == Background.background_type_id)
+            .where(Background.id == product.background_type)
+        )).first()
+        if bg_row:
+            background, background_type = bg_row
             background_data = {
                 "id": background.id,
                 "background_type_id": background.background_type_id,
@@ -697,11 +681,10 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
                 "updated_date": background.updated_date,
             }
 
-    # Fetch product links from tbl_product_links using raw SQL query
+    # Fetch product links from tbl_product_links (SQL already filters isactive = true)
     try:
-        from sqlalchemy import text
         sql_query = text("""
-            SELECT id, productid, "name", link, description, isactive, 
+            SELECT id, productid, "name", link, description, isactive,
                    created_by, created_date, updated_by, updated_date
             FROM public.tbl_product_links
             WHERE productid = :product_id AND isactive = true
@@ -709,44 +692,21 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
         """)
         result = await db.execute(sql_query, {"product_id": str(product_uuid)})
         rows = result.fetchall()
-        
-        links_data = None
-        if rows:
-            # Filter for active links
-            active_rows = [row for row in rows if row[5] is True or (row[5] is not None and bool(row[5]))]
-            if active_rows:
-                links_data = [
-                    {
-                        "id": row[0] if row[0] is not None else None,
-                        "productid": str(row[1]) if row[1] else None,
-                        "name": row[2] if row[2] else None,
-                        "link": row[3] if row[3] else None,
-                        "description": row[4] if row[4] else None,
-                        "isactive": bool(row[5]) if row[5] is not None else False,
-                        "created_by": str(row[6]) if row[6] else None,
-                        "created_date": row[7] if row[7] else None,
-                        "updated_by": str(row[8]) if row[8] else None,
-                        "updated_date": row[9] if row[9] else None,
-                    }
-                    for row in active_rows
-                ]
-            # If no active links but we have rows, include all for debugging
-            elif rows:
-                links_data = [
-                    {
-                        "id": row[0] if row[0] is not None else None,
-                        "productid": str(row[1]) if row[1] else None,
-                        "name": row[2] if row[2] else None,
-                        "link": row[3] if row[3] else None,
-                        "description": row[4] if row[4] else None,
-                        "isactive": bool(row[5]) if row[5] is not None else False,
-                        "created_by": str(row[6]) if row[6] else None,
-                        "created_date": row[7] if row[7] else None,
-                        "updated_by": str(row[8]) if row[8] else None,
-                        "updated_date": row[9] if row[9] else None,
-                    }
-                    for row in rows
-                ]
+        links_data = [
+            {
+                "id": row[0],
+                "productid": str(row[1]) if row[1] else None,
+                "name": row[2],
+                "link": row[3],
+                "description": row[4],
+                "isactive": bool(row[5]) if row[5] is not None else False,
+                "created_by": str(row[6]) if row[6] else None,
+                "created_date": row[7],
+                "updated_by": str(row[8]) if row[8] else None,
+                "updated_date": row[9],
+            }
+            for row in rows
+        ] or None
     except Exception as e:
         import traceback
         logger = logging.getLogger(__name__)
