@@ -740,7 +740,6 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
     # Fetch public_id if product is published
     public_id = None
     if product.status.value == "published":
-      
         publish_link_query = select(PublishLink.public_id).where(
             PublishLink.product_id == product_uuid,  
             PublishLink.is_enabled == True 
