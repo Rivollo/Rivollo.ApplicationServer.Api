@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from typing import Optional
 import uuid
 import logging
@@ -91,7 +93,7 @@ def _parse_job_id(raw_id: str) -> uuid.UUID:
 	return uuid.UUID(value)
 
 
-def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
+async def _process_completed_job(job: Job, resp, user_id: str, db: AsyncSession, logger):
 	"""Process a completed job by uploading the asset and creating database records"""
 	try:
 		# Create asset record first
@@ -102,7 +104,7 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 			created_by=user_id
 		)
 		db.add(asset)
-		db.flush()  # Get the asset ID
+		await db.flush()  # Get the asset ID
 		
 		# Determine file extension from content type
 		content_type = resp.headers.get("content-type", "").lower()
@@ -195,11 +197,11 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 				db.add(job)
 				
 				# Commit all changes
-				db.commit()
-				db.refresh(asset)
-				db.refresh(glb_asset_part)
-				db.refresh(usdz_asset_part)
-				db.refresh(job)
+				await db.commit()
+				await db.refresh(asset)
+				await db.refresh(glb_asset_part)
+				await db.refresh(usdz_asset_part)
+				await db.refresh(job)
 				
 				logger.info(
 					"Successfully processed completed job %s, created asset %s with GLB URL %s and USDZ URL %s",
@@ -260,11 +262,11 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 				db.add(job)
 				
 				# Commit all changes
-				db.commit()
-				db.refresh(asset)
-				db.refresh(asset_part)
-				db.refresh(job)
-				
+				await db.commit()
+				await db.refresh(asset)
+				await db.refresh(asset_part)
+				await db.refresh(job)
+
 				logger.info(
 					"Successfully processed job %s with GLB fallback (USDZ conversion failed). GLB URL: %s",
 					job.id, file_url
@@ -314,11 +316,11 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 			db.add(job)
 			
 			# Commit all changes
-			db.commit()
-			db.refresh(asset)
-			db.refresh(asset_part)
-			db.refresh(job)
-			
+			await db.commit()
+			await db.refresh(asset)
+			await db.refresh(asset_part)
+			await db.refresh(job)
+
 			logger.info("Successfully processed completed job %s, created asset %s with streaming URL %s", 
 					   job.id, asset.id, file_url)
 			
@@ -337,7 +339,7 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 			job.status = JobStatusEnum.failed
 			job.error_message = "Failed to process completed asset"
 			db.add(job)
-			db.commit()
+			await db.commit()
 		except Exception:
 			logger.exception("Failed to mark job as failed")
 		
@@ -348,7 +350,7 @@ def _process_completed_job(job: Job, resp, user_id: str, db: Session, logger):
 
 
 @router.post("/jobs")
-def create_job(payload: CreateJobRequest, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+async def create_job(payload: CreateJobRequest, user_id: str = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
     logger = logging.getLogger(__name__)
     image_url = str(payload.imageURL)
     if not image_url.startswith("http"):
@@ -359,15 +361,15 @@ def create_job(payload: CreateJobRequest, user_id: str = Depends(get_current_use
     # Create the DB job immediately with status=queued (created)
     job = Job(image_url=image_url, status=JobStatusEnum.queued, created_by=user_id)
     db.add(job)
-    db.commit()
-    db.refresh(job)
+    await db.commit()
+    await db.refresh(job)
 
-    def _fail_job(error_message: str) -> None:
+    async def _fail_job(error_message: str) -> None:
         try:
             job.status = JobStatusEnum.failed
             job.error_message = error_message
             db.add(job)
-            db.commit()
+            await db.commit()
         except Exception:
             logger.exception("Failed to mark job as failed in DB")
 
@@ -391,11 +393,11 @@ def create_job(payload: CreateJobRequest, user_id: str = Depends(get_current_use
                 parsed = urlparse(image_url)
                 filename = os.path.basename(parsed.path) or "image.png"
     except HTTPException as ex:
-        _fail_job("Unable to download imageURL")
+        await _fail_job("Unable to download imageURL")
         raise ex
     except Exception as ex:
         logger.exception("Error downloading image from %s", image_url)
-        _fail_job("Unable to download imageURL")
+        await _fail_job("Unable to download imageURL")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unable to download imageURL") from ex
 
     # 2) Send to inference server as multipart/form-data
@@ -434,7 +436,7 @@ def create_job(payload: CreateJobRequest, user_id: str = Depends(get_current_use
         logger.info("Saved downloaded image to %s (%d bytes, content_type=%s)", local_path, len(image_bytes), content_type)
     except Exception:
         logger.exception("Failed to persist image to Downloads folder")
-        _fail_job("Failed to store image locally")
+        await _fail_job("Failed to store image locally")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to store image locally")
 
     # Log the outgoing HTTP request details (without dumping binary content)
@@ -473,11 +475,11 @@ def create_job(payload: CreateJobRequest, user_id: str = Depends(get_current_use
                 raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid response from inference server")
             logger.info("Inference HTTP response: status=%s uid=%s", r.status_code, uid)
     except HTTPException as ex:
-        _fail_job("Inference server error")
+        await _fail_job("Inference server error")
         raise ex
     except Exception as ex:
         logger.exception("Error sending image to inference server")
-        _fail_job("Inference server error")
+        await _fail_job("Inference server error")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Inference server error") from ex
 
     # 3) Store model job id in physical column (if present) and meta for redundancy
@@ -497,7 +499,7 @@ def create_job(payload: CreateJobRequest, user_id: str = Depends(get_current_use
     job.meta = meta
     job.status = JobStatusEnum.processing
     db.add(job)
-    db.commit()
+    await db.commit()
     logger.info("Committed job update: id=%s modelid=%s status=%s", job.id, job.modelid, job.status.value)
 
     logger.info("Job created id=%s (model_id=%s) for user=%s", job.id, uid, user_id)
@@ -506,7 +508,7 @@ def create_job(payload: CreateJobRequest, user_id: str = Depends(get_current_use
 
 
 @router.get("/jobs/{id}")
-def get_job(id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+async def get_job(id: str, user_id: str = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
 	logger = logging.getLogger(__name__)
 	logger.info("=== GET /jobs/%s called by user %s ===", id, user_id)
 	
@@ -517,7 +519,8 @@ def get_job(id: str, user_id: str = Depends(get_current_user_id), db: Session = 
 		logger.error("Invalid job ID format: %s", id)
 		raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 	
-	job = db.query(Job).filter(Job.id == job_id, Job.created_by == user_id).one_or_none()
+	result = await db.execute(select(Job).where(Job.id == job_id, Job.created_by == user_id))
+	job = result.scalar_one_or_none()
 	if job is None:
 		logger.error("Job not found: %s for user %s", job_id, user_id)
 		raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
@@ -582,7 +585,7 @@ def get_job(id: str, user_id: str = Depends(get_current_user_id), db: Session = 
 					else:
 						# Binary response - this means the job is completed, process the asset
 						logger.info("Received binary response (content-type: %s), processing completed asset for job %s", content_type, job.id)
-						completed_response = _process_completed_job(job, resp, user_id, db, logger)
+						completed_response = await _process_completed_job(job, resp, user_id, db, logger)
 						logger.info("=== RETURNING COMPLETED JOB RESPONSE ===")
 						return completed_response
 				else:
@@ -617,13 +620,15 @@ def get_job(id: str, user_id: str = Depends(get_current_user_id), db: Session = 
 	has_multiple_formats = False
 	
 	if job.asset_id:
-		asset = db.query(Asset).filter(Asset.id == job.asset_id).first()
+		asset_result = await db.execute(select(Asset).where(Asset.id == job.asset_id))
+		asset = asset_result.scalar_one_or_none()
 		if asset:
 			asset_id = str(asset.id)
 			logger.info("Found asset %s for job %s", asset_id, job.id)
 			
 			# Get all asset parts ordered by position
-			asset_parts = db.query(AssetPart).filter(AssetPart.asset_id == asset.id).order_by(AssetPart.position.asc()).all()
+			parts_result = await db.execute(select(AssetPart).where(AssetPart.asset_id == asset.id).order_by(AssetPart.position.asc()))
+			asset_parts = parts_result.scalars().all()
 
 			formats = {}
 			for part in asset_parts:
