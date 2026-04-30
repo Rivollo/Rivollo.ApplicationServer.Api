@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
@@ -6,6 +6,7 @@ import logging
 import time
 from contextlib import asynccontextmanager, suppress
 from typing import Optional
+from uuid import UUID
 import os
 
 from opentelemetry.trace import get_current_span
@@ -83,15 +84,16 @@ async def lifespan(app: FastAPI):
     """FastAPI lifespan — runs startup logic, yields, then shutdown logic."""
     # --- Startup ---
     init_engine_and_session()
-    await broadcaster.start()
-
-    deactivation_task = asyncio.create_task(_deactivation_loop())
-    _logger.info("Background subscription deactivation task started.")
 
     _token_task = None
     if settings.USE_MANAGED_IDENTITY:
         _token_task = asyncio.create_task(token_refresh_loop())
         _logger.info("Managed Identity token refresh task started.")
+
+    await broadcaster.start()
+
+    deactivation_task = asyncio.create_task(_deactivation_loop())
+    _logger.info("Background subscription deactivation task started.")
 
     yield  # <-- app is live here
 
@@ -292,10 +294,6 @@ async def root():
 #
 # Browser connects to: ws://<host>/ws/products/<uuid>/status
 # ---------------------------------------------------------------------------
-from uuid import UUID
-from fastapi import WebSocket
-
-
 @app.websocket("/ws/products/{product_id}/status")
 async def product_status_ws(websocket: WebSocket, product_id: UUID):
     await websocket.accept()
