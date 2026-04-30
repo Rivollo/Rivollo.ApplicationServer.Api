@@ -202,10 +202,10 @@ app.include_router(ai_router, prefix=_api_prefix)
 
 
 
-# Structured request logging (includes trace correlation where available)
-@app.middleware("http")
 _HEALTH_PATHS = {"/health", "/health/ready", "/health/live"}
 
+# Structured request logging (includes trace correlation where available)
+@app.middleware("http")
 async def request_logging_middleware(request: Request, call_next):
 	if request.url.path in _HEALTH_PATHS:
 		return await call_next(request)
