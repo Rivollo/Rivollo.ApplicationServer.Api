@@ -112,7 +112,8 @@ class Settings(BaseSettings):
 	# Azure Monitor / Application Insights
 	AZURE_MONITOR_CONN_STR: str = Field(default="")
 	ENABLE_APP_INSIGHTS: bool = Field(default=True)
-	SAMPLING_RATIO: float = Field(default=1.0)
+	SAMPLING_RATIO: float = Field(default=0.1)
+	ENABLE_LIVE_METRICS: bool = Field(default=False)
 
 	# Public API basic auth
 	PUBLIC_API_USERNAME: str = Field(default="public")
