@@ -35,6 +35,8 @@ from app.api.routes.ai import router as ai_router
 from app.utils.envelopes import api_success, api_error
 from app.core.db import init_engine_and_session, token_refresh_loop, dispose_engine
 from app.middleware.cdn import BlobToCdnMiddleware
+from app.api.websocket.broadcaster import broadcaster
+from app.api.websocket.product_status import track_product_status
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +83,7 @@ async def lifespan(app: FastAPI):
     """FastAPI lifespan — runs startup logic, yields, then shutdown logic."""
     # --- Startup ---
     init_engine_and_session()
+    await broadcaster.start()
 
     deactivation_task = asyncio.create_task(_deactivation_loop())
     _logger.info("Background subscription deactivation task started.")
@@ -104,6 +107,7 @@ async def lifespan(app: FastAPI):
             await _token_task
         _logger.info("Managed Identity token refresh task stopped.")
 
+    await broadcaster.stop()
     await dispose_engine()
 
 
@@ -277,3 +281,22 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 @app.get("/")
 async def root():
 	return api_success({"service": settings.APP_NAME, "status": "ok"})
+
+
+# ---------------------------------------------------------------------------
+# WebSocket — real-time product status tracking
+# ---------------------------------------------------------------------------
+# No auth required: product IDs are UUIDs (128-bit random, not guessable).
+# FastAPI validates UUID format before calling the handler — malformed IDs
+# return 422 automatically.
+#
+# Browser connects to: ws://<host>/ws/products/<uuid>/status
+# ---------------------------------------------------------------------------
+from uuid import UUID
+from fastapi import WebSocket
+
+
+@app.websocket("/ws/products/{product_id}/status")
+async def product_status_ws(websocket: WebSocket, product_id: UUID):
+    await websocket.accept()
+    await track_product_status(websocket, product_id)
