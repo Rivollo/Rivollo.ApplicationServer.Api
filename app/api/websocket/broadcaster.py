@@ -50,9 +50,11 @@ import logging
 from collections import defaultdict
 from typing import Optional
 
+from app.core.config import settings
+
 _logger = logging.getLogger("rivollo.ws.broadcaster")
 
-CHANNEL                 = "tbl_product_status"
+CHANNEL                 = settings.WS_NOTIFY_CHANNEL
 KEEPALIVE_INTERVAL_SECS = 25    # well under Azure LB 4-minute idle timeout
 QUEUE_MAX_SIZE          = 50    # per-subscriber; status changes are infrequent
 

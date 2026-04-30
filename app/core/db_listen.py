@@ -24,7 +24,7 @@ Azure specifics:
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, parse_qs
 
 import asyncpg
 
@@ -41,14 +41,14 @@ async def create_listen_connection() -> asyncpg.Connection:
     Each call reads the Managed Identity token fresh so token
     refreshes performed by token_refresh_loop() are always used.
     """
-    host, port, user, database = _parse_database_url()
+    host, port, user, database, ssl_mode = _parse_database_url()
 
     connect_kwargs: dict = {
         "host":     host,
         "port":     port,
         "user":     user,
         "database": database,
-        "ssl":      "require",
+        "ssl":      ssl_mode,
         "server_settings": {
             # TCP keepalives — prevents Azure LB silent idle drop
             "tcp_keepalives_idle":     "60",  # probe after 60s idle
@@ -102,11 +102,12 @@ def _normalise_url(url: str) -> str:
     return url
 
 
-def _parse_database_url() -> tuple[str, int, str, str]:
-    """Return (host, port, user, database) parsed from settings.DATABASE_URL."""
-    parsed = urlparse(_normalise_url(settings.DATABASE_URL))
+def _parse_database_url() -> tuple[str, int, str, str, str]:
+    """Return (host, port, user, database, ssl_mode) parsed from settings.DATABASE_URL."""
+    parsed   = urlparse(_normalise_url(settings.DATABASE_URL))
     host     = parsed.hostname or ""
     port     = parsed.port or 5432
     user     = parsed.username or ""
     database = parsed.path.lstrip("/")
-    return host, port, user, database
+    ssl_mode = parse_qs(parsed.query).get("ssl", ["require"])[0]
+    return host, port, user, database, ssl_mode

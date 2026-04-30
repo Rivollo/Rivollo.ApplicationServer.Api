@@ -90,7 +90,6 @@ class ProductStatus(str, enum.Enum):
     PROCESSING = "processing"
     READY = "ready"
     PUBLISHED = "published"
-    UNPUBLISHED = "unpublished"
     ARCHIVED = "archived"
 
 

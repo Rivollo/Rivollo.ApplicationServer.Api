@@ -51,19 +51,22 @@ import logging
 from uuid import UUID
 
 from fastapi import WebSocket, WebSocketDisconnect
-from sqlalchemy import select
+from sqlalchemy import text
 
 from app.api.websocket.broadcaster import broadcaster
-from app.models.models import Product
+from app.models.models import ProductStatus
 
 _logger = logging.getLogger("rivollo.ws.product_status")
 
 # Only "ready" closes the WebSocket — the processing pipeline is done.
-TERMINAL_STATUS = "ready"
+TERMINAL_STATUS = ProductStatus.READY.value
 
-# These statuses happen outside the automated pipeline (manual user actions).
-# The trigger still fires for them; we silently discard the notification.
-IGNORED_STATUSES = frozenset({"published", "archived"})
+# Post-pipeline statuses triggered by manual user actions — silently discarded.
+IGNORED_STATUSES = frozenset({
+    ProductStatus.PUBLISHED.value,
+    ProductStatus.ARCHIVED.value,
+    "unpublished",  # legacy value; kept for safety in case old rows exist in DB
+})
 
 # Must stay below Azure LB idle timeout (~240s).
 KEEPALIVE_SECONDS = 30
@@ -108,8 +111,8 @@ async def track_product_status(
 
         async with _db_core._SessionLocal() as session:
             result = await session.execute(
-                select(Product.status, Product.updated_date)
-                .where(Product.id == product_id)
+                text("SELECT status::text, updated_date FROM tbl_products WHERE id = :id"),
+                {"id": str(product_id)},
             )
             row = result.fetchone()
         # DB connection returned to pool here — before the loop below.
@@ -125,7 +128,7 @@ async def track_product_status(
             })
             return
 
-        current_status = str(row.status)
+        current_status = row.status.lower()
 
         # -------------------------------------------------------------------
         # STEP 4 — Send current status immediately.
@@ -221,7 +224,7 @@ async def track_product_status(
             # ---------------------------------------------------------------
             # NOTIFICATION BRANCH — pg_notify received via broadcaster queue.
             # ---------------------------------------------------------------
-            new_status = str(notification.get("new_status", ""))
+            new_status = str(notification.get("new_status", "")).lower()
 
             # Skip statuses outside the automated processing pipeline.
             # published and archived are manual user actions that happen
@@ -301,11 +304,12 @@ async def _query_current_status(
 
         async with _db_core._SessionLocal() as session:
             result = await session.execute(
-                select(Product.status).where(Product.id == product_id)
+                text("SELECT status::text FROM tbl_products WHERE id = :id"),
+                {"id": str(product_id)},
             )
             row = result.fetchone()
 
-        return str(row.status) if row else None
+        return row.status.lower() if row else None
 
     except Exception:
         _logger.exception(
