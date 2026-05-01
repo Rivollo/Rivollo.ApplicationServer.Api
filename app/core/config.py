@@ -138,6 +138,9 @@ class Settings(BaseSettings):
 	# Webhook secret — must match the value set in Razorpay Dashboard → Settings → Webhooks
 	RAZORPAY_WEBHOOK_SECRET: str = Field(default="")
 
+	# WebSocket LISTEN/NOTIFY
+	WS_NOTIFY_CHANNEL: str = Field(default="tbl_product_status")
+
 	# OpenAI — GPT-4o Vision for AI suggestions
 	# In Azure App Service, override via env vars: OPENAI_API_KEY, OPENAI_MODEL, OPENAI_MAX_TOKENS
 	OPENAI_API_KEY: str = Field(default="")

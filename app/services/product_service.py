@@ -134,10 +134,9 @@ class ProductService:
         # 4. Create ProductAsset + Mapping
         # -------------------------------
         try:
-            # Store CDN URL in DB — this is what gets served to end users
             product_asset = ProductAsset(
                 asset_id=asset_id,
-                image=cdn_url,
+                image=blob_url,
                 size_bytes=image_size_bytes,
                 created_by=user_id,
             )
@@ -157,10 +156,10 @@ class ProductService:
             # -------------------------------
             # 5. Create ProductAsset (MASK) - NEW
             # -------------------------------
-            if mask_cdn_url:
+            if mask_blob_url:
                 mask_asset = ProductAsset(
                     asset_id=mesh_asset_id,
-                    image=mask_cdn_url,
+                    image=mask_blob_url,
                     size_bytes=mask_size_bytes,
                     created_by=user_id,
                 )
