@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from sqlalchemy import and_, delete, desc, func, or_, select, cast, String, insert, update, text
@@ -281,6 +281,7 @@ async def create_product(
 async def create_product_with_image(
     request: Request,
     db: DB,
+    background_tasks: BackgroundTasks,
     userId: str = Form(..., description="User ID creating the product"),
     name: str = Form(..., min_length=1, max_length=200, description="Product name"),
     asset_id: int = Form(..., description="Asset ID (integer)"),
@@ -385,6 +386,7 @@ async def create_product_with_image(
     try:
         product, image_url, mask_image_url, glb_url = await product_service.create_product_with_image(
             db=db,
+            background_tasks=background_tasks,
             user_id=user_uuid,
             name=name,
             asset_id=asset_id,

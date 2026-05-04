@@ -1,10 +1,10 @@
 """Product service for handling product creation with image storage."""
 
-import asyncio
 import uuid
 from typing import BinaryIO, Optional
 
 import logging
+from fastapi import BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, insert
 from datetime import datetime
@@ -54,6 +54,7 @@ class ProductService:
     @staticmethod
     async def create_product_with_image(
         db: AsyncSession,
+        background_tasks: BackgroundTasks,
         user_id: uuid.UUID,
         name: str,
         asset_id: int,
@@ -188,18 +189,16 @@ class ProductService:
         # 7. Fire-and-forget 3D generation — returns immediately
         # -------------------------------
         logger.info("Scheduling background 3D generation for product %s", product.id)
-        asyncio.create_task(
-            ProductService._run_3d_generation_background(
-                user_id=user_id,
-                product_id=product.id,
-                asset_id=asset_id,
-                mesh_asset_id=mesh_asset_id,
-                name=name,
-                target_format=target_format,
-                blob_url=blob_url,
-                mask_blob_url=mask_blob_url,
-            ),
-            name=f"3d_gen_{product.id}",
+        background_tasks.add_task(
+            ProductService._run_3d_generation_background,
+            user_id=user_id,
+            product_id=product.id,
+            asset_id=asset_id,
+            mesh_asset_id=mesh_asset_id,
+            name=name,
+            target_format=target_format,
+            blob_url=blob_url,
+            mask_blob_url=mask_blob_url,
         )
 
         return product, cdn_url, mask_cdn_url, None
