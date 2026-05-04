@@ -71,6 +71,34 @@ IGNORED_STATUSES = frozenset({
 # Must stay below Azure LB idle timeout (~240s).
 KEEPALIVE_SECONDS = 30
 
+_STATUS_MESSAGES: dict[str, list[str]] = {
+    "draft": [
+        "Your product is being prepared for high-quality 3D generation.",
+        "Setting things up — your 3D journey is about to begin.",
+        "Laying the groundwork for something extraordinary.",
+        "Getting all systems ready for your 3D transformation.",
+    ],
+    "queue": [
+        "Your 3D generation request is queued — you'll be next up shortly.",
+        "Still in the queue — your model is almost up next.",
+        "Great things are worth the wait — your turn is coming!",
+        "Holding your spot in line — 3D generation starts very soon.",
+    ],
+    "processing": [
+        "We're generating a photorealistic 3D model of your product — this usually takes a few minutes.",
+        "Still crafting your 3D model — quality takes a little time.",
+        "Almost there — finalizing the details of your 3D model.",
+        "Your 3D model is nearly complete — hang tight!",
+    ],
+}
+
+_FALLBACK_MESSAGES: list[str] = [
+    "Your 3D model is in progress — we'll update you as soon as it's ready.",
+    "Still working behind the scenes — great things are coming your way.",
+    "We haven't forgotten about you — your model is on its way.",
+    "Sit tight, your 3D experience is being crafted with care.",
+]
+
 
 async def track_product_status(
     websocket: WebSocket,
@@ -172,6 +200,8 @@ async def track_product_status(
             current_status,
         )
 
+        keepalive_count = 0
+
         while True:
 
             # Wait for a notification from broadcaster (30s timeout).
@@ -190,7 +220,14 @@ async def track_product_status(
 
                 # 1. Keepalive ping — tells browser the connection is alive.
                 try:
-                    await websocket.send_json({"type": "keepalive"})
+                    messages = _STATUS_MESSAGES.get(current_status, _FALLBACK_MESSAGES)
+                    await websocket.send_json({
+                        "type":       "keepalive",
+                        "product_id": product_id_str,
+                        "status":     current_status,
+                        "message":    messages[keepalive_count % len(messages)],
+                    })
+                    keepalive_count += 1
                 except Exception:
                     # Browser already gone — exit cleanly.
                     break
@@ -243,6 +280,8 @@ async def track_product_status(
                 notification.get("old_status"),
                 new_status,
             )
+
+            current_status = new_status
 
             await websocket.send_json({
                 "type":         "status_update",
