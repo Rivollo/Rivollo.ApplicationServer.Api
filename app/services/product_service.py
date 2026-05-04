@@ -1,5 +1,6 @@
 """Product service for handling product creation with image storage."""
 
+import asyncio
 import uuid
 from typing import BinaryIO, Optional
 
@@ -184,23 +185,24 @@ class ProductService:
             pass
 
         # -------------------------------
-        # 7. Direct 3D generation for all subscription types
+        # 7. Fire-and-forget 3D generation — returns immediately
         # -------------------------------
-        logger.info("Direct VM execution for product %s", product.id)
-        glb_url = await ProductService.generate_3d_and_finalize(
-            db=db,
-            user_id=user_id,
-            product_id=product.id,
-            asset_id=asset_id,
-            mesh_asset_id=mesh_asset_id,
-            name=name,
-            target_format=target_format,
-            blob_url=blob_url,
-            mask_blob_url=mask_blob_url,
+        logger.info("Scheduling background 3D generation for product %s", product.id)
+        asyncio.create_task(
+            ProductService._run_3d_generation_background(
+                user_id=user_id,
+                product_id=product.id,
+                asset_id=asset_id,
+                mesh_asset_id=mesh_asset_id,
+                name=name,
+                target_format=target_format,
+                blob_url=blob_url,
+                mask_blob_url=mask_blob_url,
+            ),
+            name=f"3d_gen_{product.id}",
         )
 
-        # Return CDN URL to callers — blob_url kept for internal use only
-        return product, cdn_url, mask_cdn_url, glb_url
+        return product, cdn_url, mask_cdn_url, None
 
     @staticmethod
     async def generate_3d_and_finalize(
@@ -304,6 +306,36 @@ class ProductService:
             raise RuntimeError("Failed to save GLB asset to database") from exc
 
         return glb_url
+
+    @staticmethod
+    async def _run_3d_generation_background(
+        user_id: uuid.UUID,
+        product_id: uuid.UUID,
+        asset_id: int,
+        mesh_asset_id: int,
+        name: str,
+        target_format: str,
+        blob_url: str,
+        mask_blob_url: str,
+    ) -> None:
+        """Open a fresh DB session and run generate_3d_and_finalize in the background."""
+        from app.core.db import new_session
+        logger = logging.getLogger(__name__)
+        try:
+            async with new_session() as db:
+                await ProductService.generate_3d_and_finalize(
+                    db=db,
+                    user_id=user_id,
+                    product_id=product_id,
+                    asset_id=asset_id,
+                    mesh_asset_id=mesh_asset_id,
+                    name=name,
+                    target_format=target_format,
+                    blob_url=blob_url,
+                    mask_blob_url=mask_blob_url,
+                )
+        except Exception:
+            logger.exception("Background 3D generation failed for product %s", product_id)
 
     @staticmethod
     async def update_product_background_image(

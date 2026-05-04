@@ -103,3 +103,10 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 	assert _SessionLocal is not None
 	async with _SessionLocal() as session:
 		yield session
+
+
+def new_session() -> AsyncSession:
+	"""Return a new independent DB session for background tasks."""
+	if _SessionLocal is None:
+		init_engine_and_session()
+	return _SessionLocal()

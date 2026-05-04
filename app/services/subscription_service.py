@@ -136,15 +136,16 @@ class SubscriptionService:
         return quotas
 
     @staticmethod
-    async def _get_free_plan_defaults(db: AsyncSession) -> SubscriptionMe:
+    async def _get_free_plan_defaults(db: AsyncSession, user_id: uuid.UUID) -> SubscriptionMe:
         """
         Get default free plan subscription information from the database.
 
         This is returned when a user has no active license.
         All new users start with free plan until they subscribe to a paid plan.
-        
+
         Args:
             db: Database session
+            user_id: ID of the user (used to count actual product usage)
 
         Returns:
             SubscriptionMe with free plan defaults
@@ -165,6 +166,8 @@ class SubscriptionService:
                 if pf.feature and pf.limit_value is not None:
                     limits[pf.feature.code] = pf.limit_value
 
+        product_count = await SubscriptionRepository.get_user_product_count(db, user_id)
+
         return SubscriptionMe(
             plan="free",
             trial=TrialInfo(active=False, daysRemaining=0, startedAt=None),
@@ -175,7 +178,7 @@ class SubscriptionService:
                 "publicViews": QuotaUsage(
                     included=limits["max_public_views"], purchased=0, used=0
                 ).model_dump(),
-                "products": QuotaInfo(used=0, limit=limits["max_products"]).model_dump(),
+                "products": QuotaInfo(used=product_count, limit=limits["max_products"]).model_dump(),
                 "galleries": QuotaInfo(used=0, limit=limits["max_galleries"]).model_dump(),
             },
         )
@@ -212,7 +215,7 @@ class SubscriptionService:
         # Step 2: If no license, return free plan defaults
         # This happens for new users who haven't subscribed yet
         if not license_assignment:
-            return await SubscriptionService._get_free_plan_defaults(db)
+            return await SubscriptionService._get_free_plan_defaults(db, user_id)
 
         # Step 3: Fetch subscription and plan data from database
         subscription_plan = await SubscriptionRepository.get_subscription_and_plan(
@@ -234,7 +237,7 @@ class SubscriptionService:
         # Only ACTIVE subscriptions grant plan access.
         # PENDING (awaiting payment), CANCELED, etc. should fall back to free.
         if subscription.status != SubscriptionStatus.ACTIVE:
-            return await SubscriptionService._get_free_plan_defaults(db)
+            return await SubscriptionService._get_free_plan_defaults(db, user_id)
 
         # ── Realtime expiry check ────────────────────────────────────────────
         # The background job deactivates expired subscriptions every 5 minutes,
@@ -243,7 +246,7 @@ class SubscriptionService:
         # the background job will clean up the DB row on its next run.
         now = datetime.now(timezone.utc)
         if SubscriptionService._is_expired(subscription.current_period_end, now):
-            return await SubscriptionService._get_free_plan_defaults(db)
+            return await SubscriptionService._get_free_plan_defaults(db, user_id)
 
         # Step 5: Calculate trial information
         trial_info = SubscriptionService._calculate_trial_info(subscription)
