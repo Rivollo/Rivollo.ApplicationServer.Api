@@ -321,7 +321,7 @@ async def create_product_with_image(
     allowed, quota_info = await LicensingService.check_quota(db, user_uuid, "max_products")
     if not allowed:
         raise HTTPException(
-            status_code=status.HTTP_200_OK,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Product limit exceeded. Upgrade your plan to create more products.",
         )
 
@@ -419,7 +419,7 @@ async def create_product_with_image(
         import traceback
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"{str(e)}\n\nTraceback:\n{traceback.format_exc()}",
+            detail=str(e),
         )
 
     # Refresh product to get the latest status set by the service layer
