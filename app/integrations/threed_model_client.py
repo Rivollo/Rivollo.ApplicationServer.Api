@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 # Long timeout — 3D generation can take several minutes
 _TIMEOUT = httpx.Timeout(timeout=600.0, connect=10.0)
 
+# Readiness probe: short per-request timeout, total wait capped at 20 min
+_READINESS_HEALTH_PATH = "/health"
+_READINESS_REQUEST_TIMEOUT = httpx.Timeout(timeout=5.0, connect=5.0)
+_READINESS_MAX_WAIT_SECONDS = 1200.0
+_READINESS_INITIAL_BACKOFF = 2.0
+_READINESS_MAX_BACKOFF = 30.0
+
 
 class ThreeDGenerateResponse:
     """Parsed response from the generate-3d endpoint."""
@@ -52,6 +59,62 @@ class ThreeDModelClient:
                 "Set 3D_MODEL_API_BASE_URL in your .env file."
             )
         return url
+
+    @staticmethod
+    async def wait_until_ready(
+        *,
+        product_id: Optional[uuid.UUID] = None,
+        max_wait_seconds: float = _READINESS_MAX_WAIT_SECONDS,
+    ) -> bool:
+        """
+        Poll <base>/health until it returns 200 or max_wait_seconds elapses.
+
+        Used to absorb cold-start of the 3D VM — callers should invoke this
+        from a background task before calling generate_3d, so the create-product
+        response is never blocked.
+
+        Returns True once the service responds 200, False on timeout.
+        """
+        import asyncio  # local import keeps module import light
+
+        endpoint = f"{ThreeDModelClient._base_url()}{_READINESS_HEALTH_PATH}"
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + max_wait_seconds
+        backoff = _READINESS_INITIAL_BACKOFF
+        attempt = 0
+
+        async with httpx.AsyncClient(timeout=_READINESS_REQUEST_TIMEOUT) as client:
+            while True:
+                attempt += 1
+                try:
+                    resp = await client.get(endpoint)
+                    if resp.status_code == 200:
+                        logger.info(
+                            "3D service ready  product_id=%s  attempt=%d  endpoint=%s",
+                            product_id, attempt, endpoint,
+                        )
+                        return True
+                    logger.info(
+                        "3D readiness probe non-200: status=%s  attempt=%d  product_id=%s",
+                        resp.status_code, attempt, product_id,
+                    )
+                except (httpx.TimeoutException, httpx.RequestError) as exc:
+                    logger.info(
+                        "3D readiness probe failed: %s  attempt=%d  product_id=%s",
+                        exc, attempt, product_id,
+                    )
+
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    logger.error(
+                        "3D service did not become ready within %.0fs  product_id=%s",
+                        max_wait_seconds, product_id,
+                    )
+                    return False
+
+                sleep_for = min(backoff, remaining)
+                await asyncio.sleep(sleep_for)
+                backoff = min(backoff * 2, _READINESS_MAX_BACKOFF)
 
     @staticmethod
     async def generate_3d(

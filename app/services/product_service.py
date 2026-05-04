@@ -174,10 +174,12 @@ class ProductService:
             raise RuntimeError("Failed to create asset entries") from e
 
         # -------------------------------
-        # 6. Set initial status & commit
+        # 6. Commit with status = DRAFT
+        # The background task will probe the 3D service /health, then flip to
+        # PROCESSING via generate_3d_and_finalize once the service is reachable.
         # -------------------------------
-        product.status = ProductStatus.QUEUE
-        logger.info("Product %s created and queued for 3D generation", product.id)
+        product.status = ProductStatus.DRAFT
+        logger.info("Product %s committed as DRAFT pending 3D readiness probe", product.id)
         await db.commit()
 
         try:
@@ -321,6 +323,22 @@ class ProductService:
         from app.core.db import new_session
         logger = logging.getLogger(__name__)
         try:
+            # Wait for the 3D service to be reachable before sending the message.
+            # This absorbs VM cold-start. Runs entirely in the background, so the
+            # create-product response is unaffected.
+            ready = await threed_model_client.wait_until_ready(product_id=product_id)
+            if not ready:
+                async with new_session() as db:
+                    product = await db.get(Product, product_id)
+                    if product:
+                        product.status = ProductStatus.DRAFT
+                        await db.commit()
+                logger.error(
+                    "3D service unreachable — product %s left in DRAFT for retry",
+                    product_id,
+                )
+                return
+
             async with new_session() as db:
                 await ProductService.generate_3d_and_finalize(
                     db=db,
