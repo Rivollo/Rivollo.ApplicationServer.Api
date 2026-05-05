@@ -70,7 +70,6 @@ from app.services.background_removal_service import background_removal_service
 from app.services.licensing_service import LicensingService
 from app.services.product_service import product_service
 from app.services.dimension_service import DimensionService
-from app.services.product_validation_service import ProductValidationService
 from app.utils.envelopes import api_error, api_success
 from app.models.models import PublishLink
 from app.services.product_service import ProductService
@@ -300,22 +299,7 @@ async def create_product_with_image(
             detail="Invalid userId format. Expected UUID string.",
         )
     
-       # ── Validate product name is not duplicate for this user ─────────────────
-    try:
-        await ProductValidationService.validate_product_name(
-            db=db,
-            user_id=user_uuid,
-            product_name=name,
-        )
-    except ValueError as e:
-        from fastapi.responses import JSONResponse
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content=api_error(
-                code="DUPLICATE_PRODUCT_NAME",
-                message=str(e),
-            ),
-        )
+
 
    # Check if user has enough quota
     allowed, quota_info = await LicensingService.check_quota(db, user_uuid, "max_products")
