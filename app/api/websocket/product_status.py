@@ -13,10 +13,11 @@ Exact sequence per connection
        a. wait_for(queue.get(), timeout=30)
        b. Notification arrived:
             - Ignore published / archived (post-pipeline statuses)
-            - Forward all others to browser
+            - Forward all others to browser (including estimated_seconds / message
+              fields broadcast by the background task for GPU warm/cold state)
             - On "ready" → send done, break
        c. Timeout (30s of silence):
-            - Send keepalive to browser
+            - Send keepalive to browser (includes estimated_seconds if known)
             - Recovery poll: re-query DB directly
               (catches any notification missed during LISTEN reconnect)
             - If status is now "ready" → send done, break
@@ -194,7 +195,126 @@ async def track_product_status(
             )
             await websocket.send_json({
                 "type":   "done",
-                 "updated_date": notification.get("updated_date"),
+                "status": current_status,
+            })
+            return
+
+        # -------------------------------------------------------------------
+        # STEP 6 — Main notification loop.
+        # -------------------------------------------------------------------
+        _logger.info(
+            "Watching product %s — current status: %s",
+            product_id_str,
+            current_status,
+        )
+
+        keepalive_count = 0
+        # Estimated seconds and GPU message received from the background task
+        # via broadcaster.broadcast_to_product(). Persisted across loop iterations
+        # so every subsequent keepalive also carries the estimate.
+        estimated_seconds: int | None = None
+        gpu_message: str | None = None
+
+        while True:
+
+            # Wait for a notification from broadcaster (30s timeout).
+            notification = None
+            try:
+                notification = await asyncio.wait_for(
+                    queue.get(), timeout=KEEPALIVE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                pass
+
+            # ---------------------------------------------------------------
+            # TIMEOUT BRANCH — 30s passed with no notification.
+            # ---------------------------------------------------------------
+            if notification is None:
+
+                # 1. Keepalive ping — tells browser the connection is alive.
+                try:
+                    messages = _STATUS_MESSAGES.get(current_status, _FALLBACK_MESSAGES)
+                    keepalive_payload: dict = {
+                        "type":       "keepalive",
+                        "product_id": product_id_str,
+                        "status":     current_status,
+                        "message":    messages[keepalive_count % len(messages)],
+                    }
+                    if estimated_seconds is not None:
+                        keepalive_payload["estimated_seconds"] = estimated_seconds
+                    await websocket.send_json(keepalive_payload)
+                    keepalive_count += 1
+                except Exception:
+                    # Browser already gone — exit cleanly.
+                    break
+
+                # 2. Recovery poll — re-query DB directly.
+                #    Guards against notifications missed during LISTEN reconnect.
+                recovered_status = await _query_current_status(
+                    product_id, product_id_str
+                )
+                if recovered_status == TERMINAL_STATUS:
+                    _logger.info(
+                        "Recovery poll: product %s already '%s' — "
+                        "notification was missed during reconnect",
+                        product_id_str,
+                        recovered_status,
+                    )
+                    await websocket.send_json({
+                        "type":       "status_update",
+                        "product_id": product_id_str,
+                        "status":     recovered_status,
+                        "source":     "recovery_poll",
+                    })
+                    await websocket.send_json({
+                        "type":   "done",
+                        "status": recovered_status,
+                    })
+                    break
+
+                continue  # back to wait_for
+
+            # ---------------------------------------------------------------
+            # NOTIFICATION BRANCH — pg_notify received via broadcaster queue.
+            # ---------------------------------------------------------------
+            new_status = str(notification.get("new_status", "")).lower()
+
+            # Skip statuses outside the automated processing pipeline.
+            # published and archived are manual user actions that happen
+            # after the pipeline ends — they are irrelevant to this WebSocket.
+            if new_status in IGNORED_STATUSES:
+                _logger.debug(
+                    "Ignoring '%s' notification for product %s",
+                    new_status,
+                    product_id_str,
+                )
+                continue
+
+            _logger.info(
+                "Product %s: %s → %s",
+                product_id_str,
+                notification.get("old_status"),
+                new_status,
+            )
+
+            current_status = new_status
+
+            # Capture estimate fields broadcast by the background task.
+            # These are only present on messages pushed via broadcast_to_product,
+            # not on plain pg_notify trigger payloads.
+            _est = notification.get("estimated_seconds")
+            _msg = notification.get("message")
+            if _est is not None:
+                estimated_seconds = int(_est)
+            if _msg:
+                gpu_message = _msg
+
+            status_update_payload: dict = {
+                "type":         "status_update",
+                "product_id":   product_id_str,
+                "status":       new_status,
+                "old_status":   notification.get("old_status"),
+                "updated_date": notification.get("updated_date"),
                 "source":       "pg_notify",
             }
             if estimated_seconds is not None:
