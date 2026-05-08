@@ -321,12 +321,52 @@ class ProductService:
     ) -> None:
         """Open a fresh DB session and run generate_3d_and_finalize in the background."""
         from app.core.db import new_session
+        from app.api.websocket.broadcaster import broadcaster
         logger = logging.getLogger(__name__)
         try:
-            # Wait for the 3D service to be reachable before sending the message.
-            # This absorbs VM cold-start. Runs entirely in the background, so the
-            # create-product response is unaffected.
-            ready = await threed_model_client.wait_until_ready(product_id=product_id)
+            # Flip status to QUEUE immediately so the WebSocket and REST clients
+            # see that work has started (fires pg_notify to any connected browsers).
+            async with new_session() as db:
+                product = await db.get(Product, product_id)
+                if product:
+                    product.status = ProductStatus.QUEUE
+                    await db.commit()
+
+            product_id_str = str(product_id)
+
+            # Single quick probe (≤5 s) to determine warm vs cold-start.
+            # Broadcast the estimate to connected WebSocket clients right away
+            # so the browser can show a meaningful wait time before the full
+            # polling loop begins.
+            is_warm = await threed_model_client.quick_warmth_check()
+
+            if is_warm:
+                estimated_seconds = 20
+                gpu_message = "GPU is ready — your 3D model is being generated now."
+            else:
+                estimated_seconds = 720  # ~12 minutes cold-start
+                gpu_message = "GPU is loading up. This usually takes around 12 minutes."
+
+            await broadcaster.broadcast_to_product(
+                product_id_str,
+                {
+                    "new_status": ProductStatus.QUEUE.value,
+                    "estimated_seconds": estimated_seconds,
+                    "gpu_status": "warm" if is_warm else "cold",
+                    "message": gpu_message,
+                },
+            )
+            logger.info(
+                "GPU warmth check — product=%s  warm=%s  estimated_seconds=%d",
+                product_id_str, is_warm, estimated_seconds,
+            )
+
+            # If warm the service already responded 200; skip the full polling loop.
+            if not is_warm:
+                ready = await threed_model_client.wait_until_ready(product_id=product_id)
+            else:
+                ready = True
+
             if not ready:
                 async with new_session() as db:
                     product = await db.get(Product, product_id)
