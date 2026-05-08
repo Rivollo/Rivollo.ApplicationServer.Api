@@ -2005,6 +2005,42 @@ ALTER TABLE ONLY public.tbl_users
 
 -- Completed on 2025-11-04 17:16:23 IST
 
+
+--
+-- Name: notify_product_status_change(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION public.notify_product_status_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- IS DISTINCT FROM handles NULL safely, unlike !=
+    IF OLD.status IS DISTINCT FROM NEW.status THEN
+        PERFORM pg_notify(
+            'tbl_product_status',
+            json_build_object(
+                'product_id',   NEW.id,
+                'old_status',   OLD.status,
+                'new_status',   NEW.status,
+                'updated_date', NEW.updated_date
+            )::text
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: product_status_changed; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER product_status_changed
+AFTER UPDATE ON public.tbl_products
+FOR EACH ROW EXECUTE FUNCTION public.notify_product_status_change();
+
+
 --
 -- PostgreSQL database dump complete
 --

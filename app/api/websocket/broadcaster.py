@@ -127,6 +127,23 @@ class ProductStatusBroadcaster:
         )
         return queue
 
+    async def broadcast_to_product(self, product_id: str, payload: dict) -> None:
+        """
+        Push a custom payload directly to all WebSocket subscribers for product_id.
+
+        Used by background tasks (e.g. GPU warmth estimation) to send messages
+        that don't originate from a PostgreSQL NOTIFY. Mirrors the snapshot
+        pattern used by _on_notify — no lock needed for a defensive copy.
+        """
+        queues = list(self._subscribers.get(product_id, set()))
+        for queue in queues:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                _logger.warning(
+                    "Subscriber queue full for product %s — broadcast dropped", product_id
+                )
+
     async def unsubscribe(self, product_id: str, queue: asyncio.Queue) -> None:
         """
         Remove a WebSocket client's queue.

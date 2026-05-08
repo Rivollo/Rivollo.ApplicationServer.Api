@@ -163,8 +163,11 @@ async def track_product_status(
         #
         # Browser sees the actual current state without waiting for a change.
         # "source" field helps distinguish initial state from live updates.
+        # If the product is already queued (background task started before
+        # this client connected), include a conservative cold-start estimate
+        # so the browser has something to display right away.
         # -------------------------------------------------------------------
-        await websocket.send_json({
+        initial_payload: dict = {
             "type":         "status_update",
             "product_id":   product_id_str,
             "status":       current_status,
@@ -172,7 +175,11 @@ async def track_product_status(
                 row.updated_date.isoformat() if row.updated_date else None
             ),
             "source": "initial_query",
-        })
+        }
+        if current_status == "queue":
+            initial_payload["estimated_seconds"] = 720
+            initial_payload["message"] = "GPU is loading up. This usually takes around 12 minutes."
+        await websocket.send_json(initial_payload)
 
         # -------------------------------------------------------------------
         # STEP 5 — Already terminal on connect — no loop needed.
@@ -187,110 +194,14 @@ async def track_product_status(
             )
             await websocket.send_json({
                 "type":   "done",
-                "status": current_status,
-            })
-            return
-
-        # -------------------------------------------------------------------
-        # STEP 6 — Main notification loop.
-        # -------------------------------------------------------------------
-        _logger.info(
-            "Watching product %s — current status: %s",
-            product_id_str,
-            current_status,
-        )
-
-        keepalive_count = 0
-
-        while True:
-
-            # Wait for a notification from broadcaster (30s timeout).
-            notification = None
-            try:
-                notification = await asyncio.wait_for(
-                    queue.get(), timeout=KEEPALIVE_SECONDS
-                )
-            except asyncio.TimeoutError:
-                pass
-
-            # ---------------------------------------------------------------
-            # TIMEOUT BRANCH — 30s passed with no notification.
-            # ---------------------------------------------------------------
-            if notification is None:
-
-                # 1. Keepalive ping — tells browser the connection is alive.
-                try:
-                    messages = _STATUS_MESSAGES.get(current_status, _FALLBACK_MESSAGES)
-                    await websocket.send_json({
-                        "type":       "keepalive",
-                        "product_id": product_id_str,
-                        "status":     current_status,
-                        "message":    messages[keepalive_count % len(messages)],
-                    })
-                    keepalive_count += 1
-                except Exception:
-                    # Browser already gone — exit cleanly.
-                    break
-
-                # 2. Recovery poll — re-query DB directly.
-                #    Guards against notifications missed during LISTEN reconnect.
-                recovered_status = await _query_current_status(
-                    product_id, product_id_str
-                )
-                if recovered_status == TERMINAL_STATUS:
-                    _logger.info(
-                        "Recovery poll: product %s already '%s' — "
-                        "notification was missed during reconnect",
-                        product_id_str,
-                        recovered_status,
-                    )
-                    await websocket.send_json({
-                        "type":       "status_update",
-                        "product_id": product_id_str,
-                        "status":     recovered_status,
-                        "source":     "recovery_poll",
-                    })
-                    await websocket.send_json({
-                        "type":   "done",
-                        "status": recovered_status,
-                    })
-                    break
-
-                continue  # back to wait_for
-
-            # ---------------------------------------------------------------
-            # NOTIFICATION BRANCH — pg_notify received via broadcaster queue.
-            # ---------------------------------------------------------------
-            new_status = str(notification.get("new_status", "")).lower()
-
-            # Skip statuses outside the automated processing pipeline.
-            # published and archived are manual user actions that happen
-            # after the pipeline ends — they are irrelevant to this WebSocket.
-            if new_status in IGNORED_STATUSES:
-                _logger.debug(
-                    "Ignoring '%s' notification for product %s",
-                    new_status,
-                    product_id_str,
-                )
-                continue
-
-            _logger.info(
-                "Product %s: %s → %s",
-                product_id_str,
-                notification.get("old_status"),
-                new_status,
-            )
-
-            current_status = new_status
-
-            await websocket.send_json({
-                "type":         "status_update",
-                "product_id":   product_id_str,
-                "status":       new_status,
-                "old_status":   notification.get("old_status"),
-                "updated_date": notification.get("updated_date"),
+                 "updated_date": notification.get("updated_date"),
                 "source":       "pg_notify",
-            })
+            }
+            if estimated_seconds is not None:
+                status_update_payload["estimated_seconds"] = estimated_seconds
+            if gpu_message:
+                status_update_payload["message"] = gpu_message
+            await websocket.send_json(status_update_payload)
 
             if new_status == TERMINAL_STATUS:
                 await websocket.send_json({

@@ -117,6 +117,24 @@ class ThreeDModelClient:
                 backoff = min(backoff * 2, _READINESS_MAX_BACKOFF)
 
     @staticmethod
+    async def quick_warmth_check() -> bool:
+        """
+        Single probe: returns True if the 3D service responds 200 right now.
+
+        Used to distinguish a warm GPU (responds immediately → ~20 s total) from
+        a cold start (container off → ~12 min warm-up) so the background task
+        can broadcast the right estimated time to WebSocket clients up front.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=_READINESS_REQUEST_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{ThreeDModelClient._base_url()}{_READINESS_HEALTH_PATH}"
+                )
+                return resp.status_code == 200
+        except (httpx.TimeoutException, httpx.RequestError):
+            return False
+
+    @staticmethod
     async def generate_3d(
         *,
         product_id: uuid.UUID,
