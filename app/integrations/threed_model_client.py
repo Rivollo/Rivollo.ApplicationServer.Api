@@ -22,6 +22,11 @@ _READINESS_MAX_WAIT_SECONDS = 1200.0
 _READINESS_INITIAL_BACKOFF = 2.0
 _READINESS_MAX_BACKOFF = 30.0
 
+# Warm/cold check: longer timeout so a slow-responding but live GPU isn't
+# misclassified as cold. Two attempts to handle transient network blips.
+_WARMTH_CHECK_TIMEOUT = httpx.Timeout(timeout=15.0, connect=10.0)
+_WARMTH_CHECK_ATTEMPTS = 2
+
 
 class ThreeDGenerateResponse:
     """Parsed response from the generate-3d endpoint."""
@@ -119,20 +124,39 @@ class ThreeDModelClient:
     @staticmethod
     async def quick_warmth_check() -> bool:
         """
-        Single probe: returns True if the 3D service responds 200 right now.
+        Probes /health up to _WARMTH_CHECK_ATTEMPTS times with a generous
+        timeout. Returns True only if the service responds 200.
 
-        Used to distinguish a warm GPU (responds immediately → ~20 s total) from
-        a cold start (container off → ~12 min warm-up) so the background task
-        can broadcast the right estimated time to WebSocket clients up front.
+        Uses a longer timeout than the readiness poll (_WARMTH_CHECK_TIMEOUT)
+        so a healthy-but-slow GPU health endpoint isn't misclassified as cold.
+        Two attempts guard against transient network blips.
         """
-        try:
-            async with httpx.AsyncClient(timeout=_READINESS_REQUEST_TIMEOUT) as client:
-                resp = await client.get(
-                    f"{ThreeDModelClient._base_url()}{_READINESS_HEALTH_PATH}"
+        import asyncio  # local import keeps module import light
+
+        endpoint = f"{ThreeDModelClient._base_url()}{_READINESS_HEALTH_PATH}"
+        for attempt in range(1, _WARMTH_CHECK_ATTEMPTS + 1):
+            try:
+                async with httpx.AsyncClient(timeout=_WARMTH_CHECK_TIMEOUT) as client:
+                    resp = await client.get(endpoint)
+                    if resp.status_code == 200:
+                        logger.info(
+                            "Warmth check: GPU warm (attempt=%d  endpoint=%s)",
+                            attempt, endpoint,
+                        )
+                        return True
+                    logger.info(
+                        "Warmth check: non-200 status=%s attempt=%d",
+                        resp.status_code, attempt,
+                    )
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                logger.info(
+                    "Warmth check: probe failed attempt=%d  exc=%s", attempt, exc
                 )
-                return resp.status_code == 200
-        except (httpx.TimeoutException, httpx.RequestError):
-            return False
+            if attempt < _WARMTH_CHECK_ATTEMPTS:
+                await asyncio.sleep(2)
+
+        logger.info("Warmth check: GPU cold after %d attempt(s)", _WARMTH_CHECK_ATTEMPTS)
+        return False
 
     @staticmethod
     async def generate_3d(

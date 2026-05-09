@@ -177,6 +177,9 @@ async def track_product_status(
             ),
             "source": "initial_query",
         }
+        if current_status == "queue":
+            initial_payload["estimated_seconds"] = 720
+            initial_payload["message"] = "GPU is loading up. This usually takes around 12 minutes."
         await websocket.send_json(initial_payload)
 
         # -------------------------------------------------------------------
@@ -209,7 +212,7 @@ async def track_product_status(
         # Estimated seconds and GPU message received from the background task
         # via broadcaster.broadcast_to_product(). Persisted across loop iterations
         # so every subsequent keepalive also carries the estimate.
-        estimated_time: str | None = None
+        estimated_seconds: int | None = None
         gpu_message: str | None = None
 
         while True:
@@ -237,8 +240,8 @@ async def track_product_status(
                         "status":     current_status,
                         "message":    messages[keepalive_count % len(messages)],
                     }
-                    if estimated_time:
-                        keepalive_payload["estimated_time"] = estimated_time
+                    if estimated_seconds is not None:
+                        keepalive_payload["estimated_seconds"] = estimated_seconds
                     await websocket.send_json(keepalive_payload)
                     keepalive_count += 1
                 except Exception:
@@ -299,10 +302,10 @@ async def track_product_status(
             # Capture estimate fields broadcast by the background task.
             # These are only present on messages pushed via broadcast_to_product,
             # not on plain pg_notify trigger payloads.
-            _etl = notification.get("estimated_time")
+            _est = notification.get("estimated_seconds")
             _msg = notification.get("message")
-            if _etl:
-                estimated_time = str(_etl)
+            if _est is not None:
+                estimated_seconds = int(_est)
             if _msg:
                 gpu_message = _msg
 
@@ -314,8 +317,8 @@ async def track_product_status(
                 "updated_date": notification.get("updated_date"),
                 "source":       "pg_notify",
             }
-            if estimated_time:
-                status_update_payload["estimated_time"] = estimated_time
+            if estimated_seconds is not None:
+                status_update_payload["estimated_seconds"] = estimated_seconds
             if gpu_message:
                 status_update_payload["message"] = gpu_message
             await websocket.send_json(status_update_payload)
