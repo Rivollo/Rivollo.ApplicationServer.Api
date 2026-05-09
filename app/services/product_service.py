@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, insert
 from datetime import datetime
 
+from app.core.config import settings
 from app.models.models import Product, ProductAsset, ProductAssetMapping, ProductStatus, Background
 from app.services.storage import storage_service
 from app.integrations.threed_model_client import threed_model_client
@@ -309,6 +310,44 @@ class ProductService:
         return glb_url
 
     @staticmethod
+    async def _get_cold_start_estimate() -> tuple[str, str]:
+        """Check DB for an in-progress activation and return (estimated_time, message).
+
+        - If an activation record exists and is not stale, calculate remaining time.
+        - Otherwise upsert a fresh activation timestamp and return the full cold-start time.
+        Stale = older than GPU_COLD_START_SECONDS + 2 min buffer.
+        """
+        import math
+        from datetime import timezone
+        from app.core.db import new_session
+        from app.database.gpu_activation_repo import get_activation, upsert_activation
+
+        cold_seconds = settings.GPU_COLD_START_SECONDS
+        stale_threshold = cold_seconds + 120  # 2 min buffer
+
+        now = datetime.now(timezone.utc)
+
+        async with new_session() as db:
+            activation = await get_activation(db)
+
+            if activation is not None:
+                elapsed = (now - activation.activation_started_at).total_seconds()
+                if elapsed < stale_threshold:
+                    remaining = max(30, cold_seconds - elapsed)
+                    minutes = math.ceil(remaining / 60)
+                    label = f"~{minutes} minute{'s' if minutes != 1 else ''}"
+                    msg = f"GPU is loading up. Approximately {minutes} more minute{'s' if minutes != 1 else ''} remaining."
+                    return label, msg
+
+            # No record or stale — this is a fresh activation.
+            await upsert_activation(db, now)
+
+        cold_minutes = round(cold_seconds / 60)
+        label = f"~{cold_minutes} minutes"
+        msg = f"GPU is loading up. This usually takes around {cold_minutes} minutes."
+        return label, msg
+
+    @staticmethod
     async def _run_3d_generation_background(
         user_id: uuid.UUID,
         product_id: uuid.UUID,
@@ -341,29 +380,38 @@ class ProductService:
             is_warm = await threed_model_client.quick_warmth_check()
 
             if is_warm:
-                estimated_seconds = 20
+                estimated_time = "~20 seconds"
                 gpu_message = "GPU is ready — your 3D model is being generated now."
             else:
-                estimated_seconds = 720  # ~12 minutes cold-start
-                gpu_message = "GPU is loading up. This usually takes around 12 minutes."
+                estimated_time, gpu_message = await ProductService._get_cold_start_estimate()
 
             await broadcaster.broadcast_to_product(
                 product_id_str,
                 {
                     "new_status": ProductStatus.QUEUE.value,
-                    "estimated_seconds": estimated_seconds,
+                    "estimated_time": estimated_time,
                     "gpu_status": "warm" if is_warm else "cold",
                     "message": gpu_message,
                 },
             )
             logger.info(
-                "GPU warmth check — product=%s  warm=%s  estimated_seconds=%d",
-                product_id_str, is_warm, estimated_seconds,
+                "GPU warmth check — product=%s  warm=%s  estimated_time=%s",
+                product_id_str, is_warm, estimated_time,
             )
 
             # If warm the service already responded 200; skip the full polling loop.
             if not is_warm:
                 ready = await threed_model_client.wait_until_ready(product_id=product_id)
+                if ready:
+                    await broadcaster.broadcast_to_product(
+                        product_id_str,
+                        {
+                            "new_status": ProductStatus.QUEUE.value,
+                            "estimated_time": "~20 seconds",
+                            "gpu_status": "warm",
+                            "message": "GPU is now ready — your 3D model generation is starting.",
+                        },
+                    )
             else:
                 ready = True
 

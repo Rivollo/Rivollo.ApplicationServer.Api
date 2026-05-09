@@ -141,6 +141,10 @@ class Settings(BaseSettings):
 	# WebSocket LISTEN/NOTIFY
 	WS_NOTIFY_CHANNEL: str = Field(default="tbl_product_status")
 
+	# 3D GPU cold-start duration in seconds (default 720 = 12 min).
+	# Override via GPU_COLD_START_SECONDS env var per environment.
+	GPU_COLD_START_SECONDS: int = Field(default=720)
+
 	# OpenAI — GPT-4o Vision for AI suggestions
 	# In Azure App Service, override via env vars: OPENAI_API_KEY, OPENAI_MODEL, OPENAI_MAX_TOKENS
 	OPENAI_API_KEY: str = Field(default="")
