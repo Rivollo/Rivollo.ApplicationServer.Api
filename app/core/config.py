@@ -143,6 +143,31 @@ class Settings(BaseSettings):
 	# Webhook secret — must match the value set in Razorpay Dashboard → Settings → Webhooks
 	RAZORPAY_WEBHOOK_SECRET: str = Field(default="")
 
+	# Notification thresholds
+	QUOTA_NOTIFICATION_THRESHOLDS: str = Field(default="75,90,100")
+	SUBSCRIPTION_EXPIRY_REMINDER_DAYS: str = Field(default="5,1,0")
+
+	def quota_notification_thresholds(self) -> list[int]:
+		return self._parse_int_list(self.QUOTA_NOTIFICATION_THRESHOLDS)
+
+	def subscription_expiry_reminder_days(self) -> list[int]:
+		return self._parse_int_list(self.SUBSCRIPTION_EXPIRY_REMINDER_DAYS)
+
+	@staticmethod
+	def _parse_int_list(raw: str) -> list[int]:
+		values: list[int] = []
+		for part in raw.split(","):
+			part = part.strip()
+			if not part:
+				continue
+			try:
+				value = int(part)
+			except ValueError:
+				continue
+			if value not in values:
+				values.append(value)
+		return values
+
 	# WebSocket LISTEN/NOTIFY
 	WS_NOTIFY_CHANNEL: str = Field(default="tbl_product_status")
 

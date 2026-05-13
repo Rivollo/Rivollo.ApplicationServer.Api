@@ -8,7 +8,7 @@ from app.schemas.notifications import (
     TokenRegistrationRequest,
     TokenUnregisterRequest,
 )
-from app.services.push_notification_service import PushNotificationService
+from app.services.notification_service import NotificationService
 from app.services.user_device_service import UserDeviceService
 from app.utils.envelopes import api_success
 
@@ -16,6 +16,7 @@ router = APIRouter(tags=["notifications"])
 
 
 @router.post("/devices/register", response_model=dict, status_code=status.HTTP_200_OK)
+@router.post("/fcmtoken/register", response_model=dict, status_code=status.HTTP_200_OK)
 async def register_device(
     payload: TokenRegistrationRequest,
     current_user: CurrentUser,
@@ -66,11 +67,13 @@ async def dispatch_notification(
             detail="You can only send test notifications to your own user account.",
         )
 
-    result = await PushNotificationService.send_to_user(
+    result = await NotificationService.create_and_push_notification(
         db=db,
         user_id=payload.user_id,
+        notification_type=payload.notification_type,
         title=payload.title,
         body=payload.body,
         data=payload.data,
+        device_type=payload.device_type,
     )
     return api_success(result)

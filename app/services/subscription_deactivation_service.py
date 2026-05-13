@@ -22,9 +22,13 @@ import logging
 from contextlib import suppress
 from datetime import datetime, timezone
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+from app.models.models import Notification
+from app.models.subscription import Subscription
+from app.models.subscription_enums import SubscriptionStatus
 from app.queries.subscription_queries import (
     DEACTIVATE_EXPIRED_SUBSCRIPTIONS,
     REVOKE_LICENSES_FOR_SUBSCRIPTIONS,
@@ -35,6 +39,87 @@ logger = logging.getLogger("rivollo.subscription_deactivation")
 
 class SubscriptionDeactivationService:
     """Service that deactivates expired subscriptions and revokes their licenses."""
+
+    @staticmethod
+    async def _subscription_expiry_notification_exists(
+        db: AsyncSession,
+        user_id,
+        notification_type: str,
+    ) -> bool:
+        result = await db.execute(
+            select(Notification.id)
+            .where(
+                Notification.user_id == user_id,
+                Notification.type == notification_type,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
+    @staticmethod
+    async def _send_subscription_expiry_reminders(db: AsyncSession, now: datetime) -> None:
+        reminder_days = settings.subscription_expiry_reminder_days()
+        if not reminder_days:
+            return
+
+        result = await db.execute(
+            select(Subscription).where(
+                Subscription.status.in_([SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING]),
+                Subscription.current_period_end.is_not(None),
+            )
+        )
+        subscriptions = result.scalars().all()
+
+        from app.services.notification_service import NotificationService
+
+        for subscription in subscriptions:
+            if subscription.current_period_end is None:
+                continue
+
+            days_remaining = (subscription.current_period_end.date() - now.date()).days
+            if days_remaining not in reminder_days:
+                continue
+
+            expiry_day = subscription.current_period_end.date().isoformat().replace("-", "")
+            notification_type = f"subscription.expiry.{days_remaining}.{expiry_day}"
+            if await SubscriptionDeactivationService._subscription_expiry_notification_exists(
+                db,
+                subscription.user_id,
+                notification_type,
+            ):
+                continue
+
+            if days_remaining == 0:
+                title = "Subscription Expires Today"
+                body = "Your subscription expires today. Renew now to keep your access active."
+            elif days_remaining == 1:
+                title = "Subscription Expires Tomorrow"
+                body = "Your subscription expires in 1 day. Renew now to avoid interruption."
+            else:
+                title = f"Subscription Expires in {days_remaining} Days"
+                body = f"Your subscription expires in {days_remaining} days. Renew now to avoid interruption."
+
+            try:
+                await NotificationService.create_and_push_notification(
+                    db=db,
+                    user_id=subscription.user_id,
+                    notification_type=notification_type,
+                    title=title,
+                    body=body,
+                    data={
+                        "subscription_id": str(subscription.id),
+                        "days_remaining": days_remaining,
+                        "expires_at": subscription.current_period_end.isoformat(),
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to send subscription expiry reminder for subscription %s",
+                    subscription.id,
+                    exc_info=True,
+                )
+                with suppress(Exception):
+                    await db.rollback()
 
     @staticmethod
     async def run_deactivation_job(db: AsyncSession) -> None:
@@ -56,6 +141,8 @@ class SubscriptionDeactivationService:
         """
         try:
             now = datetime.now(timezone.utc)
+
+            await SubscriptionDeactivationService._send_subscription_expiry_reminders(db, now)
 
             # ── Step 1: Cancel all expired subscriptions ──────────────────────
             # RETURNING gives us the IDs immediately without a follow-up SELECT.

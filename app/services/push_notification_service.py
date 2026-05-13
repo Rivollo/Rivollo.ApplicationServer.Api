@@ -78,10 +78,13 @@ class PushNotificationService:
         title: str,
         body: str,
         data: dict[str, Any] | None = None,
+        device_type: str | None = None,
     ) -> dict[str, int | bool]:
-        result = await db.execute(
-            select(UserDevice.fcm_token).where(UserDevice.user_id == user_id)
-        )
+        query = select(UserDevice.fcm_token).where(UserDevice.user_id == user_id)
+        if device_type:
+            query = query.where(UserDevice.device_type == device_type)
+
+        result = await db.execute(query)
         tokens = [token for token in result.scalars().all() if token]
 
         if not tokens:
