@@ -13,11 +13,11 @@ Exact sequence per connection
        a. wait_for(queue.get(), timeout=30)
        b. Notification arrived:
             - Ignore published / archived (post-pipeline statuses)
-            - Forward all others to browser (including estimated_seconds / message
+            - Forward all others to browser (including estimated_time / message
               fields broadcast by the background task for GPU warm/cold state)
             - On "ready" → send done, break
        c. Timeout (30s of silence):
-            - Send keepalive to browser (includes estimated_seconds if known)
+            - Send keepalive to browser (includes estimated_time if known)
             - Recovery poll: re-query DB directly
               (catches any notification missed during LISTEN reconnect)
             - If status is now "ready" → send done, break
@@ -206,10 +206,10 @@ async def track_product_status(
         )
 
         keepalive_count = 0
-        # Estimated seconds and GPU message received from the background task
+        # Estimated time and GPU message received from the background task
         # via broadcaster.broadcast_to_product(). Persisted across loop iterations
         # so every subsequent keepalive also carries the estimate.
-        estimated_time: str | None = None
+        estimated_time: int | None = None
         gpu_message: str | None = None
 
         while True:
@@ -237,7 +237,7 @@ async def track_product_status(
                         "status":     current_status,
                         "message":    messages[keepalive_count % len(messages)],
                     }
-                    if estimated_time:
+                    if estimated_time is not None:
                         keepalive_payload["estimated_time"] = estimated_time
                     await websocket.send_json(keepalive_payload)
                     keepalive_count += 1
@@ -301,8 +301,11 @@ async def track_product_status(
             # not on plain pg_notify trigger payloads.
             _etl = notification.get("estimated_time")
             _msg = notification.get("message")
-            if _etl:
-                estimated_time = str(_etl)
+            if _etl is not None:
+                try:
+                    estimated_time = int(_etl)
+                except (TypeError, ValueError):
+                    estimated_time = None
             if _msg:
                 gpu_message = _msg
 
@@ -314,7 +317,7 @@ async def track_product_status(
                 "updated_date": notification.get("updated_date"),
                 "source":       "pg_notify",
             }
-            if estimated_time:
+            if estimated_time is not None:
                 status_update_payload["estimated_time"] = estimated_time
             if gpu_message:
                 status_update_payload["message"] = gpu_message

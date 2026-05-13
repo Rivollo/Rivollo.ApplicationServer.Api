@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, insert
 from datetime import datetime
 
-from app.core.config import settings
 from app.models.models import Product, ProductAsset, ProductAssetMapping, ProductStatus, Background
 from app.services.storage import storage_service
+from app.services.gpu_status_service import gpu_status_service
 from app.integrations.threed_model_client import threed_model_client
 from app.integrations.service_bus_publisher import ServiceBusPublisher
 from app.database.products_repo import ProductRepository
@@ -71,7 +71,7 @@ class ProductService:
         mask_filename: Optional[str] = None,
         mask_content_type: Optional[str] = None,
         mask_size_bytes: Optional[int] = None,
-    ) -> tuple[Product, str, Optional[str], Optional[str]]:
+    ) -> tuple[Product, str, Optional[str], Optional[str], dict]:
         """Create a product and publish processing request to Service Bus.""" 
              
         logger = logging.getLogger(__name__)
@@ -183,6 +183,11 @@ class ProductService:
         logger.info("Product %s committed as DRAFT pending 3D readiness probe", product.id)
         await db.commit()
 
+        gpu_status = await gpu_status_service.get_status(
+            db=db,
+            touch_activation=True,
+        )
+
         try:
             await db.refresh(product)
         except Exception:
@@ -204,7 +209,7 @@ class ProductService:
             mask_blob_url=mask_blob_url,
         )
 
-        return product, cdn_url, mask_cdn_url, None
+        return product, cdn_url, mask_cdn_url, None, gpu_status
 
     @staticmethod
     async def generate_3d_and_finalize(
@@ -310,44 +315,6 @@ class ProductService:
         return glb_url
 
     @staticmethod
-    async def _get_cold_start_estimate() -> tuple[str, str]:
-        """Check DB for an in-progress activation and return (estimated_time, message).
-
-        - If an activation record exists and is not stale, calculate remaining time.
-        - Otherwise upsert a fresh activation timestamp and return the full cold-start time.
-        Stale = older than GPU_COLD_START_SECONDS + 2 min buffer.
-        """
-        import math
-        from datetime import timezone
-        from app.core.db import new_session
-        from app.database.gpu_activation_repo import get_activation, upsert_activation
-
-        cold_seconds = settings.GPU_COLD_START_SECONDS
-        stale_threshold = cold_seconds + 120  # 2 min buffer
-
-        now = datetime.now(timezone.utc)
-
-        async with new_session() as db:
-            activation = await get_activation(db)
-
-            if activation is not None:
-                elapsed = (now - activation.activation_started_at).total_seconds()
-                if elapsed < stale_threshold:
-                    remaining = max(30, cold_seconds - elapsed)
-                    minutes = math.ceil(remaining / 60)
-                    label = f"~{minutes} minute{'s' if minutes != 1 else ''}"
-                    msg = f"GPU is loading up. Approximately {minutes} more minute{'s' if minutes != 1 else ''} remaining."
-                    return label, msg
-
-            # No record or stale — this is a fresh activation.
-            await upsert_activation(db, now)
-
-        cold_minutes = round(cold_seconds / 60)
-        label = f"~{cold_minutes} minutes"
-        msg = f"GPU is loading up. This usually takes around {cold_minutes} minutes."
-        return label, msg
-
-    @staticmethod
     async def _run_3d_generation_background(
         user_id: uuid.UUID,
         product_id: uuid.UUID,
@@ -373,24 +340,26 @@ class ProductService:
 
             product_id_str = str(product_id)
 
-            # Single quick probe (≤5 s) to determine warm vs cold-start.
+            # Fast probe to determine warm vs cold-start.
             # Broadcast the estimate to connected WebSocket clients right away
             # so the browser can show a meaningful wait time before the full
             # polling loop begins.
-            is_warm = await threed_model_client.quick_warmth_check()
+            async with new_session() as db:
+                gpu_status = await gpu_status_service.get_status(
+                    db=db,
+                    touch_activation=True,
+                )
 
-            if is_warm:
-                estimated_time = "~20 seconds"
-                gpu_message = "GPU is ready — your 3D model is being generated now."
-            else:
-                estimated_time, gpu_message = await ProductService._get_cold_start_estimate()
+            is_warm = gpu_status["gpu_status"] == "warm"
+            estimated_time = gpu_status["estimated_time"]
+            gpu_message = gpu_status["message"]
 
             await broadcaster.broadcast_to_product(
                 product_id_str,
                 {
                     "new_status": ProductStatus.QUEUE.value,
                     "estimated_time": estimated_time,
-                    "gpu_status": "warm" if is_warm else "cold",
+                    "gpu_status": gpu_status["gpu_status"],
                     "message": gpu_message,
                 },
             )
@@ -407,7 +376,7 @@ class ProductService:
                         product_id_str,
                         {
                             "new_status": ProductStatus.QUEUE.value,
-                            "estimated_time": "~20 seconds",
+                            "estimated_time": 20,
                             "gpu_status": "warm",
                             "message": "GPU is now ready — your 3D model generation is starting.",
                         },

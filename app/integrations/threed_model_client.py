@@ -159,6 +159,24 @@ class ThreeDModelClient:
         return False
 
     @staticmethod
+    async def fast_health_check(timeout_seconds: float = 2.0) -> bool:
+        """
+        Fast /health probe for immediate UI estimates.
+
+        This intentionally does not wait through cold-start. The longer
+        wait_until_ready() loop is still responsible for blocking until the
+        3D service is actually ready to generate.
+        """
+        try:
+            endpoint = f"{ThreeDModelClient._base_url()}{_READINESS_HEALTH_PATH}"
+            timeout = httpx.Timeout(timeout_seconds, connect=timeout_seconds)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(endpoint)
+                return resp.status_code == 200
+        except (RuntimeError, httpx.TimeoutException, httpx.RequestError):
+            return False
+
+    @staticmethod
     async def generate_3d(
         *,
         product_id: uuid.UUID,
