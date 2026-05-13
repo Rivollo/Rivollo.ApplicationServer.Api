@@ -229,5 +229,9 @@ SUBSCRIPTION_MODELS_SPLIT.md
 # Local DB
 dev.db
 
+# Firebase credentials
+firebase-service-account.json
+*-firebase-adminsdk-*.json
+
 # AI Agent 
 .claude

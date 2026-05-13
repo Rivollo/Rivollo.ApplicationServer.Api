@@ -131,6 +131,11 @@ class Settings(BaseSettings):
 	WHATSAPP_TEMPLATE_LANGUAGE: str = Field(default="en_US")
 	WHATSAPP_API_VERSION: str = Field(default="v18.0")
 
+	# Firebase Cloud Messaging
+	FIREBASE_JSON_PATH: str = Field(default="")
+	FIREBASE_SERVICE_ACCOUNT_JSON_B64: str = Field(default="")
+	FCM_DRY_RUN: bool = Field(default=False)
+
 	# Razorpay Payment Gateway
 	RAZORPAY_BASE_URL: str = Field(default="https://api.razorpay.com/v1")
 	RAZORPAY_KEY_ID: str = Field(default="")
