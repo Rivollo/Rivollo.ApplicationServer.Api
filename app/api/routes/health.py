@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from app.api.deps import DB
 from app.core.config import settings
+from app.services.gpu_status_service import gpu_status_service
 from app.utils.envelopes import api_success
 
 router = APIRouter(tags=["health"])
@@ -43,3 +44,10 @@ async def readiness_check(db: DB):
 async def liveness_check():
     """Kubernetes liveness probe."""
     return api_success({"alive": True})
+
+
+@router.get("/health/3d-machine", response_model=dict)
+async def check_3d_machine(db: DB):
+    """Fast 3D machine health/estimate endpoint for frontend workflows."""
+    result = await gpu_status_service.get_status(db=db, touch_activation=True)
+    return api_success(result)
