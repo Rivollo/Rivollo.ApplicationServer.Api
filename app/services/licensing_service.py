@@ -1,6 +1,7 @@
 """Licensing and subscription management service."""
 
 import json
+import logging
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -8,11 +9,121 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import LicenseAssignment, Plan, Subscription, User
+from app.core.config import settings
+from app.models.models import LicenseAssignment, Notification, Plan, Subscription, User
+
+
+logger = logging.getLogger(__name__)
 
 
 class LicensingService:
     """Service for managing subscriptions and license enforcement."""
+
+    @staticmethod
+    def _quota_columns(quota_key: str) -> tuple[str, str] | None:
+        if quota_key in ("max_products", "products"):
+            return "limit_max_products", "usage_products"
+        if quota_key in ("ai_credits", "max_ai_credits_month"):
+            return "limit_max_ai_credits", "usage_ai_credits"
+        if quota_key in ("public_views", "max_public_views"):
+            return "limit_max_public_views", "usage_public_views"
+        if quota_key in ("galleries", "max_galleries"):
+            return "limit_max_galleries", "usage_galleries"
+        return None
+
+    @staticmethod
+    def _quota_label(quota_key: str) -> str:
+        labels = {
+            "max_products": "product",
+            "products": "product",
+            "ai_credits": "AI credit",
+            "max_ai_credits_month": "AI credit",
+            "public_views": "public view",
+            "max_public_views": "public view",
+            "galleries": "gallery",
+            "max_galleries": "gallery",
+        }
+        return labels.get(quota_key, quota_key.replace("_", " "))
+
+    @staticmethod
+    def _crossed_quota_thresholds(previous_usage: int, current_usage: int, limit: int) -> list[int]:
+        if limit <= 0:
+            return []
+
+        previous_pct = (previous_usage / limit) * 100
+        current_pct = (current_usage / limit) * 100
+
+        for threshold in sorted(settings.quota_notification_thresholds(), reverse=True):
+            if previous_pct < threshold <= current_pct:
+                return [threshold]
+        return []
+
+    @staticmethod
+    async def _quota_notification_exists(
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        notification_type: str,
+    ) -> bool:
+        result = await db.execute(
+            select(Notification.id)
+            .where(
+                Notification.user_id == user_id,
+                Notification.type == notification_type,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
+    @staticmethod
+    async def _notify_quota_threshold(
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        quota_key: str,
+        usage: int,
+        limit: int,
+        threshold: int,
+    ) -> None:
+        notification_type = f"quota.{quota_key}.{threshold}"
+        if await LicensingService._quota_notification_exists(db, user_id, notification_type):
+            return
+
+        quota_label = LicensingService._quota_label(quota_key)
+        if threshold >= 100:
+            title = "Quota Exhausted"
+            body = f"You have used all of your {quota_label} quota."
+        else:
+            title = "Quota Warning"
+            body = f"You have used {threshold}% of your {quota_label} quota."
+
+        try:
+            from app.services.notification_service import NotificationService
+
+            await NotificationService.create_and_push_notification(
+                db=db,
+                user_id=user_id,
+                notification_type=notification_type,
+                title=title,
+                body=body,
+                data={
+                    "quota": quota_key,
+                    "usage": usage,
+                    "limit": limit,
+                    "threshold": threshold,
+                    "percentage": min(100, round((usage / limit) * 100)),
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Failed to send quota threshold notification for user %s quota %s threshold %s",
+                user_id,
+                quota_key,
+                threshold,
+                exc_info=True,
+            )
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
     @staticmethod
     async def get_active_license(db: AsyncSession, user_id: uuid.UUID) -> Optional[LicenseAssignment]:
@@ -47,23 +158,11 @@ class LicensingService:
             # No active license - deny
             return False, None
 
-        # Map quota_key to internal column names
-        # Default mapping logic based on legacy keys:
-        if quota_key == "max_products":
-            limit_col = "limit_max_products"
-            usage_col = "usage_products"
-        elif quota_key == "ai_credits" or quota_key == "max_ai_credits_month":
-            limit_col = "limit_max_ai_credits"
-            usage_col = "usage_ai_credits"
-        elif quota_key == "public_views" or quota_key == "max_public_views":
-            limit_col = "limit_max_public_views"
-            usage_col = "usage_public_views"
-        elif quota_key == "galleries" or quota_key == "max_galleries":
-            limit_col = "limit_max_galleries"
-            usage_col = "usage_galleries"
-        else:
+        columns = LicensingService._quota_columns(quota_key)
+        if columns is None:
             # Unknown quota - fail safe by allowing or we could block
             return True, None
+        limit_col, usage_col = columns
 
         # Dynamically fetch limit and usage from native integer columns
         limit_val = getattr(license, limit_col, 0)
@@ -102,16 +201,33 @@ class LicensingService:
         if not license:
             return False
 
-        if quota_key == "max_products" or quota_key == "products":
-            license.usage_products += increment
-        elif quota_key == "ai_credits" or quota_key == "max_ai_credits_month":
-            license.usage_ai_credits += increment
-        elif quota_key == "public_views" or quota_key == "max_public_views":
-            license.usage_public_views += increment
-        elif quota_key == "galleries" or quota_key == "max_galleries":
-            license.usage_galleries += increment
+        columns = LicensingService._quota_columns(quota_key)
+        if columns is None:
+            return False
+
+        limit_col, usage_col = columns
+        limit_val = getattr(license, limit_col, 0)
+        previous_usage = getattr(license, usage_col, 0) or 0
+        current_usage = previous_usage + increment
+        setattr(license, usage_col, current_usage)
 
         await db.commit()
+
+        thresholds = LicensingService._crossed_quota_thresholds(
+            previous_usage=previous_usage,
+            current_usage=current_usage,
+            limit=limit_val or 0,
+        )
+        for threshold in thresholds:
+            await LicensingService._notify_quota_threshold(
+                db=db,
+                user_id=user_id,
+                quota_key=quota_key,
+                usage=current_usage,
+                limit=limit_val,
+                threshold=threshold,
+            )
+
         return True
 
     @staticmethod
