@@ -440,8 +440,6 @@ async def create_product_with_image(
     # (READY for PRO users after direct VM execution, QUEUE for FREE users pending Service Bus)
     await db.refresh(product)
 
-    await _notify_product_created(db=db, user_id=user_uuid, product=product)
-
     response_data = ProductResponse(
         id=str(product.id),
         name=product.name,
