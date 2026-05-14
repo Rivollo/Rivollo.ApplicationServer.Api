@@ -17,6 +17,7 @@ from app.integrations.service_bus_publisher import ServiceBusPublisher
 from app.database.products_repo import ProductRepository
 from app.database.subscription_repo import SubscriptionRepository
 from app.schemas.products import ProductWithPrimaryAsset, ProductsByUserResponse
+from app.services.notification_service import NotificationService
 
 
 class ProductService:
@@ -299,6 +300,31 @@ class ProductService:
             product.status = ProductStatus.READY
             await db.commit()
             logger.info("Product %s → READY  glb_url=%s", product_id, glb_url)
+
+            try:
+                await NotificationService.create_and_push_notification(
+                    db=db,
+                    user_id=user_id,
+                    notification_type="product.ready",
+                    title="Product Ready",
+                    body=f"Your product '{name}' is ready.",
+                    data={
+                        "product_id": str(product_id),
+                        "product_name": name,
+                        "status": ProductStatus.READY.value,
+                        "glb_url": glb_url,
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to send product-ready notification for product %s",
+                    product_id,
+                    exc_info=True,
+                )
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
         except Exception as exc:
             logger.exception("Failed to persist GLB asset for product %s", product_id)
