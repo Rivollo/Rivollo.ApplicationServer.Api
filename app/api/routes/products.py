@@ -68,7 +68,6 @@ from app.schemas.products import (
 from app.services.activity_service import ActivityService
 from app.services.background_removal_service import background_removal_service
 from app.services.licensing_service import LicensingService
-from app.services.notification_service import NotificationService
 from app.services.product_service import product_service
 from app.services.dimension_service import DimensionService
 from app.utils.envelopes import api_error, api_success
@@ -126,33 +125,6 @@ async def _generate_unique_slug(
         if cand not in existing:
             return cand
         i += 1
-
-
-async def _notify_product_created(db: AsyncSession, user_id: uuid.UUID, product: Product) -> None:
-    """Store and push product-created notification without blocking product creation."""
-    try:
-        await NotificationService.create_and_push_notification(
-            db=db,
-            user_id=user_id,
-            notification_type="product.created",
-            title="Product Created",
-            body=f"Your product '{product.name}' was created successfully.",
-            data={
-                "product_id": str(product.id),
-                "product_name": product.name,
-                "status": product.status.value if hasattr(product.status, "value") else str(product.status),
-            },
-        )
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "Failed to send product-created notification for product %s",
-            product.id,
-            exc_info=True,
-        )
-        try:
-            await db.rollback()
-        except Exception:
-            pass
 
 
 # No org context needed; keep API org-free
@@ -287,8 +259,6 @@ async def create_product(
 
     await db.commit()
     await db.refresh(product)
-
-    # await _notify_product_created(db=db, user_id=current_user.id, product=product)
 
     response_data = ProductResponse(
         id=str(product.id),
