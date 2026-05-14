@@ -398,7 +398,7 @@ async def create_product_with_image(
 
     # Use ProductService to create product and upload image
     try:
-        product, image_url, mask_image_url, glb_url = await product_service.create_product_with_image(
+        product, image_url, mask_image_url, glb_url, gpu_status = await product_service.create_product_with_image(
             db=db,
             background_tasks=background_tasks,
             user_id=user_uuid,
@@ -457,6 +457,7 @@ async def create_product_with_image(
 
     response_dict = response_data.model_dump(exclude_none=True)
     response_dict["imageURL"] = image_url
+    response_dict["gpu"] = gpu_status
     if glb_url:
         # PRO users: 3D generation ran synchronously, GLB is ready now
         response_dict["glbURL"] = glb_url
