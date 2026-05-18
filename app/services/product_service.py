@@ -146,7 +146,7 @@ class ProductService:
         # -------------------------------
         try:
             product_asset = ProductAsset(
-                asset_id=asset_id,
+                asset_id=1,
                 image=blob_url,
                 size_bytes=image_size_bytes,
                 created_by=user_id,
