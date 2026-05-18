@@ -72,6 +72,13 @@ class ProductService:
         mask_filename: Optional[str] = None,
         mask_content_type: Optional[str] = None,
         mask_size_bytes: Optional[int] = None,
+        quality: Optional[str] = None,
+        with_mesh_postprocess: Optional[bool] = None,
+        with_texture_baking: Optional[bool] = None,
+        use_vertex_color: Optional[bool] = None,
+        simplify: Optional[float] = None,
+        fill_holes: Optional[bool] = None,
+        texture_size: Optional[int] = None,
     ) -> tuple[Product, str, Optional[str], Optional[str], dict]:
         """Create a product and publish processing request to Service Bus.""" 
              
@@ -208,6 +215,13 @@ class ProductService:
             target_format=target_format,
             blob_url=blob_url,
             mask_blob_url=mask_blob_url,
+            quality=quality,
+            with_mesh_postprocess=with_mesh_postprocess,
+            with_texture_baking=with_texture_baking,
+            use_vertex_color=use_vertex_color,
+            simplify=simplify,
+            fill_holes=fill_holes,
+            texture_size=texture_size,
         )
 
         return product, cdn_url, mask_cdn_url, None, gpu_status
@@ -223,6 +237,13 @@ class ProductService:
         target_format: str,
         blob_url: str,
         mask_blob_url: str,
+        quality: Optional[str] = None,
+        with_mesh_postprocess: Optional[bool] = None,
+        with_texture_baking: Optional[bool] = None,
+        use_vertex_color: Optional[bool] = None,
+        simplify: Optional[float] = None,
+        fill_holes: Optional[bool] = None,
+        texture_size: Optional[int] = None,
     ) -> str:
         """
         Synchronously call the 3D generation API and persist the GLB asset.
@@ -255,6 +276,13 @@ class ProductService:
             asset_id=asset_id,
             mesh_asset_id=mesh_asset_id,
             name=name,
+            quality=quality,
+            with_mesh_postprocess=with_mesh_postprocess,
+            with_texture_baking=with_texture_baking,
+            use_vertex_color=use_vertex_color,
+            simplify=simplify,
+            fill_holes=fill_holes,
+            texture_size=texture_size,
         )
 
         # Re-fetch in case the session state drifted during the long await
@@ -350,6 +378,13 @@ class ProductService:
         target_format: str,
         blob_url: str,
         mask_blob_url: str,
+        quality: Optional[str] = None,
+        with_mesh_postprocess: Optional[bool] = None,
+        with_texture_baking: Optional[bool] = None,
+        use_vertex_color: Optional[bool] = None,
+        simplify: Optional[float] = None,
+        fill_holes: Optional[bool] = None,
+        texture_size: Optional[int] = None,
     ) -> None:
         """Open a fresh DB session and run generate_3d_and_finalize in the background."""
         from app.core.db import new_session
@@ -433,6 +468,13 @@ class ProductService:
                     target_format=target_format,
                     blob_url=blob_url,
                     mask_blob_url=mask_blob_url,
+                    quality=quality,
+                    with_mesh_postprocess=with_mesh_postprocess,
+                    with_texture_baking=with_texture_baking,
+                    use_vertex_color=use_vertex_color,
+                    simplify=simplify,
+                    fill_holes=fill_holes,
+                    texture_size=texture_size,
                 )
         except Exception:
             logger.exception("Background 3D generation failed for product %s", product_id)

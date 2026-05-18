@@ -27,6 +27,33 @@ _READINESS_MAX_BACKOFF = 30.0
 _WARMTH_CHECK_TIMEOUT = httpx.Timeout(timeout=15.0, connect=10.0)
 _WARMTH_CHECK_ATTEMPTS = 2
 
+_QUALITY_PRESETS = {
+    "fast": {
+        "with_mesh_postprocess": False,
+        "with_texture_baking": False,
+        "use_vertex_color": True,
+        "simplify": 0.95,
+        "fill_holes": True,
+        "texture_size": 1024,
+    },
+    "high": {
+        "with_mesh_postprocess": True,
+        "with_texture_baking": True,
+        "use_vertex_color": False,
+        "simplify": 0.2,
+        "fill_holes": True,
+        "texture_size": 2048,
+    },
+    "max": {
+        "with_mesh_postprocess": True,
+        "with_texture_baking": True,
+        "use_vertex_color": False,
+        "simplify": 0.0,
+        "fill_holes": True,
+        "texture_size": 4096,
+    },
+}
+
 
 class ThreeDGenerateResponse:
     """Parsed response from the generate-3d endpoint."""
@@ -54,6 +81,60 @@ class ThreeDGenerateResponse:
 
 class ThreeDModelClient:
     """Client for the external 3D model generation service."""
+
+    @staticmethod
+    def _build_generation_payload(
+        *,
+        product_id: uuid.UUID,
+        user_id: uuid.UUID,
+        blob_url: str,
+        mask_blob_url: str,
+        target_format: str,
+        asset_id: int,
+        mesh_asset_id: int,
+        name: str,
+        quality: Optional[str] = None,
+        with_mesh_postprocess: Optional[bool] = None,
+        with_texture_baking: Optional[bool] = None,
+        use_vertex_color: Optional[bool] = None,
+        simplify: Optional[float] = None,
+        fill_holes: Optional[bool] = None,
+        texture_size: Optional[int] = None,
+    ) -> dict:
+        payload = {
+            "product_id": str(product_id),
+            "user_id": str(user_id),
+            "blob_url": blob_url,
+            "mask_blob_url": mask_blob_url,
+            "target_format": target_format,
+            "asset_id": asset_id,
+            "mesh_asset_id": mesh_asset_id,
+            "name": name,
+        }
+
+        tuning_fields = {
+            "with_mesh_postprocess": with_mesh_postprocess,
+            "with_texture_baking": with_texture_baking,
+            "use_vertex_color": use_vertex_color,
+            "simplify": simplify,
+            "fill_holes": fill_holes,
+            "texture_size": texture_size,
+        }
+        has_any_override = any(value is not None for value in tuning_fields.values())
+
+        if quality:
+            if quality not in _QUALITY_PRESETS:
+                raise ValueError(f"Unsupported quality preset: {quality}")
+            payload["quality"] = quality
+            payload.update(_QUALITY_PRESETS[quality])
+        elif not has_any_override:
+            payload.update(_QUALITY_PRESETS["fast"])
+
+        for key, value in tuning_fields.items():
+            if value is not None:
+                payload[key] = value
+
+        return payload
 
     @staticmethod
     def _base_url() -> str:
@@ -187,6 +268,13 @@ class ThreeDModelClient:
         asset_id: int,
         mesh_asset_id: int,
         name: str,
+        quality: Optional[str] = None,
+        with_mesh_postprocess: Optional[bool] = None,
+        with_texture_baking: Optional[bool] = None,
+        use_vertex_color: Optional[bool] = None,
+        simplify: Optional[float] = None,
+        fill_holes: Optional[bool] = None,
+        texture_size: Optional[int] = None,
     ) -> ThreeDGenerateResponse:
         """
         Call <base>/generate-3d and return parsed response.
@@ -215,16 +303,23 @@ class ThreeDModelClient:
                 }
             }
         """
-        payload = {
-            "product_id": str(product_id),
-            "user_id": str(user_id),
-            "blob_url": blob_url,
-            "mask_blob_url": mask_blob_url,
-            "target_format": target_format,
-            "asset_id": asset_id,
-            "mesh_asset_id": mesh_asset_id,
-            "name": name,
-        }
+        payload = ThreeDModelClient._build_generation_payload(
+            product_id=product_id,
+            user_id=user_id,
+            blob_url=blob_url,
+            mask_blob_url=mask_blob_url,
+            target_format=target_format,
+            asset_id=asset_id,
+            mesh_asset_id=mesh_asset_id,
+            name=name,
+            quality=quality,
+            with_mesh_postprocess=with_mesh_postprocess,
+            with_texture_baking=with_texture_baking,
+            use_vertex_color=use_vertex_color,
+            simplify=simplify,
+            fill_holes=fill_holes,
+            texture_size=texture_size,
+        )
 
         endpoint = f"{ThreeDModelClient._base_url()}/generate-3d"
         logger.info(

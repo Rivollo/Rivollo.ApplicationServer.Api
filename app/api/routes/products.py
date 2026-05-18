@@ -283,9 +283,16 @@ async def create_product_with_image(
     background_tasks: BackgroundTasks,
     userId: str = Form(..., description="User ID creating the product"),
     name: str = Form(..., min_length=1, max_length=200, description="Product name"),
-    asset_id: int = Form(..., description="Asset ID (integer)"),
-    mesh_asset_id: int = Form(..., description="Mesh asset ID for generated output (integer)"),
-    target_format: str = Form(..., description="Target format for external API (e.g., glb, obj)"),
+    target_format: str = Form("glb", description="Target format for external API (e.g., glb, obj)"),
+    asset_id: int = Form(9, description="Asset ID (integer)"),
+    mesh_asset_id: int = Form(2, description="Mesh asset ID for generated output (integer)"),
+    quality: Optional[str] = Form(None, description="3D generation quality preset: fast, high, or max"),
+    with_mesh_postprocess: Optional[bool] = Form(None, description="Override mesh post-processing"),
+    with_texture_baking: Optional[bool] = Form(None, description="Override texture baking"),
+    use_vertex_color: Optional[bool] = Form(None, description="Override vertex color usage"),
+    simplify: Optional[float] = Form(None, description="Override mesh simplification amount"),
+    fill_holes: Optional[bool] = Form(None, description="Override hole filling"),
+    texture_size: Optional[int] = Form(None, description="Override generated texture size"),
     image: UploadFile = File(..., description="Image file to upload (JPG, PNG, WEBP, GIF)"),
     mask: UploadFile = File(...),  # 👈 NEW PARAME
 ):
@@ -298,7 +305,13 @@ async def create_product_with_image(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid userId format. Expected UUID string.",
         )
-    
+
+    if quality not in {None, "fast", "high", "max"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid quality. Allowed values: fast, high, max.",
+        )
+
 
 
    # Check if user has enough quota
@@ -384,6 +397,13 @@ async def create_product_with_image(
             mask_filename=mask_filename,
             mask_content_type=mask_content_type,
             mask_size_bytes=mask_size_bytes,
+            quality=quality,
+            with_mesh_postprocess=with_mesh_postprocess,
+            with_texture_baking=with_texture_baking,
+            use_vertex_color=use_vertex_color,
+            simplify=simplify,
+            fill_holes=fill_holes,
+            texture_size=texture_size,
         )
 
         # Increment usage
