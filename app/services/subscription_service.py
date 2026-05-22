@@ -166,9 +166,6 @@ class SubscriptionService:
                 if pf.feature and pf.limit_value is not None:
                     limits[pf.feature.code] = pf.limit_value
 
-        # Keep free-plan AI credits aligned with the current product policy.
-        limits["max_ai_credits_month"] = 50
-
         product_count = await SubscriptionRepository.get_user_product_count(db, user_id)
 
         return SubscriptionMe(
