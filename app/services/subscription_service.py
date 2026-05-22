@@ -154,7 +154,7 @@ class SubscriptionService:
 
         # Safety defaults — used only if free plan is missing from DB
         limits = {
-            "max_ai_credits_month": 5,
+            "max_ai_credits_month": 50,
             "max_public_views": 1000,
             "max_products": 2,
             "max_galleries": 0,
@@ -165,6 +165,9 @@ class SubscriptionService:
             for pf in free_plan.plan_features:
                 if pf.feature and pf.limit_value is not None:
                     limits[pf.feature.code] = pf.limit_value
+
+        # Keep free-plan AI credits aligned with the current product policy.
+        limits["max_ai_credits_month"] = 50
 
         product_count = await SubscriptionRepository.get_user_product_count(db, user_id)
 

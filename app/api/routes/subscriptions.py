@@ -81,6 +81,7 @@ async def list_plans(
             PlanPricing(
                 interval=pp.billing_interval,
                 priceINR=pp.price_inr,
+                aiCredits=pp.ai_credit_limit,
                 available=bool(pp.razorpay_plan_id),
             )
             for pp in sorted(p.plan_prices, key=lambda x: x.billing_interval)
