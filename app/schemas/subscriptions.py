@@ -76,6 +76,7 @@ class PlanPricing(BaseModel):
 
     interval: str = Field(..., description="Billing interval: 'monthly' or 'yearly'.")
     price_inr: int = Field(..., ge=0, alias="priceINR")
+    ai_credits: int = Field(..., ge=0, alias="aiCredits")
     available: bool = Field(..., description="True if this interval is configured for purchase.")
 
     class Config:

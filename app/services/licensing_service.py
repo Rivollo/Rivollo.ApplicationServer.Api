@@ -273,7 +273,7 @@ class LicensingService:
         # Default limits for safety if features missing
         limits = {
             "max_products": 2,
-            "max_ai_credits_month": 5,
+            "max_ai_credits_month": 50,
             "max_public_views": 1000,
             "max_galleries": 0,
         }
@@ -289,6 +289,9 @@ class LicensingService:
                     limits["max_public_views"] = pf.limit_value or 0
                 elif pf.feature.code in ["galleries", "max_galleries"]:
                     limits["max_galleries"] = pf.limit_value or 0
+
+        # Free users now always start with 50 AI credits.
+        limits["max_ai_credits_month"] = 50
 
         # Create subscription
         subscription = Subscription(

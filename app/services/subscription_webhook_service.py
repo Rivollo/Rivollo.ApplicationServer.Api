@@ -67,7 +67,7 @@ async def _get_subscription_by_rz_id(
     result = await db.execute(
         select(Subscription)
         .where(Subscription.razorpay_subscription_id == rz_subscription_id)
-        .options(selectinload(Subscription.plan))
+        .options(selectinload(Subscription.plan).selectinload(Plan.plan_prices))
     )
     return result.scalar_one_or_none()
 
@@ -144,6 +144,19 @@ async def _revoke_license(
         await db.flush()
 
 
+def _resolve_ai_credit_limit(subscription: Subscription, limits: dict) -> int:
+    """Resolve AI credits from the interval-specific plan price when available."""
+    if subscription.plan:
+        for plan_price in getattr(subscription.plan, "plan_prices", []):
+            if (
+                plan_price.isactive
+                and plan_price.billing_interval == subscription.billing_interval
+            ):
+                return plan_price.ai_credit_limit
+
+    return limits.get("max_ai_credits_month", 0)
+
+
 async def _upsert_license(
     db: AsyncSession,
     *,
@@ -153,6 +166,8 @@ async def _upsert_license(
     reset_usage: bool = False,
 ) -> None:
     """Create or update license assignment for a subscription."""
+    ai_credit_limit = _resolve_ai_credit_limit(subscription, limits)
+
     result = await db.execute(
         select(LicenseAssignment).where(
             LicenseAssignment.subscription_id == subscription.id,
@@ -164,7 +179,7 @@ async def _upsert_license(
     if existing is not None:
         existing.status = LicenseStatus.ACTIVE
         existing.limit_max_products = limits.get("max_products", 0)
-        existing.limit_max_ai_credits = limits.get("max_ai_credits_month", 0)
+        existing.limit_max_ai_credits = ai_credit_limit
         existing.limit_max_public_views = limits.get("max_public_views", 0)
         existing.limit_max_galleries = limits.get("max_galleries", 0)
         if reset_usage:
@@ -176,7 +191,7 @@ async def _upsert_license(
             user_id=user_id,
             status=LicenseStatus.ACTIVE,
             limit_max_products=limits.get("max_products", 0),
-            limit_max_ai_credits=limits.get("max_ai_credits_month", 0),
+            limit_max_ai_credits=ai_credit_limit,
             limit_max_public_views=limits.get("max_public_views", 0),
             limit_max_galleries=limits.get("max_galleries", 0),
             usage_products=0,

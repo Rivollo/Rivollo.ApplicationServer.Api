@@ -56,6 +56,7 @@ class PlanPrice(Base):
     plan_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("tbl_mstr_plans.id", ondelete="CASCADE"), nullable=False)
     billing_interval: Mapped[str] = mapped_column(String(20), nullable=False)
     price_inr: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    ai_credit_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="INR")
     razorpay_plan_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     description: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)

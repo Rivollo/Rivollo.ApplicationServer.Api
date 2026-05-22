@@ -97,6 +97,8 @@ public_router = APIRouter(
     dependencies=[Depends(verify_public_basic_auth)],
 )
 
+PRODUCT_CREATION_AI_CREDIT_COST = 10
+
 
 def _slugify(text: str) -> str:
     """Convert text to URL-friendly slug."""
@@ -222,13 +224,21 @@ async def create_product(
     db: DB,
 ):
     """Create a new product."""
-    # Check quota
-    allowed, quota_info = await LicensingService.check_quota(db, current_user.id, "max_products")
+    # Product creation is limited by AI credits, not product count.
+    allowed, quota_info = await LicensingService.check_quota(
+        db,
+        current_user.id,
+        "ai_credits",
+        increment=PRODUCT_CREATION_AI_CREDIT_COST,
+    )
 
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Product limit exceeded. Upgrade your plan to create more products.",
+            detail=(
+                f"Not enough AI credits. {PRODUCT_CREATION_AI_CREDIT_COST} credits "
+                "are required to create a product."
+            ),
         )
 
     # Generate unique slug per org
@@ -245,8 +255,13 @@ async def create_product(
     db.add(product)
     await db.flush()
 
-    # Increment usage
-    await LicensingService.increment_usage(db, current_user.id, "max_products")
+    # Deduct AI credits after successful creation.
+    await LicensingService.increment_usage(
+        db,
+        current_user.id,
+        "ai_credits",
+        increment=PRODUCT_CREATION_AI_CREDIT_COST,
+    )
 
     # Log activity
     await ActivityService.log_product_action(
@@ -312,14 +327,20 @@ async def create_product_with_image(
             detail="Invalid quality. Allowed values: fast, high, max.",
         )
 
-
-
-   # Check if user has enough quota
-    allowed, quota_info = await LicensingService.check_quota(db, user_uuid, "max_products")
+    # Product generation is limited by AI credits, not product count.
+    allowed, quota_info = await LicensingService.check_quota(
+        db,
+        user_uuid,
+        "ai_credits",
+        increment=PRODUCT_CREATION_AI_CREDIT_COST,
+    )
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Product limit exceeded. Upgrade your plan to create more products.",
+            detail=(
+                f"Not enough AI credits. {PRODUCT_CREATION_AI_CREDIT_COST} credits "
+                "are required to create a product."
+            ),
         )
 
   
@@ -406,8 +427,13 @@ async def create_product_with_image(
             texture_size=texture_size,
         )
 
-        # Increment usage
-        await LicensingService.increment_usage(db, user_uuid, "max_products")
+        # Deduct AI credits after successful generation.
+        await LicensingService.increment_usage(
+            db,
+            user_uuid,
+            "ai_credits",
+            increment=PRODUCT_CREATION_AI_CREDIT_COST,
+        )
 
     except ValueError as e:
         raise HTTPException(
