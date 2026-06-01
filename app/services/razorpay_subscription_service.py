@@ -28,9 +28,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
+from app.models.license_assignment import LicenseAssignment
 from app.models.plan import Plan, PlanFeature , PlanPrice
 from app.models.subscription import Subscription
-from app.models.subscription_enums import  SubscriptionStatus
+from app.models.subscription_enums import LicenseStatus, SubscriptionStatus
 
 _logger = logging.getLogger("rivollo.razorpay_subscription_service")
 
@@ -110,6 +111,67 @@ async def _get_plan_with_features(
             limits[pf.feature.code] = pf.limit_value
 
     return plan, plan_price, limits
+
+
+async def _sync_subscription_license(
+    db: AsyncSession,
+    *,
+    subscription: Subscription,
+    user_id: uuid.UUID,
+) -> None:
+    """Provision the paid subscription license immediately after verification."""
+    if not subscription.plan:
+        return
+
+    _, plan_price, limits = await _get_plan_with_features(
+        db,
+        subscription.plan.code,
+        subscription.billing_interval or "monthly",
+    )
+
+    other_active_licenses = await db.execute(
+        select(LicenseAssignment).where(
+            LicenseAssignment.user_id == user_id,
+            LicenseAssignment.status == LicenseStatus.ACTIVE,
+            LicenseAssignment.subscription_id != subscription.id,
+        )
+    )
+    for license_obj in other_active_licenses.scalars():
+        license_obj.status = LicenseStatus.REVOKED
+
+    existing_license_result = await db.execute(
+        select(LicenseAssignment).where(
+            LicenseAssignment.subscription_id == subscription.id,
+            LicenseAssignment.user_id == user_id,
+        )
+    )
+    license_obj = existing_license_result.scalar_one_or_none()
+
+    if license_obj is None:
+        db.add(
+            LicenseAssignment(
+                subscription_id=subscription.id,
+                user_id=user_id,
+                status=LicenseStatus.ACTIVE,
+                limit_max_products=limits.get("max_products", 0),
+                limit_max_ai_credits=plan_price.ai_credit_limit,
+                limit_max_public_views=limits.get("max_public_views", 0),
+                limit_max_galleries=limits.get("max_galleries", 0),
+                usage_products=0,
+                usage_ai_credits=0,
+                usage_public_views=0,
+                usage_galleries=0,
+            )
+        )
+        return
+
+    license_obj.status = LicenseStatus.ACTIVE
+    license_obj.limit_max_products = limits.get("max_products", 0)
+    license_obj.limit_max_ai_credits = plan_price.ai_credit_limit
+    license_obj.limit_max_public_views = limits.get("max_public_views", 0)
+    license_obj.limit_max_galleries = limits.get("max_galleries", 0)
+    license_obj.usage_ai_credits = 0
+    license_obj.usage_public_views = 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -315,6 +377,11 @@ async def verify_subscription(
     # ── 3. Mark active — webhook handles period dates, license, payment record
     subscription.status = SubscriptionStatus.ACTIVE
     subscription.updated_date = datetime.now(timezone.utc)
+    await _sync_subscription_license(
+        db,
+        subscription=subscription,
+        user_id=user_id,
+    )
 
     await db.commit()
 
