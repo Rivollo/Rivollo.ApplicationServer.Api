@@ -168,6 +168,16 @@ async def _upsert_license(
     """Create or update license assignment for a subscription."""
     ai_credit_limit = _resolve_ai_credit_limit(subscription, limits)
 
+    other_active_licenses = await db.execute(
+        select(LicenseAssignment).where(
+            LicenseAssignment.user_id == user_id,
+            LicenseAssignment.status == LicenseStatus.ACTIVE,
+            LicenseAssignment.subscription_id != subscription.id,
+        )
+    )
+    for license_obj in other_active_licenses.scalars():
+        license_obj.status = LicenseStatus.REVOKED
+
     result = await db.execute(
         select(LicenseAssignment).where(
             LicenseAssignment.subscription_id == subscription.id,
