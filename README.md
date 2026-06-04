@@ -33,15 +33,19 @@ AZURE_STORAGE_CONN_STRING=
 STORAGE_CONTAINER_UPLOADS=uploads
 # Model service endpoint (GPU service); use mock to simulate
 MODEL_SERVICE_URL=mock://local
+# fal.ai API key for SAM2 image segmentation
+FAL_KEY=
 ```
 
 3. Run the server:
 
 ```bash
-uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Open docs at http://localhost:8000/docs
+
+Use `--host 0.0.0.0` only when you intentionally want the API reachable from other devices on your network.
 
 ### Notes
 - The app auto-normalizes common Postgres URLs: `postgres://` and `postgresql://` are upgraded to `postgresql+asyncpg://` for the async engine. Alembic migrations normalize to `postgresql+psycopg://`.

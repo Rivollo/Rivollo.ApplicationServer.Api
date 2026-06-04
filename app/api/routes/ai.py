@@ -18,6 +18,8 @@ from app.services.ai_suggestion_service import (
     _USER_INPUT_NAME_MAX_CHARS,
     _USER_INPUT_DESC_MAX_CHARS,
 )
+from app.schemas.segmentation import Sam2AutoSegmentRequest, Sam2ImageSegmentRequest
+from app.services.image_segmentation_service import image_segmentation_service
 from app.utils.envelopes import api_success
 
 logger = logging.getLogger(__name__)
@@ -346,3 +348,25 @@ async def link_suggest(
         user_prompt=payload.userPrompt,
     )
     return api_success(results)
+
+
+@router.post("/image-segment", response_model=dict)
+async def image_segment(
+    payload: Sam2ImageSegmentRequest,
+    current_user: CurrentUser,
+):
+    """Segment an image with fal.ai SAM2 and return the generated mask/segment image URL."""
+    _rate_limiter.check(str(current_user.id), count=1)
+    result = await image_segmentation_service.segment_with_sam2(payload)
+    return api_success(result.model_dump(exclude_none=True))
+
+
+@router.post("/image-auto-segment", response_model=dict)
+async def image_auto_segment(
+    payload: Sam2AutoSegmentRequest,
+    current_user: CurrentUser,
+):
+    """Automatically segment an image with fal.ai SAM2 and return combined/individual masks."""
+    _rate_limiter.check(str(current_user.id), count=1)
+    result = await image_segmentation_service.auto_segment_with_sam2(payload)
+    return api_success(result.model_dump(exclude_none=True))

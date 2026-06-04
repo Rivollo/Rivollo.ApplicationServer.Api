@@ -1,8 +1,11 @@
 """Product service for handling product creation with image storage."""
 
+import io
+import os
 import uuid
 from typing import BinaryIO, Optional
 
+import httpx
 import logging
 from fastapi import BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +21,16 @@ from app.database.products_repo import ProductRepository
 from app.database.subscription_repo import SubscriptionRepository
 from app.schemas.products import ProductWithPrimaryAsset, ProductsByUserResponse
 from app.services.notification_service import NotificationService
+
+
+_MAX_REMOTE_MASK_IMAGE_BYTES = 25 * 1024 * 1024
+_ALLOWED_REMOTE_MASK_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+_CONTENT_TYPE_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 
 
 class ProductService:
@@ -54,12 +67,44 @@ class ProductService:
             i += 1
 
     @staticmethod
+    async def _download_remote_mask_image(source_url: str) -> tuple[io.BytesIO, str, str, int]:
+        """Download a remote mask image and return stream, filename, content type, and size."""
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                follow_redirects=True,
+            ) as client:
+                response = await client.get(source_url)
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RuntimeError("Failed to download mask image URL") from exc
+
+        content = response.content
+        content_size = len(content)
+        if content_size == 0:
+            raise RuntimeError("Downloaded mask image is empty")
+        if content_size > _MAX_REMOTE_MASK_IMAGE_BYTES:
+            raise RuntimeError("Mask image exceeds the 25 MB limit")
+
+        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+        if content_type not in _ALLOWED_REMOTE_MASK_CONTENT_TYPES:
+            raise RuntimeError("Mask image URL must return a supported image content type")
+
+        extension = _CONTENT_TYPE_EXTENSIONS[content_type]
+        url_extension = os.path.splitext(httpx.URL(source_url).path)[1].lower()
+        if url_extension in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            extension = ".jpg" if url_extension == ".jpeg" else url_extension
+
+        return io.BytesIO(content), f"mask{extension}", content_type, content_size
+
+    @staticmethod
     async def create_product_with_image(
         db: AsyncSession,
         background_tasks: BackgroundTasks,
         user_id: uuid.UUID,
         name: str,
         asset_id: int,
+        mask_asset_id: int,
         target_format: str,
         mesh_asset_id: int,
         image_stream: BinaryIO,
@@ -169,13 +214,23 @@ class ProductService:
             # -------------------------------
             if mask_blob_url:
                 mask_asset = ProductAsset(
-                    asset_id=mesh_asset_id,
+                    asset_id=mask_asset_id,
                     image=mask_blob_url,
                     size_bytes=mask_size_bytes,
                     created_by=user_id,
                 )
                 db.add(mask_asset)
                 await db.flush()
+                await db.refresh(mask_asset)
+
+                mask_asset_mapping = ProductAssetMapping(
+                    name=f"{name} mask",
+                    productid=product.id,
+                    product_asset_id=mask_asset.id,
+                    isactive=True,
+                    created_by=user_id,
+                )
+                db.add(mask_asset_mapping)
 
         except Exception as e:
             logger.exception("Failed to create asset records")
@@ -225,6 +280,142 @@ class ProductService:
         )
 
         return product, cdn_url, mask_cdn_url, None, gpu_status
+
+    @staticmethod
+    async def create_product_with_image_urls(
+        db: AsyncSession,
+        background_tasks: BackgroundTasks,
+        user_id: uuid.UUID,
+        name: str,
+        asset_id: int,
+        mask_asset_id: int,
+        target_format: str,
+        mesh_asset_id: int,
+        image_url: str,
+        mask_image_url: str,
+        quality: Optional[str] = None,
+        with_mesh_postprocess: Optional[bool] = None,
+        with_texture_baking: Optional[bool] = None,
+        use_vertex_color: Optional[bool] = None,
+        simplify: Optional[float] = None,
+        fill_holes: Optional[bool] = None,
+        texture_size: Optional[int] = None,
+    ) -> tuple[Product, str, str, Optional[str], dict]:
+        """Create a product from existing original/mask image URLs."""
+        logger = logging.getLogger(__name__)
+
+        base_slug = ProductService._slugify(name)
+        slug = await ProductService._generate_unique_slug(db, base_slug)
+
+        product = Product(
+            name=name,
+            slug=slug,
+            status=ProductStatus.DRAFT,
+            created_by=user_id,
+        )
+
+        db.add(product)
+        await db.flush()
+
+        product_id = str(product.id)
+        user_id_str = str(user_id)
+        try:
+            mask_stream, mask_filename, mask_content_type, mask_size_bytes = (
+                await ProductService._download_remote_mask_image(mask_image_url)
+            )
+            mask_stream.seek(0)
+            mask_cdn_url, mask_blob_url = storage_service.upload_product_image(
+                user_id=user_id_str,
+                product_id=product_id,
+                filename=mask_filename,
+                content_type=mask_content_type,
+                stream=mask_stream,
+            )
+            logger.info("Remote mask copied to Azure: source=%s blob=%s", mask_image_url, mask_blob_url)
+        except Exception as exc:
+            logger.exception("Failed to copy remote mask image to Azure")
+            await db.rollback()
+            raise RuntimeError("Failed to store mask image in Azure storage") from exc
+
+        try:
+            product_asset = ProductAsset(
+                asset_id=1,
+                image=image_url,
+                created_by=user_id,
+            )
+            db.add(product_asset)
+            await db.flush()
+            await db.refresh(product_asset)
+
+            db.add(
+                ProductAssetMapping(
+                    name=name,
+                    productid=product.id,
+                    product_asset_id=product_asset.id,
+                    isactive=True,
+                    created_by=user_id,
+                )
+            )
+
+            mask_asset = ProductAsset(
+                asset_id=mask_asset_id,
+                image=mask_blob_url,
+                size_bytes=mask_size_bytes,
+                created_by=user_id,
+            )
+            db.add(mask_asset)
+            await db.flush()
+            await db.refresh(mask_asset)
+
+            db.add(
+                ProductAssetMapping(
+                    name=f"{name} mask",
+                    productid=product.id,
+                    product_asset_id=mask_asset.id,
+                    isactive=True,
+                    created_by=user_id,
+                )
+            )
+        except Exception as exc:
+            logger.exception("Failed to create product asset records from URLs")
+            await db.rollback()
+            raise RuntimeError("Failed to create asset entries") from exc
+
+        product.status = ProductStatus.DRAFT
+        logger.info("Product %s committed as DRAFT pending 3D readiness probe", product.id)
+        await db.commit()
+
+        gpu_status = await gpu_status_service.get_status(
+            db=db,
+            touch_activation=True,
+        )
+
+        try:
+            await db.refresh(product)
+        except Exception:
+            pass
+
+        logger.info("Scheduling background 3D generation for product %s", product.id)
+        background_tasks.add_task(
+            ProductService._run_3d_generation_background,
+            user_id=user_id,
+            product_id=product.id,
+            asset_id=asset_id,
+            mesh_asset_id=mesh_asset_id,
+            name=name,
+            target_format=target_format,
+            blob_url=image_url,
+            mask_blob_url=mask_blob_url,
+            quality=quality,
+            with_mesh_postprocess=with_mesh_postprocess,
+            with_texture_baking=with_texture_baking,
+            use_vertex_color=use_vertex_color,
+            simplify=simplify,
+            fill_holes=fill_holes,
+            texture_size=texture_size,
+        )
+
+        return product, image_url, mask_cdn_url, None, gpu_status
 
     @staticmethod
     async def generate_3d_and_finalize(
@@ -555,6 +746,91 @@ class ProductService:
             raise RuntimeError("Failed to create Background record") from e
 
         return next_id, cdn_url
+
+    @staticmethod
+    async def upload_original_product_image(
+        db: AsyncSession,
+        product_id: uuid.UUID,
+        user_id: uuid.UUID,
+        image_stream: BinaryIO,
+        image_filename: str,
+        image_content_type: Optional[str] = None,
+        image_size_bytes: Optional[int] = None,
+    ) -> str:
+        """Upload or replace the product's original image asset (asset_id = 1)."""
+        logger = logging.getLogger(__name__)
+
+        product = await db.get(Product, product_id)
+        if not product or product.created_by != user_id:
+            raise ValueError("Product not found")
+
+        try:
+            image_stream.seek(0)
+            cdn_url, blob_url = storage_service.upload_product_image(
+                user_id=str(user_id),
+                product_id=str(product_id),
+                filename=image_filename,
+                content_type=image_content_type,
+                stream=image_stream,
+            )
+            logger.info("Original product image uploaded: product=%s cdn=%s", product_id, cdn_url)
+        except Exception as exc:
+            logger.exception("Original product image upload failed for product %s", product_id)
+            raise RuntimeError("Failed to upload original product image") from exc
+
+        try:
+            stmt = (
+                select(ProductAsset, ProductAssetMapping)
+                .join(ProductAssetMapping, ProductAsset.id == ProductAssetMapping.product_asset_id)
+                .where(ProductAssetMapping.productid == product_id)
+                .where(ProductAssetMapping.isactive == True)
+                .where(ProductAsset.asset_id == 1)
+                .order_by(ProductAssetMapping.created_date.desc())
+            )
+            rows = (await db.execute(stmt)).all()
+
+            if rows:
+                primary_asset, primary_mapping = rows[0]
+                primary_asset.image = blob_url
+                primary_asset.size_bytes = image_size_bytes
+                primary_asset.updated_by = user_id
+                primary_asset.updated_date = datetime.utcnow()
+                primary_mapping.updated_by = user_id
+                primary_mapping.updated_date = datetime.utcnow()
+
+                for duplicate_asset, duplicate_mapping in rows[1:]:
+                    duplicate_mapping.isactive = False
+                    duplicate_mapping.updated_by = user_id
+                    duplicate_mapping.updated_date = datetime.utcnow()
+            else:
+                primary_asset = ProductAsset(
+                    asset_id=1,
+                    image=blob_url,
+                    size_bytes=image_size_bytes,
+                    created_by=user_id,
+                )
+                db.add(primary_asset)
+                await db.flush()
+
+                db.add(
+                    ProductAssetMapping(
+                        name=product.name,
+                        productid=product.id,
+                        product_asset_id=primary_asset.id,
+                        isactive=True,
+                        created_by=user_id,
+                    )
+                )
+
+            product.updated_by = user_id
+            product.updated_date = datetime.utcnow()
+            await db.commit()
+        except Exception as exc:
+            logger.exception("Failed to save original image asset for product %s", product_id)
+            await db.rollback()
+            raise RuntimeError("Failed to save original product image") from exc
+
+        return cdn_url
 
     @staticmethod
     async def update_product_background_color(

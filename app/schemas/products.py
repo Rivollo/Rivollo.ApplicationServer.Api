@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, HttpUrl
 from typing import List, Optional
 
 
@@ -25,6 +25,24 @@ class ProductCreate(ProductBase):
     """Product creation request."""
 
     pass
+
+
+class ProductCreateWithImageUrls(BaseModel):
+    """Create a product from already-uploaded original and mask image URLs."""
+
+    userId: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1, max_length=200)
+    imageURL: HttpUrl
+    maskImageURL: HttpUrl
+    target_format: str = "glb"
+    mesh_asset_id: int = 9
+    quality: Optional[str] = None
+    with_mesh_postprocess: Optional[bool] = None
+    with_texture_baking: Optional[bool] = None
+    use_vertex_color: Optional[bool] = None
+    simplify: Optional[float] = None
+    fill_holes: Optional[bool] = None
+    texture_size: Optional[int] = None
 
 
 class ProductUpdate(BaseModel):
@@ -129,8 +147,16 @@ class ProductImageItem(BaseModel):
     type: str
 
 
+class ProductOriginalImageUploadResponse(BaseModel):
+    """Response after uploading or replacing a product's original image."""
+
+    product_id: str
+    asset_id: int
+    image_url: str
+
+
 class ProductMeshItem(BaseModel):
-    """Mesh / 3D asset item in product assets response (assetid = 2)."""
+    """Mesh / 3D asset item in product assets response (assetid = 9)."""
 
     asset_id: int
     url: str
@@ -166,6 +192,7 @@ class ProductAssetsData(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
     mesh: list["ProductMeshItem"] = Field(default_factory=list)
+    masks: list[ProductImageItem] = Field(default_factory=list)
     images: list[ProductImageItem] = Field(default_factory=list)
     background: Optional[dict] = None  # Background data with type
     links: Optional[list[dict]] = None  # Product links

@@ -188,6 +188,8 @@ class Settings(BaseSettings):
 	OPENAI_MAX_RETRIES: int = Field(default=3)
 	# Per-request HTTP timeout in seconds (applies to each attempt, not the total)
 	OPENAI_TIMEOUT_SECONDS: int = Field(default=30)
+	# fal.ai API key for server-side model calls such as SAM2 image segmentation.
+	FAL_KEY: str = Field(default="")
 	# Input length caps
 	AI_USER_PROMPT_MAX_CHARS: int = Field(default=500)
 	AI_USER_INPUT_NAME_MAX_CHARS: int = Field(default=100)
