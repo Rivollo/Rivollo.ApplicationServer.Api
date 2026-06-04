@@ -50,8 +50,10 @@ from app.schemas.products import (
     ProductAssetsResponse,
     ProductMeshItem,
     ProductCreate,
+    ProductCreateWithImageUrls,
     ProductDetailsUpdate,
     ProductImageItem,
+    ProductOriginalImageUploadResponse,
     ProductLinkCreate,
     ProductLinkResponse,
     ProductLinksResponse,
@@ -293,35 +295,22 @@ async def create_product(
 
 @router.post("/createProduct", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_product_with_image(
+    payload: ProductCreateWithImageUrls,
     request: Request,
     db: DB,
     background_tasks: BackgroundTasks,
-    userId: str = Form(..., description="User ID creating the product"),
-    name: str = Form(..., min_length=1, max_length=200, description="Product name"),
-    target_format: str = Form("glb", description="Target format for external API (e.g., glb, obj)"),
-    asset_id: int = Form(9, description="Asset ID (integer)"),
-    mesh_asset_id: int = Form(2, description="Mesh asset ID for generated output (integer)"),
-    quality: Optional[str] = Form(None, description="3D generation quality preset: fast, high, or max"),
-    with_mesh_postprocess: Optional[bool] = Form(None, description="Override mesh post-processing"),
-    with_texture_baking: Optional[bool] = Form(None, description="Override texture baking"),
-    use_vertex_color: Optional[bool] = Form(None, description="Override vertex color usage"),
-    simplify: Optional[float] = Form(None, description="Override mesh simplification amount"),
-    fill_holes: Optional[bool] = Form(None, description="Override hole filling"),
-    texture_size: Optional[int] = Form(None, description="Override generated texture size"),
-    image: UploadFile = File(..., description="Image file to upload (JPG, PNG, WEBP, GIF)"),
-    mask: UploadFile = File(...),  # 👈 NEW PARAME
 ):
-    """Create a new product with an image file upload (authentication disabled for testing)."""
+    """Create a new product from existing original and mask image URLs."""
     # Validate user ID
     try:
-        user_uuid = uuid.UUID(userId)
+        user_uuid = uuid.UUID(payload.userId)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid userId format. Expected UUID string.",
         )
 
-    if quality not in {None, "fast", "high", "max"}:
+    if payload.quality not in {None, "fast", "high", "max"}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid quality. Allowed values: fast, high, max.",
@@ -343,88 +332,26 @@ async def create_product_with_image(
             ),
         )
 
-  
-
-    # Validate file type
-    if not image.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Image file is required",
-        )
-
-    # Validate image file extension
-    allowed_extensions = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-    file_ext = None
-    for ext in allowed_extensions:
-        if image.filename.lower().endswith(ext):
-            file_ext = ext
-            break
-    
-    if not file_ext:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid image format. Allowed formats: {', '.join(allowed_extensions)}",
-        )
-
-    # Read image file
+    # Use ProductService to create product from already-uploaded image URLs.
     try:
-        image_bytes = await image.read()
-        content_type = image.content_type or f"image/{file_ext[1:]}"
-        filename = image.filename or f"product-image{file_ext}"
-        image_stream = io.BytesIO(image_bytes)
-        image_size_bytes = len(image_bytes)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to read image file: {str(e)}",
-        )
-
-    # -------------------------------
-    # Read mask file
-    # -------------------------------
-    if not mask.filename:
-        raise HTTPException(
-            status_code=400,
-            detail="Mask image file is required"
-        )
-
-    try:
-        mask_bytes = await mask.read()
-        mask_content_type = mask.content_type or "image/png"
-        mask_filename = mask.filename
-        mask_stream = io.BytesIO(mask_bytes)
-        mask_size_bytes = len(mask_bytes)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to read mask file: {str(e)}"
-        )
-
-    # Use ProductService to create product and upload image
-    try:
-        product, image_url, mask_image_url, glb_url, gpu_status = await product_service.create_product_with_image(
+        product, image_url, mask_image_url, glb_url, gpu_status = await product_service.create_product_with_image_urls(
             db=db,
             background_tasks=background_tasks,
             user_id=user_uuid,
-            name=name,
-            asset_id=asset_id,
-            mesh_asset_id=mesh_asset_id,
-            target_format=target_format,
-            image_stream=image_stream,
-            image_filename=filename,
-            image_content_type=content_type,
-            image_size_bytes=image_size_bytes,
-            mask_stream=mask_stream,
-            mask_filename=mask_filename,
-            mask_content_type=mask_content_type,
-            mask_size_bytes=mask_size_bytes,
-            quality=quality,
-            with_mesh_postprocess=with_mesh_postprocess,
-            with_texture_baking=with_texture_baking,
-            use_vertex_color=use_vertex_color,
-            simplify=simplify,
-            fill_holes=fill_holes,
-            texture_size=texture_size,
+            name=payload.name,
+            asset_id=1,
+            mask_asset_id=2,
+            mesh_asset_id=payload.mesh_asset_id,
+            target_format=payload.target_format,
+            image_url=str(payload.imageURL),
+            mask_image_url=str(payload.maskImageURL),
+            quality=payload.quality,
+            with_mesh_postprocess=payload.with_mesh_postprocess,
+            with_texture_baking=payload.with_texture_baking,
+            use_vertex_color=payload.use_vertex_color,
+            simplify=payload.simplify,
+            fill_holes=payload.fill_holes,
+            texture_size=payload.texture_size,
         )
 
         # Deduct AI credits after successful generation.
@@ -471,6 +398,7 @@ async def create_product_with_image(
 
     response_dict = response_data.model_dump(exclude_none=True)
     response_dict["imageURL"] = image_url
+    response_dict["maskImageURL"] = mask_image_url
     response_dict["gpu"] = gpu_status
     if glb_url:
         # PRO users: 3D generation ran synchronously, GLB is ready now
@@ -488,6 +416,82 @@ async def remove_background(
     """Upload an image, remove its background, store blob + DB rows, and return URLs. No auth required."""
     result = await background_removal_service.process(db=db, file=file, product_id=product_id)
     return api_success(result)
+
+
+@router.put("/products/{product_id}/original-image", response_model=dict)
+async def upload_product_original_image(
+    product_id: str,
+    current_user: CurrentUser,
+    request: Request,
+    db: DB,
+    image: UploadFile = File(..., description="Original product image file"),
+):
+    """Upload or replace the original image for an existing product."""
+    try:
+        product_uuid = uuid.UUID(product_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found",
+        )
+
+    if not image.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Image file is required",
+        )
+
+    allowed_extensions = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+    file_ext = os.path.splitext(image.filename)[1].lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid image format. Allowed formats: {', '.join(sorted(allowed_extensions))}",
+        )
+
+    try:
+        image_bytes = await image.read()
+        image_stream = io.BytesIO(image_bytes)
+        image_url = await product_service.upload_original_product_image(
+            db=db,
+            product_id=product_uuid,
+            user_id=current_user.id,
+            image_stream=image_stream,
+            image_filename=f"original{file_ext}",
+            image_content_type=image.content_type or f"image/{file_ext[1:]}",
+            image_size_bytes=len(image_bytes),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload original product image: {str(exc)}",
+        )
+
+    await ActivityService.log_product_action(
+        db=db,
+        action="product.original_image.updated",
+        user_id=current_user.id,
+        product_id=product_uuid,
+        request=request,
+    )
+    await db.commit()
+
+    response = ProductOriginalImageUploadResponse(
+        product_id=str(product_uuid),
+        asset_id=1,
+        image_url=image_url,
+    )
+    return api_success(response.model_dump())
 
 
 @router.get("/products/hotspottypes", response_model=dict)
@@ -653,7 +657,7 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
             detail="Product not found.",
         )
 
-    # Single query for both mesh (assetid=2) and image (assetid=1) assets
+    # Single query for image (assetid=1), mask (assetid=2), and mesh (assetid=9) assets
     assets_stmt = (
         select(
             ProductAsset.asset_id,
@@ -665,7 +669,7 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
         .join(AssetStatic, ProductAsset.asset_id == AssetStatic.id)
         .where(ProductAssetMapping.productid == str(product_uuid))
         .where(ProductAssetMapping.isactive == True)
-        .where(AssetStatic.assetid.in_([1, 2]))
+        .where(AssetStatic.assetid.in_([1, 2, 9]))
         .order_by(ProductAssetMapping.created_date.desc())
     )
     assets_result = await db.execute(assets_stmt)
@@ -673,10 +677,13 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
 
     mesh_urls: set[str] = set()
     mesh = []
+    masks = []
     for row in all_asset_rows:
-        if row.assetid == 2:
+        if row.assetid == 9:
             mesh.append(ProductMeshItem(asset_id=row.asset_id, url=row.image))
             mesh_urls.add(row.image)
+        elif row.assetid == 2:
+            masks.append(ProductImageItem(asset_id=row.asset_id, url=row.image, type=row.asset_name))
 
     # Deduplicate: exclude image entries whose URL already exists in mesh.
     # Guards against corrupted mappings where mesh URLs were stored under image asset_ids.
@@ -793,6 +800,7 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
         created_at=product.created_at,
         updated_at=product.updated_at,
         mesh=mesh,
+        masks=masks,
         images=images,
         background=background_data,
         links=links_data,

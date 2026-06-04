@@ -39,7 +39,8 @@ dependencies = [
 	"rembg>=2.0,<3",
 	"pillow>=10.0,<12",
 	"tenacity>=8.2,<9",
-	"firebase-admin>=6.5,<7"
+	"firebase-admin>=6.5,<7",
+	"fal-client>=0.5,<1"
 ]
 
 [project.optional-dependencies]
