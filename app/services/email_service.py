@@ -1,6 +1,6 @@
-"""Email service using SendGrid API v3.
+"""Email service using Resend API.
 
-Gracefully skips sending if SENDGRID_API_KEY is not configured.
+Gracefully skips sending if RESEND_API_KEY is not configured.
 """
 
 import logging
@@ -13,45 +13,48 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_SENDGRID_URL = settings.SENDGRID_URL
+_RESEND_URL = "https://api.resend.com/emails"
 
 
 async def _send(to_email: str, to_name: str, subject: str, html_body: str) -> None:
-    """Send an email via SendGrid."""
-    if not settings.SENDGRID_API_KEY:
-        raise RuntimeError("SENDGRID_API_KEY is not configured.")
+    """Send an email via Resend."""
+    if not settings.RESEND_API_KEY:
+        raise RuntimeError("RESEND_API_KEY is not configured.")
 
     payload = {
-        "personalizations": [{"to": [{"email": to_email, "name": to_name}]}],
-        "from": {"email": settings.SENDGRID_FROM_EMAIL, "name": settings.SENDGRID_FROM_NAME},
+        "from": f"{settings.RESEND_FROM_NAME} <{settings.RESEND_FROM_EMAIL}>",
+        "to": [to_email],
         "subject": subject,
-        "content": [{"type": "text/html", "value": html_body}],
+        "html": html_body,
     }
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
-                _SENDGRID_URL,
+                _RESEND_URL,
                 json=payload,
-                headers={"Authorization": f"Bearer {settings.SENDGRID_API_KEY}"},
+                headers={
+                    "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+                    "Content-Type": "application/json",
+                },
             )
     except httpx.TimeoutException:
-        logger.error("SendGrid timeout | to: %s | subject: %s", to_email, subject)
+        logger.error("Resend timeout | to: %s | subject: %s", to_email, subject)
         raise RuntimeError("Failed to send email: request timed out.")
     except httpx.RequestError as exc:
-        logger.error("SendGrid network error | to: %s | subject: %s | error: %s", to_email, subject, exc)
+        logger.error("Resend network error | to: %s | subject: %s | error: %s", to_email, subject, exc)
         raise RuntimeError(f"Failed to send email: network error — {exc}")
 
-    if resp.status_code not in (200, 202):
+    if resp.status_code != 200:
         try:
             error_detail = resp.json()
         except Exception:
             error_detail = resp.text
         logger.error(
-            "SendGrid error | to: %s | subject: %s | status: %s | detail: %s",
+            "Resend error | to: %s | subject: %s | status: %s | detail: %s",
             to_email, subject, resp.status_code, error_detail,
         )
-        raise RuntimeError(f"SendGrid error (status {resp.status_code}): {error_detail}")
+        raise RuntimeError(f"Resend error (status {resp.status_code}): {error_detail}")
 
     logger.info("Email sent | to: %s | subject: %s", to_email, subject)
 
@@ -61,14 +64,14 @@ class EmailService:
     @staticmethod
     async def send_otp_email(to_email: str, name: str, otp: str, expires_minutes: int) -> None:
         """Send the password reset OTP email."""
-        subject = f"{settings.SENDGRID_FROM_NAME} — Your Password Reset OTP"
+        subject = f"{settings.RESEND_FROM_NAME} — Your Password Reset OTP"
         html_body = _otp_template(name=name, otp=otp, expires_minutes=expires_minutes)
         await _send(to_email=to_email, to_name=name, subject=subject, html_body=html_body)
 
     @staticmethod
     async def send_password_reset_success_email(to_email: str, name: str) -> None:
         """Send a confirmation email after a successful password reset."""
-        subject = f"{settings.SENDGRID_FROM_NAME} — Password Reset Successful"
+        subject = f"{settings.RESEND_FROM_NAME} — Password Reset Successful"
         html_body = _reset_success_template(name=name, frontend_url=settings.FRONTEND_URL)
         await _send(to_email=to_email, to_name=name, subject=subject, html_body=html_body)
 
@@ -84,14 +87,14 @@ class EmailService:
     @staticmethod
     async def send_welcome_email(to_email: str, name: str) -> None:
         """Send a welcome email after successful account creation."""
-        subject = f"Welcome to {settings.SENDGRID_FROM_NAME}!"
+        subject = f"Welcome to {settings.RESEND_FROM_NAME}!"
         html_body = _welcome_template(name=name, frontend_url=settings.FRONTEND_URL)
         await _send(to_email=to_email, to_name=name, subject=subject, html_body=html_body)
 
     @staticmethod
     async def send_signup_verification_otp(to_email: str, otp: str, expires_minutes: int) -> None:
         """Send the signup email verification OTP."""
-        subject = f"{settings.SENDGRID_FROM_NAME} — Verify Your Email"
+        subject = f"{settings.RESEND_FROM_NAME} — Verify Your Email"
         html_body = _signup_otp_template(otp=otp, expires_minutes=expires_minutes)
         await _send(to_email=to_email, to_name=to_email, subject=subject, html_body=html_body)
 
@@ -167,8 +170,8 @@ def _footer(from_name: str) -> str:
 
 
 def _otp_template(name: str, otp: str, expires_minutes: int) -> str:
-    banner = _banner_header(settings.SENDGRID_FROM_NAME)
-    footer = _footer(settings.SENDGRID_FROM_NAME)
+    banner = _banner_header(settings.RESEND_FROM_NAME)
+    footer = _footer(settings.RESEND_FROM_NAME)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -201,7 +204,7 @@ def _otp_template(name: str, otp: str, expires_minutes: int) -> str:
                 Hi <strong>{name}</strong>,
               </p>
               <p style="margin:0 0 28px;font-size:14px;color:#666666;line-height:1.8;">
-                We received a request to reset the password for your {settings.SENDGRID_FROM_NAME} account.
+                We received a request to reset the password for your {settings.RESEND_FROM_NAME} account.
                 Use the one-time code below to continue. For your security, this code expires in
                 <strong style="color:#3a5bd9;">{expires_minutes} minutes</strong>.
               </p>
@@ -229,7 +232,7 @@ def _otp_template(name: str, otp: str, expires_minutes: int) -> str:
                   <td style="background-color:#fff8e6;border-left:3px solid #f59e0b;border-radius:4px;padding:12px 16px;">
                     <p style="margin:0;font-size:13px;color:#92400e;line-height:1.6;">
                       <strong>Security tip:</strong> Never share this code with anyone.
-                      {settings.SENDGRID_FROM_NAME} will never ask for your OTP via phone or chat.
+                      {settings.RESEND_FROM_NAME} will never ask for your OTP via phone or chat.
                     </p>
                   </td>
                 </tr>
@@ -262,8 +265,8 @@ def _otp_template(name: str, otp: str, expires_minutes: int) -> str:
 
 
 def _reset_success_template(name: str, frontend_url: str) -> str:
-    banner = _banner_header(settings.SENDGRID_FROM_NAME)
-    footer = _footer(settings.SENDGRID_FROM_NAME)
+    banner = _banner_header(settings.RESEND_FROM_NAME)
+    footer = _footer(settings.RESEND_FROM_NAME)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -312,7 +315,7 @@ def _reset_success_template(name: str, frontend_url: str) -> str:
               </table>
 
               <p style="margin:0 0 8px;font-size:14px;color:#555555;line-height:1.8;text-align:center;">
-                Your {settings.SENDGRID_FROM_NAME} password has been reset successfully.
+                Your {settings.RESEND_FROM_NAME} password has been reset successfully.
               </p>
               <p style="margin:0 0 28px;font-size:14px;color:#555555;line-height:1.8;text-align:center;">
                 You can now sign in with your new credentials.
@@ -327,7 +330,7 @@ def _reset_success_template(name: str, frontend_url: str) -> str:
                         <td style="background:linear-gradient(135deg,#3a5bd9,#1a1a4e);border-radius:30px;">
                           <a href="{frontend_url}/login"
                              style="display:inline-block;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;padding:13px 40px;border-radius:30px;font-family:Arial,sans-serif;letter-spacing:0.3px;">
-                            Sign In to {settings.SENDGRID_FROM_NAME} &rarr;
+                            Sign In to {settings.RESEND_FROM_NAME} &rarr;
                           </a>
                         </td>
                       </tr>
@@ -364,8 +367,8 @@ def _reset_success_template(name: str, frontend_url: str) -> str:
 
 
 def _signup_otp_template(otp: str, expires_minutes: int) -> str:
-    banner = _banner_header(settings.SENDGRID_FROM_NAME)
-    footer = _footer(settings.SENDGRID_FROM_NAME)
+    banner = _banner_header(settings.RESEND_FROM_NAME)
+    footer = _footer(settings.RESEND_FROM_NAME)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -423,7 +426,7 @@ def _signup_otp_template(otp: str, expires_minutes: int) -> str:
                   <td style="background-color:#fff8e6;border-left:3px solid #f59e0b;border-radius:4px;padding:12px 16px;">
                     <p style="margin:0;font-size:13px;color:#92400e;line-height:1.6;">
                       <strong>Security tip:</strong> Never share this code with anyone.
-                      {settings.SENDGRID_FROM_NAME} will never ask for your OTP via phone or chat.
+                      {settings.RESEND_FROM_NAME} will never ask for your OTP via phone or chat.
                     </p>
                   </td>
                 </tr>
@@ -455,21 +458,21 @@ def _signup_otp_template(otp: str, expires_minutes: int) -> str:
 
 
 def _welcome_template(name: str, frontend_url: str) -> str:
-    banner = _banner_header(settings.SENDGRID_FROM_NAME)
-    footer = _footer(settings.SENDGRID_FROM_NAME)
+    banner = _banner_header(settings.RESEND_FROM_NAME)
+    footer = _footer(settings.RESEND_FROM_NAME)
     font_stack = "-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Welcome to {settings.SENDGRID_FROM_NAME}</title>
+  <title>Welcome to {settings.RESEND_FROM_NAME}</title>
 </head>
 <body style="margin:0;padding:0;background-color:#f0f2f8;font-family:{font_stack};">
 
   <!-- Preheader text (hidden, shows in inbox preview) -->
   <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;color:#f0f2f8;line-height:1px;">
-    Your {settings.SENDGRID_FROM_NAME} account is ready — start building your product catalogue today.&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;
+    Your {settings.RESEND_FROM_NAME} account is ready — start building your product catalogue today.&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;
   </div>
 
   <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f2f8;padding:40px 0;">
@@ -483,7 +486,7 @@ def _welcome_template(name: str, frontend_url: str) -> str:
           <tr>
             <td style="background:linear-gradient(180deg,#eef1fc 0%,#ffffff 100%);padding:40px 40px 30px;text-align:center;">
               <p style="margin:0 0 8px;font-size:11px;letter-spacing:2.5px;color:#3a5bd9;text-transform:uppercase;font-weight:600;">
-                Welcome to {settings.SENDGRID_FROM_NAME}
+                Welcome to {settings.RESEND_FROM_NAME}
               </p>
               <p style="margin:0 0 14px;font-size:26px;color:#1a1a4e;font-weight:700;line-height:1.3;">
                 Hello, {name} — glad to have you.
@@ -507,7 +510,7 @@ def _welcome_template(name: str, frontend_url: str) -> str:
           <tr>
             <td style="padding:28px 40px 8px;">
               <p style="margin:0 0 20px;font-size:13px;color:#1a1a4e;font-weight:700;text-transform:uppercase;letter-spacing:1px;">
-                What you can do with {settings.SENDGRID_FROM_NAME}
+                What you can do with {settings.RESEND_FROM_NAME}
               </p>
 
               <!-- Feature 1 -->
@@ -593,7 +596,7 @@ def _welcome_template(name: str, frontend_url: str) -> str:
           <tr>
             <td style="padding:20px 40px 28px;text-align:center;">
               <p style="margin:0 0 6px;font-size:12px;color:#aaaaaa;line-height:1.8;">
-                You received this email because you signed up for {settings.SENDGRID_FROM_NAME}.
+                You received this email because you signed up for {settings.RESEND_FROM_NAME}.
                 <a href="{frontend_url}/unsubscribe" style="color:#aaaaaa;text-decoration:underline;">Unsubscribe</a>
               </p>
             </td>
@@ -611,8 +614,8 @@ def _welcome_template(name: str, frontend_url: str) -> str:
 
 
 def _support_contact_template(fullname: str, comment: Optional[str], user_email: str) -> str:
-    banner = _banner_header(settings.SENDGRID_FROM_NAME)
-    footer = _footer(settings.SENDGRID_FROM_NAME)
+    banner = _banner_header(settings.RESEND_FROM_NAME)
+    footer = _footer(settings.RESEND_FROM_NAME)
     comment_html = comment.replace("\n", "<br/>") if comment else "<em style='color:#999999;'>No message provided.</em>"
     return f"""<!DOCTYPE html>
 <html lang="en">

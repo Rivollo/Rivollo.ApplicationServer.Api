@@ -47,11 +47,10 @@ class Settings(BaseSettings):
 	SIGNUP_OTP_EXPIRES_MINUTES: int = Field(default=10)
 	SIGNUP_TOKEN_EXPIRES_MINUTES: int = Field(default=15)
 
-	# SendGrid email
-	SENDGRID_API_KEY: str = Field(default="")
-	SENDGRID_FROM_EMAIL: str = Field(default="noreply@rivollomail.com")
-	SENDGRID_FROM_NAME: str = Field(default="Rivollo")
-	SENDGRID_URL: str = Field(default="https://api.sendgrid.com/v3/mail/send")
+	# Resend email
+	RESEND_API_KEY: str = Field(default="")
+	RESEND_FROM_EMAIL: str = Field(default="noreply@rivollomail.com")
+	RESEND_FROM_NAME: str = Field(default="Rivollo")
 	SUPPORT_EMAIL: str = Field(default="")
 
 	# Frontend base URL (used in email links)
