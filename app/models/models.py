@@ -142,7 +142,7 @@ class Organization(UUIDMixin, TimestampMixin, Base):
     assets: Mapped[list["Asset"]] = relationship("Asset", back_populates="organization")
 
 
-class User(UUIDMixin, CreatedAtMixin, AuditMixin, Base):
+class User(UUIDMixin, CreatedAtMixin, AuditMixin, SoftDeleteMixin, Base):
     """User model - has BOTH created_at AND audit fields (created_date, etc.)"""
     __tablename__ = "tbl_users"
 
@@ -151,9 +151,6 @@ class User(UUIDMixin, CreatedAtMixin, AuditMixin, Base):
     name: Mapped[Optional[str]] = mapped_column(Text)
     avatar_url: Mapped[Optional[str]] = mapped_column(Text)
     bio: Mapped[Optional[str]] = mapped_column(Text)
-
-    # Virtual column - users table doesn't have deleted_at in database
-    deleted_at = column_property(literal_column("NULL::timestamptz"))
 
     # Property for backward compatibility
     @property
@@ -212,7 +209,7 @@ class Asset(UUIDMixin, AuditMixin, Base):
     organization: Mapped[Organization] = relationship("Organization", back_populates="assets")
 
 
-class Product(UUIDMixin, TimestampMixin, Base):
+class Product(UUIDMixin, TimestampMixin, SoftDeleteMixin, Base):
     __tablename__ = "tbl_products"
     __table_args__ = ()
 
@@ -240,8 +237,7 @@ class Product(UUIDMixin, TimestampMixin, Base):
     currency_type: Mapped[Optional[int]] = mapped_column(Integer)  # Currency type ID (integer)
     background_type: Mapped[Optional[int]] = mapped_column(Integer)  # Background ID (integer)
     # created_by, updated_by from TimestampMixin -> AuditMixin
-    # Virtual column - products table doesn't have deleted_at in database
-    deleted_at = column_property(literal_column("NULL::timestamptz"))
+    # deleted_at comes from SoftDeleteMixin (real DB column)
 
     # No organization relationship without org_id FK
     configurator: Mapped[Optional["Configurator"]] = relationship(
