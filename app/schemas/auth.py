@@ -157,6 +157,9 @@ class UserResponse(BaseModel):
     bio: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
+    # "email" for email/password accounts, "google" for Google OAuth accounts.
+    # Frontend uses this to decide which delete-account confirmation to show.
+    auth_provider: str = "email"
 
     class Config:
         from_attributes = True
