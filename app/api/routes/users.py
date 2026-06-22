@@ -19,6 +19,7 @@ async def get_current_user_endpoint(current_user: CurrentUser):
         bio=current_user.bio,
         created_at=current_user.created_at,
         updated_at=current_user.updated_at,
+        auth_provider="email" if current_user.password_hash else "google",
     )
     return api_success(user_data.model_dump())
 
@@ -52,6 +53,7 @@ async def update_current_user_endpoint(
         bio=current_user.bio,
         created_at=current_user.created_at,
         updated_at=current_user.updated_at,
+        auth_provider="email" if current_user.password_hash else "google",
     )
     return api_success(user_data.model_dump())
 
