@@ -4,6 +4,7 @@ import io
 import os
 import uuid
 from typing import BinaryIO, Optional
+from urllib.parse import urlparse
 
 import httpx
 import logging
@@ -12,10 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, insert
 from datetime import datetime
 
+from app.core.config import settings
 from app.models.models import Product, ProductAsset, ProductAssetMapping, ProductStatus, Background
 from app.services.storage import storage_service
 from app.services.gpu_status_service import gpu_status_service
 from app.integrations.threed_model_client import threed_model_client
+from app.integrations.fal_tripo_client import fal_tripo_client
 from app.integrations.service_bus_publisher import ServiceBusPublisher
 from app.database.products_repo import ProductRepository
 from app.database.subscription_repo import SubscriptionRepository
@@ -418,6 +421,86 @@ class ProductService:
         return product, image_url, mask_cdn_url, None, gpu_status
 
     @staticmethod
+    async def create_product_with_fal_image_urls(
+        db: AsyncSession,
+        background_tasks: BackgroundTasks,
+        user_id: uuid.UUID,
+        name: str,
+        asset_id: int,
+        mesh_asset_id: int,
+        image_url: str,
+    ) -> tuple[Product, str, Optional[str]]:
+        """Create a product from an uploaded image URL, generating 3D via fal.ai Tripo.
+
+        Shares the same internals as :meth:`create_product_with_image_urls`
+        (product record, original image asset, background 3D generation) but fal
+        needs only the image — there is no mask to download/store and none of the
+        SAM tuning options or GPU-warmth probe apply.
+
+        Returns ``(product, image_url, glb_url)``; ``glb_url`` is None because
+        generation runs in a background task.
+        """
+        logger = logging.getLogger(__name__)
+
+        base_slug = ProductService._slugify(name)
+        slug = await ProductService._generate_unique_slug(db, base_slug)
+
+        product = Product(
+            name=name,
+            slug=slug,
+            status=ProductStatus.DRAFT,
+            created_by=user_id,
+        )
+
+        db.add(product)
+        await db.flush()
+
+        try:
+            product_asset = ProductAsset(
+                asset_id=1,
+                image=image_url,
+                created_by=user_id,
+            )
+            db.add(product_asset)
+            await db.flush()
+            await db.refresh(product_asset)
+
+            db.add(
+                ProductAssetMapping(
+                    name=name,
+                    productid=product.id,
+                    product_asset_id=product_asset.id,
+                    isactive=True,
+                    created_by=user_id,
+                )
+            )
+        except Exception as exc:
+            logger.exception("Failed to create product asset records from URL")
+            await db.rollback()
+            raise RuntimeError("Failed to create asset entries") from exc
+
+        product.status = ProductStatus.DRAFT
+        logger.info("Product %s committed as DRAFT pending fal 3D generation", product.id)
+        await db.commit()
+
+        try:
+            await db.refresh(product)
+        except Exception:
+            pass
+
+        logger.info("Scheduling background fal 3D generation for product %s", product.id)
+        background_tasks.add_task(
+            ProductService._run_fal_3d_generation_background,
+            user_id=user_id,
+            product_id=product.id,
+            mesh_asset_id=mesh_asset_id,
+            name=name,
+            blob_url=image_url,
+        )
+
+        return product, image_url, None
+
+    @staticmethod
     async def generate_3d_and_finalize(
         db: AsyncSession,
         user_id: uuid.UUID,
@@ -669,6 +752,218 @@ class ProductService:
                 )
         except Exception:
             logger.exception("Background 3D generation failed for product %s", product_id)
+
+    @staticmethod
+    async def generate_3d_and_finalize_fal(
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        product_id: uuid.UUID,
+        mesh_asset_id: int,
+        name: str,
+        blob_url: str,
+    ) -> str:
+        """
+        Generate a GLB via the fal.ai Tripo H3.1 API and persist it.
+
+        Mirrors :meth:`generate_3d_and_finalize`; the only difference is the
+        model-invocation step calls fal.ai instead of the SAM 3D service. fal
+        takes only the public image URL (no mask, no SAM tuning params), and the
+        GLB it returns is downloaded and re-uploaded to Azure so it lands in our
+        internal DB format identically to the SAM path.
+
+        Returns:
+            glb_url: The URL of the stored GLB file.
+        """
+        logger = logging.getLogger(__name__)
+
+        # 1. Mark product as PROCESSING so callers / UI can show in-progress state
+        product = await db.get(Product, product_id)
+        if not product:
+            raise RuntimeError(f"Product {product_id} not found")
+
+        product.status = ProductStatus.PROCESSING
+        await db.commit()
+        logger.info("Product %s status → PROCESSING (fal)", product_id)
+
+        # 2. Call the fal.ai Tripo API (submit → poll → result → download GLB).
+        #    The image must be a publicly reachable URL — pass the blob URL.
+        response = await fal_tripo_client.generate_3d(
+            product_id=product_id,
+            image_url=blob_url,
+        )
+
+        # Re-fetch in case the session state drifted during the long await
+        product = await db.get(Product, product_id)
+        if not product:
+            raise RuntimeError(f"Product {product_id} disappeared during 3D generation")
+
+        # 3. Handle failure
+        if not response.success:
+            error_msg = response.error or "Unknown error from fal.ai Tripo API"
+            logger.error(
+                "fal 3D generation failed for product %s (request_id=%s): %s",
+                product_id, response.request_id, error_msg,
+            )
+            product.status = ProductStatus.DRAFT
+            await db.commit()
+            raise RuntimeError(f"3D generation failed: {error_msg}")
+
+        if not response.glb_bytes:
+            logger.error(
+                "fal API succeeded but returned no GLB bytes for product %s (request_id=%s)",
+                product_id, response.request_id,
+            )
+            product.status = ProductStatus.DRAFT
+            await db.commit()
+            raise RuntimeError("3D generation succeeded but returned no GLB data")
+
+        # 3b. Re-upload the downloaded GLB to Azure so it lands in our storage
+        #     domain exactly like the SAM path's hosted glb_url.
+        try:
+            glb_stream = io.BytesIO(response.glb_bytes)
+            glb_stream.seek(0)
+            _glb_cdn_url, glb_blob_url = storage_service.upload_product_image(
+                user_id=str(user_id),
+                product_id=str(product_id),
+                filename="model.glb",
+                content_type=response.glb_content_type or "model/gltf-binary",
+                stream=glb_stream,
+            )
+            # This deployment's CDN_BASE_URL already includes the container
+            # segment (".../dev"), so storage_service._cdn_url doubles it to
+            # ".../dev/dev/...". Build the public URL from the blob path minus
+            # its container so the stored GLB URL matches the SAM path's format
+            # (single container segment).
+            _blob_relative = urlparse(glb_blob_url).path.lstrip("/").split("/", 1)
+            glb_url = "{}/{}".format(
+                settings.CDN_BASE_URL.rstrip("/"),
+                _blob_relative[1] if len(_blob_relative) > 1 else _blob_relative[0],
+            )
+            logger.info(
+                "fal GLB stored in Azure: product=%s  request_id=%s  blob=%s  url=%s",
+                product_id, response.request_id, glb_blob_url, glb_url,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to store fal GLB in Azure for product %s (request_id=%s)",
+                product_id, response.request_id,
+            )
+            product.status = ProductStatus.DRAFT
+            await db.commit()
+            raise RuntimeError("Failed to store generated GLB in Azure storage") from exc
+
+        # 4. Persist only the GLB asset + mapping
+        try:
+            glb_asset = ProductAsset(
+                asset_id=mesh_asset_id,
+                image=glb_url,
+                created_by=user_id,
+            )
+            db.add(glb_asset)
+            await db.flush()
+
+            glb_mapping = ProductAssetMapping(
+                name=name,
+                productid=product_id,
+                product_asset_id=glb_asset.id,
+                isactive=True,
+                created_by=user_id,
+            )
+            db.add(glb_mapping)
+
+            # 5. Mark as READY
+            product.status = ProductStatus.READY
+            await db.commit()
+            logger.info("Product %s → READY  glb_url=%s", product_id, glb_url)
+
+            try:
+                await NotificationService.create_and_push_notification(
+                    db=db,
+                    user_id=user_id,
+                    notification_type="product.ready",
+                    title="Product Ready",
+                    body=f"Your product '{name}' is ready.",
+                    data={
+                        "product_id": str(product_id),
+                        "product_name": name,
+                        "status": ProductStatus.READY.value,
+                        "glb_url": glb_url,
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to send product-ready notification for product %s",
+                    product_id,
+                    exc_info=True,
+                )
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            logger.exception("Failed to persist GLB asset for product %s", product_id)
+            await db.rollback()
+            try:
+                product = await db.get(Product, product_id)
+                if product:
+                    product.status = ProductStatus.DRAFT
+                    await db.commit()
+            except Exception:
+                pass
+            raise RuntimeError("Failed to save GLB asset to database") from exc
+
+        return glb_url
+
+    @staticmethod
+    async def _run_fal_3d_generation_background(
+        user_id: uuid.UUID,
+        product_id: uuid.UUID,
+        mesh_asset_id: int,
+        name: str,
+        blob_url: str,
+    ) -> None:
+        """Open a fresh DB session and run generate_3d_and_finalize_fal in the background.
+
+        Mirrors :meth:`_run_3d_generation_background`. fal.ai is a managed,
+        queue-based service, so there is no self-hosted GPU to warm up — the
+        SAM-VM readiness/warmth probe is intentionally omitted and fal's own
+        poll loop handles the wait. The QUEUE-status flip and WebSocket
+        broadcast are kept so the UI behaves identically.
+        """
+        from app.core.db import new_session
+        from app.api.websocket.broadcaster import broadcaster
+        logger = logging.getLogger(__name__)
+        try:
+            # Flip status to QUEUE immediately so the WebSocket and REST clients
+            # see that work has started (fires pg_notify to any connected browsers).
+            async with new_session() as db:
+                product = await db.get(Product, product_id)
+                if product:
+                    product.status = ProductStatus.QUEUE
+                    await db.commit()
+
+            product_id_str = str(product_id)
+
+            await broadcaster.broadcast_to_product(
+                product_id_str,
+                {
+                    "new_status": ProductStatus.QUEUE.value,
+                    "message": "Your 3D model generation is starting.",
+                },
+            )
+
+            async with new_session() as db:
+                await ProductService.generate_3d_and_finalize_fal(
+                    db=db,
+                    user_id=user_id,
+                    product_id=product_id,
+                    mesh_asset_id=mesh_asset_id,
+                    name=name,
+                    blob_url=blob_url,
+                )
+        except Exception:
+            logger.exception("Background fal 3D generation failed for product %s", product_id)
 
     @staticmethod
     async def update_product_background_image(
