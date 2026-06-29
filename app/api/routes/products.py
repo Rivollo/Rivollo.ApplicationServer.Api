@@ -51,6 +51,7 @@ from app.schemas.products import (
     ProductMeshItem,
     ProductCreate,
     ProductCreateWithImageUrls,
+    ProductCreateWithFalImage,
     ProductDetailsUpdate,
     ProductImageItem,
     ProductOriginalImageUploadResponse,
@@ -402,6 +403,114 @@ async def create_product_with_image(
     response_dict["gpu"] = gpu_status
     if glb_url:
         # PRO users: 3D generation ran synchronously, GLB is ready now
+        response_dict["glbURL"] = glb_url
+
+    return api_success(response_dict)
+
+
+@router.post("/createProductFal", response_model=dict, status_code=status.HTTP_201_CREATED)
+async def create_product_with_image_fal(
+    payload: ProductCreateWithFalImage,
+    request: Request,
+    db: DB,
+    background_tasks: BackgroundTasks,
+):
+    """Create a product from an uploaded image URL, generating 3D via fal.ai Tripo H3.1.
+
+    Shares the same internals as ``/createProduct`` (product record, original
+    image asset, GLB download + storage). fal needs only the image, so this
+    endpoint takes no mask and none of the SAM tuning options.
+    """
+    # Validate user ID
+    try:
+        user_uuid = uuid.UUID(payload.userId)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid userId format. Expected UUID string.",
+        )
+
+    # Only paid (Pro/Enterprise) users may generate products via fal.
+    plan_code = await LicensingService.get_user_plan_code(db, user_uuid)
+    if plan_code not in ("pro", "enterprise"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Creating products requires a Pro or Enterprise plan. Please subscribe to continue.",
+        )
+
+    # Product generation is limited by AI credits, not product count.
+    allowed, quota_info = await LicensingService.check_quota(
+        db,
+        user_uuid,
+        "ai_credits",
+        increment=PRODUCT_CREATION_AI_CREDIT_COST,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Not enough AI credits. {PRODUCT_CREATION_AI_CREDIT_COST} credits "
+                "are required to create a product."
+            ),
+        )
+
+    # Use ProductService to create the product from the uploaded image URL,
+    # generating the 3D model via fal.ai Tripo instead of SAM 3D.
+    try:
+        product, image_url, glb_url = await product_service.create_product_with_fal_image_urls(
+            db=db,
+            background_tasks=background_tasks,
+            user_id=user_uuid,
+            name=payload.name,
+            asset_id=1,
+            mesh_asset_id=payload.mesh_asset_id,
+            image_url=str(payload.imageURL),
+        )
+
+        # Deduct AI credits after successful generation.
+        await LicensingService.increment_usage(
+            db,
+            user_uuid,
+            "ai_credits",
+            increment=PRODUCT_CREATION_AI_CREDIT_COST,
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e),
+        )
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
+    # Refresh product to get the latest status set by the service layer.
+    await db.refresh(product)
+
+    response_data = ProductResponse(
+        id=str(product.id),
+        name=product.name,
+        description=None,
+        brand=None,
+        accent_color="#2563EB",
+        accent_overlay=None,
+        tags=[],
+        status=product.status.value,
+        created_at=product.created_at,
+        updated_at=product.updated_at,
+    )
+
+    response_dict = response_data.model_dump(exclude_none=True)
+    response_dict["imageURL"] = image_url
+    if glb_url:
+        # 3D generation ran synchronously, GLB is ready now
         response_dict["glbURL"] = glb_url
 
     return api_success(response_dict)

@@ -45,6 +45,21 @@ class ProductCreateWithImageUrls(BaseModel):
     texture_size: Optional[int] = None
 
 
+class ProductCreateWithFalImage(BaseModel):
+    """Create a product from an already-uploaded original image URL, generating
+    the 3D model via fal.ai Tripo H3.1.
+
+    fal only needs the original image (it has no mask concept and ignores the
+    SAM tuning options), so the request is intentionally smaller than
+    :class:`ProductCreateWithImageUrls`.
+    """
+
+    userId: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1, max_length=200)
+    imageURL: HttpUrl
+    mesh_asset_id: int = 9
+
+
 class ProductUpdate(BaseModel):
     """Product update request (all fields optional)."""
 
