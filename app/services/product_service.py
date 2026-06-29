@@ -4,7 +4,6 @@ import io
 import os
 import uuid
 from typing import BinaryIO, Optional
-from urllib.parse import urlparse
 
 import httpx
 import logging
@@ -13,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, insert
 from datetime import datetime
 
-from app.core.config import settings
 from app.models.models import Product, ProductAsset, ProductAssetMapping, ProductStatus, Background
 from app.services.storage import storage_service
 from app.services.gpu_status_service import gpu_status_service
@@ -822,22 +820,14 @@ class ProductService:
         try:
             glb_stream = io.BytesIO(response.glb_bytes)
             glb_stream.seek(0)
-            _glb_cdn_url, glb_blob_url = storage_service.upload_product_image(
+            # Store the GLB the same way as the product image/mask: keep the
+            # CDN URL returned by storage_service (built by _cdn_url) verbatim.
+            glb_url, glb_blob_url = storage_service.upload_product_image(
                 user_id=str(user_id),
                 product_id=str(product_id),
                 filename="model.glb",
                 content_type=response.glb_content_type or "model/gltf-binary",
                 stream=glb_stream,
-            )
-            # This deployment's CDN_BASE_URL already includes the container
-            # segment (".../dev"), so storage_service._cdn_url doubles it to
-            # ".../dev/dev/...". Build the public URL from the blob path minus
-            # its container so the stored GLB URL matches the SAM path's format
-            # (single container segment).
-            _blob_relative = urlparse(glb_blob_url).path.lstrip("/").split("/", 1)
-            glb_url = "{}/{}".format(
-                settings.CDN_BASE_URL.rstrip("/"),
-                _blob_relative[1] if len(_blob_relative) > 1 else _blob_relative[0],
             )
             logger.info(
                 "fal GLB stored in Azure: product=%s  request_id=%s  blob=%s  url=%s",
