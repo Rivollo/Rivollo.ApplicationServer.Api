@@ -1,0 +1,11 @@
+{
+	"name": "glb-draco-compress",
+	"private": true,
+	"description": "Draco mesh compression for GLB files via the glTF-Transform API. Invoked as a subprocess by app/services/glb_compression_service.py.",
+	"dependencies": {
+		"@gltf-transform/core": "^4.1.0",
+		"@gltf-transform/extensions": "^4.1.0",
+		"@gltf-transform/functions": "^4.1.0",
+		"draco3dgltf": "^1.5.7"
+	}
+}
