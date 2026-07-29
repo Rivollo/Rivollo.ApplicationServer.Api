@@ -419,6 +419,179 @@ class ProductService:
         return product, image_url, mask_cdn_url, None, gpu_status
 
     @staticmethod
+    async def create_product_from_glb(
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        name: str,
+        mesh_asset_id: int,
+        glb_stream: BinaryIO,
+        glb_size_bytes: Optional[int] = None,
+        glb_content_type: Optional[str] = None,
+        image_stream: Optional[BinaryIO] = None,
+        image_filename: Optional[str] = None,
+        image_content_type: Optional[str] = None,
+        image_size_bytes: Optional[int] = None,
+    ) -> tuple[Product, str, Optional[str]]:
+        """Create a product directly from an uploaded GLB file (no AI generation).
+
+        The user supplies a ready ``.glb``; we store it under the mesh asset
+        (``asset_id == mesh_asset_id``, i.e. asset 9) exactly like the AI paths do
+        in :meth:`generate_3d_and_finalize_fal`, and optionally store a thumbnail
+        image under asset 1. Because the mesh already exists, this runs
+        synchronously and the product lands in READY immediately.
+
+        Returns ``(product, glb_url, image_url)`` where ``image_url`` is None when
+        no thumbnail was supplied.
+        """
+        logger = logging.getLogger(__name__)
+
+        # -------------------------------
+        # 1. Create product (DRAFT until assets are stored)
+        # -------------------------------
+        base_slug = ProductService._slugify(name)
+        slug = await ProductService._generate_unique_slug(db, base_slug)
+
+        product = Product(
+            name=name,
+            slug=slug,
+            status=ProductStatus.DRAFT,
+            created_by=user_id,
+        )
+        db.add(product)
+        await db.flush()
+
+        product_id = str(product.id)
+        user_id_str = str(user_id)
+
+        # -------------------------------
+        # 2. Upload the GLB to Azure storage
+        # -------------------------------
+        try:
+            glb_stream.seek(0)
+            # Use the CDN URL returned by storage — it already includes the
+            # "/<container>/" segment (e.g. "/dev/"), matching the fal GLB path
+            # (generate_3d_and_finalize_fal). Do NOT hand-build the URL: that
+            # dropped the container segment and produced broken links.
+            glb_url, glb_blob_url = storage_service.upload_product_image(
+                user_id=user_id_str,
+                product_id=product_id,
+                filename="model.glb",
+                content_type=glb_content_type or "model/gltf-binary",
+                stream=glb_stream,
+            )
+            logger.info(
+                "Direct GLB uploaded: product=%s blob=%s url=%s",
+                product_id, glb_blob_url, glb_url,
+            )
+        except Exception as exc:
+            logger.exception("Direct GLB upload failed for product %s", product_id)
+            await db.rollback()
+            raise RuntimeError("Failed to upload GLB file") from exc
+
+        # -------------------------------
+        # 3. Optional thumbnail image (asset 1)
+        # -------------------------------
+        image_url: Optional[str] = None
+        if image_stream and image_filename:
+            try:
+                image_stream.seek(0)
+                # Keep the CDN URL returned by storage verbatim — it already
+                # includes the "/<container>/" segment (e.g. "/dev/"), matching
+                # the GLB asset above and the fal GLB path.
+                image_url, image_blob_url = storage_service.upload_product_image(
+                    user_id=user_id_str,
+                    product_id=product_id,
+                    filename=image_filename,
+                    content_type=image_content_type,
+                    stream=image_stream,
+                )
+                logger.info(
+                    "Direct GLB thumbnail uploaded: product=%s blob=%s url=%s",
+                    product_id, image_blob_url, image_url,
+                )
+            except Exception as exc:
+                logger.exception("Thumbnail upload failed for product %s", product_id)
+                await db.rollback()
+                raise RuntimeError("Failed to upload thumbnail image") from exc
+
+        # -------------------------------
+        # 4. Persist asset rows + mappings, mark READY
+        # -------------------------------
+        try:
+            if image_url:
+                image_asset = ProductAsset(
+                    asset_id=1,
+                    image=image_url,
+                    size_bytes=image_size_bytes,
+                    created_by=user_id,
+                )
+                db.add(image_asset)
+                await db.flush()
+                db.add(
+                    ProductAssetMapping(
+                        name=name,
+                        productid=product.id,
+                        product_asset_id=image_asset.id,
+                        isactive=True,
+                        created_by=user_id,
+                    )
+                )
+
+            glb_asset = ProductAsset(
+                asset_id=mesh_asset_id,
+                image=glb_url,
+                size_bytes=glb_size_bytes,
+                created_by=user_id,
+            )
+            db.add(glb_asset)
+            await db.flush()
+            db.add(
+                ProductAssetMapping(
+                    name=name,
+                    productid=product.id,
+                    product_asset_id=glb_asset.id,
+                    isactive=True,
+                    created_by=user_id,
+                )
+            )
+
+            product.status = ProductStatus.READY
+            await db.commit()
+            await db.refresh(product)
+            logger.info("Product %s → READY (direct GLB) glb_url=%s", product_id, glb_url)
+        except Exception as exc:
+            logger.exception("Failed to persist direct-GLB assets for product %s", product_id)
+            await db.rollback()
+            raise RuntimeError("Failed to save product assets") from exc
+
+        # Best-effort ready notification (never blocks the response)
+        try:
+            await NotificationService.create_and_push_notification(
+                db=db,
+                user_id=user_id,
+                notification_type="product.ready",
+                title="Product Ready",
+                body=f"Your product '{name}' is ready.",
+                data={
+                    "product_id": product_id,
+                    "product_name": name,
+                    "status": ProductStatus.READY.value,
+                    "glb_url": glb_url,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Failed to send product-ready notification for product %s",
+                product_id, exc_info=True,
+            )
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+        return product, glb_url, image_url
+
+    @staticmethod
     async def create_product_with_fal_image_urls(
         db: AsyncSession,
         background_tasks: BackgroundTasks,
