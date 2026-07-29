@@ -12,8 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, insert
 from datetime import datetime
 
+from app.core.config import settings
 from app.models.models import Product, ProductAsset, ProductAssetMapping, ProductStatus, Background
 from app.services.storage import storage_service
+from app.services.glb_compression_service import glb_compression_service
 from app.services.gpu_status_service import gpu_status_service
 from app.integrations.threed_model_client import threed_model_client
 from app.integrations.fal_tripo_client import fal_tripo_client
@@ -988,10 +990,24 @@ class ProductService:
             await db.commit()
             raise RuntimeError("3D generation succeeded but returned no GLB data")
 
+        # 3a. Draco-compress the mesh geometry before it goes anywhere near
+        #     Azure. Non-fatal: on any failure the original GLB is uploaded.
+        glb_bytes = response.glb_bytes
+        if settings.ENABLE_DRACO_COMPRESSION:
+            try:
+                glb_bytes = glb_compression_service.compress(response.glb_bytes)
+            except Exception:
+                logger.warning(
+                    "Draco compression failed for product %s (request_id=%s) — "
+                    "uploading original GLB",
+                    product_id, response.request_id, exc_info=True,
+                )
+                glb_bytes = response.glb_bytes
+
         # 3b. Re-upload the downloaded GLB to Azure so it lands in our storage
         #     domain exactly like the SAM path's hosted glb_url.
         try:
-            glb_stream = io.BytesIO(response.glb_bytes)
+            glb_stream = io.BytesIO(glb_bytes)
             glb_stream.seek(0)
             # Store the GLB the same way as the product image/mask: keep the
             # CDN URL returned by storage_service (built by _cdn_url) verbatim.
@@ -1075,6 +1091,26 @@ class ProductService:
             except Exception:
                 pass
             raise RuntimeError("Failed to save GLB asset to database") from exc
+
+        # 6. Fire-and-forget: trigger the GLB -> USDZ converter (Azure Container
+        #    Apps Job). It downloads the GLB via the Azure Blob SDK, so it needs
+        #    the DIRECT blob URL (glb_blob_url), NOT the CDN url (glb_url). The
+        #    container uploads the USDZ and writes its URL to the DB itself —
+        #    this service does not wait for or persist the USDZ result.
+        try:
+            from app.services.usdz_trigger_service import usdz_trigger_service
+            await usdz_trigger_service.trigger_conversion(
+                glb_blob_url=glb_blob_url,
+                product_id=str(product_id),
+                user_id=str(user_id),
+                product_name=name,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to schedule USDZ conversion for product %s (non-fatal)",
+                product_id,
+                exc_info=True,
+            )
 
         return glb_url
 

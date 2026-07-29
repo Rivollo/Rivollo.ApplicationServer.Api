@@ -189,6 +189,22 @@ class Settings(BaseSettings):
 	OPENAI_TIMEOUT_SECONDS: int = Field(default=30)
 	# fal.ai API key for server-side model calls such as SAM2 image segmentation.
 	FAL_KEY: str = Field(default="")
+
+	# USDZ Azure Container Apps Job — triggers the GLB -> USDZ converter job.
+	# Use the SAME values as the SAM-3D service so it hits the SAME job.
+	# Auth is via DefaultAzureCredential (Managed Identity on Azure; locally set
+	# AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID). If any of these
+	# four are empty the trigger logs a warning and no-ops.
+	AZURE_SUBSCRIPTION_ID: str = Field(default="", description="Azure Subscription ID — used to trigger the USDZ converter job.")
+	AZURE_RESOURCE_GROUP: str = Field(default="", description="Azure Resource Group that contains the USDZ converter job.")
+	AZURE_JOB_NAME: str = Field(default="", description="Azure Container Apps Job name for GLB -> USDZ conversion.")
+	AZURE_JOB_IMAGE: str = Field(default="", description="Container image used by the USDZ converter job.")
+
+	# Draco mesh compression for fal-generated GLBs, via the glTF-Transform Node.js
+	# toolchain (scripts/glb_compress). Runs after the GLB is downloaded from fal
+	# and before it is uploaded to Azure. On failure the original GLB is uploaded
+	# instead, so disabling this only stops compression from being attempted.
+	ENABLE_DRACO_COMPRESSION: bool = Field(default=True, description="Compress generated GLBs with Draco before upload to Azure.")
 	# Input length caps
 	AI_USER_PROMPT_MAX_CHARS: int = Field(default=500)
 	AI_USER_INPUT_NAME_MAX_CHARS: int = Field(default=100)

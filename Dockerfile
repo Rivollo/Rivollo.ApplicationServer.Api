@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         build-essential \
         gcc \
+        nodejs \
+        npm \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,6 +30,12 @@ RUN uv export --frozen > requirements.txt \
     && rm -rf ~/.cache/uv /var/lib/apt/lists/*
 
 COPY . .
+
+# Install the glTF-Transform toolchain used for Draco GLB compression
+# (app/services/glb_compression_service.py shells out to this script).
+# `npm install --prefix` does not reliably resolve package.json to the
+# target directory, so cd into it instead.
+RUN cd scripts/glb_compress && npm install --omit=dev
 
 # Verify USD command-line tools are available after installation
 RUN python -c "import pxr; print('USD Python bindings available')" || echo "USD Python bindings not available"
