@@ -102,6 +102,52 @@ public_router = APIRouter(
 
 PRODUCT_CREATION_AI_CREDIT_COST = 10
 
+# Supported thumbnail image content types → file extension.
+_IMAGE_CONTENT_TYPE_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+# Cap decoded base64 thumbnails so a huge data URL can't exhaust memory.
+_MAX_THUMBNAIL_BYTES = 15 * 1024 * 1024
+
+
+def _decode_image_data_url(data_url: str) -> tuple[bytes, str]:
+    """Decode a base64 image data URL into ``(bytes, content_type)``.
+
+    Accepts the standard ``data:image/png;base64,<payload>`` form produced by
+    ``model-viewer.toDataURL()``. Raises ``ValueError`` on any malformed input.
+    """
+    import base64
+    import binascii
+
+    raw = data_url.strip()
+    if not raw.startswith("data:"):
+        raise ValueError("imageBase64 must be a data URL (e.g. 'data:image/png;base64,...').")
+
+    try:
+        header, payload = raw.split(",", 1)
+    except ValueError as exc:
+        raise ValueError("Malformed data URL: missing ',' separator.") from exc
+
+    if ";base64" not in header:
+        raise ValueError("Only base64-encoded data URLs are supported.")
+
+    content_type = header[len("data:"):].split(";", 1)[0].strip().lower() or "image/png"
+
+    try:
+        image_bytes = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("Invalid base64 image payload.") from exc
+
+    if not image_bytes:
+        raise ValueError("Decoded thumbnail image is empty.")
+    if len(image_bytes) > _MAX_THUMBNAIL_BYTES:
+        raise ValueError("Thumbnail image exceeds the 15 MB limit.")
+
+    return image_bytes, content_type
+
 
 def _slugify(text: str) -> str:
     """Convert text to URL-friendly slug."""
@@ -512,6 +558,138 @@ async def create_product_with_image_fal(
     if glb_url:
         # 3D generation ran synchronously, GLB is ready now
         response_dict["glbURL"] = glb_url
+
+    return api_success(response_dict)
+
+
+@router.post("/createProductFromGlb", response_model=dict, status_code=status.HTTP_201_CREATED)
+async def create_product_from_glb(
+    current_user: CurrentUser,
+    request: Request,
+    db: DB,
+    name: str = Form(..., min_length=1, max_length=200),
+    mesh_asset_id: int = Form(9),
+    glb: UploadFile = File(..., description="Ready-made .glb 3D model file"),
+    image: Optional[UploadFile] = File(None, description="Optional thumbnail image (poster) for the model"),
+    image_base64: Optional[str] = Form(
+        None,
+        alias="imageBase64",
+        description="Optional thumbnail as a base64 data URL, e.g. model-viewer.toDataURL() output",
+    ),
+):
+    """Create a product directly from an uploaded GLB file (no AI generation).
+
+    Unlike ``/createProduct`` / ``/createProductFal``, this does not run any AI
+    model, charges no AI credits, and requires no particular plan. The GLB is
+    stored as the product's mesh asset (asset 9) and the product is marked READY
+    immediately.
+
+    The thumbnail (asset 1) is optional and may be supplied in either form:
+    - ``image``: a normal multipart file upload, or
+    - ``imageBase64``: a base64 data URL string (e.g. the direct output of
+      ``model-viewer.toDataURL()``), which avoids a client-side Blob conversion.
+    When both are sent, the uploaded ``image`` file wins.
+    """
+    # ---- Validate the GLB file ------------------------------------------
+    if not glb.filename or not glb.filename.lower().endswith(".glb"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A .glb file is required.",
+        )
+
+    glb_bytes = await glb.read()
+    if not glb_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded GLB file is empty.",
+        )
+
+    # ---- Resolve the optional thumbnail (file upload OR base64 data URL) --
+    allowed_extensions = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+    image_stream = None
+    image_filename = None
+    image_content_type = None
+    image_size = None
+
+    if image and image.filename:
+        # Priority 1: a normal multipart file upload.
+        img_ext = os.path.splitext(image.filename)[1].lower()
+        if img_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid thumbnail format. Allowed: {', '.join(sorted(allowed_extensions))}",
+            )
+        image_bytes = await image.read()
+        if image_bytes:
+            image_stream = io.BytesIO(image_bytes)
+            image_filename = f"thumbnail{img_ext}"
+            image_content_type = image.content_type or f"image/{img_ext[1:]}"
+            image_size = len(image_bytes)
+    elif image_base64 and image_base64.strip():
+        # Priority 2: a base64 data URL (e.g. model-viewer.toDataURL()).
+        try:
+            image_bytes, image_content_type = _decode_image_data_url(image_base64)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            )
+        ext = _IMAGE_CONTENT_TYPE_EXT.get(image_content_type)
+        if ext is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported thumbnail image type '{image_content_type}'.",
+            )
+        image_stream = io.BytesIO(image_bytes)
+        image_filename = f"thumbnail{ext}"
+        image_size = len(image_bytes)
+
+    # ---- Create the product ---------------------------------------------
+    try:
+        product, glb_url, image_url = await product_service.create_product_from_glb(
+            db=db,
+            user_id=current_user.id,
+            name=name,
+            mesh_asset_id=mesh_asset_id,
+            glb_stream=io.BytesIO(glb_bytes),
+            glb_size_bytes=len(glb_bytes),
+            glb_content_type=glb.content_type or "model/gltf-binary",
+            image_stream=image_stream,
+            image_filename=image_filename,
+            image_content_type=image_content_type,
+            image_size_bytes=image_size,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+    await ActivityService.log_product_action(
+        db=db,
+        action="product.created",
+        user_id=current_user.id,
+        product_id=product.id,
+        request=request,
+    )
+    await db.commit()
+
+    response_data = ProductResponse(
+        id=str(product.id),
+        name=product.name,
+        description=None,
+        brand=None,
+        accent_color="#2563EB",
+        accent_overlay=None,
+        tags=[],
+        status=product.status.value,
+        created_at=product.created_at,
+        updated_at=product.updated_at,
+    )
+    response_dict = response_data.model_dump(exclude_none=True)
+    response_dict["glbURL"] = glb_url
+    if image_url:
+        response_dict["imageURL"] = image_url
 
     return api_success(response_dict)
 
