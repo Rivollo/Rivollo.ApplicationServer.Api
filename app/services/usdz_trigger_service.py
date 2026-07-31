@@ -74,6 +74,11 @@ class USDZTriggerService:
                 {
                     "name": settings.AZURE_JOB_NAME,
                     "image": settings.AZURE_JOB_IMAGE,
+                    # Must be set explicitly: a template override drops the job's
+                    # configured resources and Azure falls back to 0.5 CPU / 1Gi,
+                    # which OOM-kills the conversion. On the Consumption profile
+                    # memory must be exactly 2x cpu.
+                    "resources": {"cpu": 4.0, "memory": "8Gi"},
                     "args": [
                         f"--job-id={job_id}",
                         f"--glb-blob-url={glb_blob_url}",
