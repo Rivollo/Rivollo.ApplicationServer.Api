@@ -20,6 +20,7 @@ from app.schemas.uploads import (
 	UploadInitRequest,
 	UploadInitResponse,
 )
+from app.services.licensing_service import LicensingService
 from app.services.model_converter import model_converter
 from app.services.storage import storage_service
 from app.utils.envelopes import api_success
@@ -154,7 +155,19 @@ async def upload_content(
 	filename, extension = _validate_filename(file.filename, _DIRECT_UPLOAD_EXTENSIONS)
 	logger = logging.getLogger(__name__)
 
-	if model_converter.is_glb_file(filename):
+	# USDZ conversion is a paid-plan feature, so only GLB uploads need the plan
+	# lookup. A GLB from a non-eligible plan skips the conversion branch and is
+	# stored as-is by the plain upload path below.
+	is_glb = model_converter.is_glb_file(filename)
+	usdz_allowed = await LicensingService.can_create_usdz(db, user_id) if is_glb else False
+	if is_glb and not usdz_allowed:
+		logger.info(
+			"USDZ conversion skipped for %s — user %s is not on a USDZ-eligible "
+			"plan. Uploading GLB only.",
+			filename, user_id
+		)
+
+	if is_glb and usdz_allowed:
 		try:
 			glb_content = await file.read()
 			glb_stream = io.BytesIO(glb_content)
@@ -298,7 +311,23 @@ async def upload_content(
 		public_url=blob_url,
 		content_type=file.content_type,
 		size_bytes=len(content_bytes),
+		formats={"glb": file_url} if is_glb else None,
+		blob_urls={"glb": blob_url} if is_glb and blob_url else None,
 	)
+	if is_glb and not usdz_allowed:
+		# The GLB is stored and returned as normal; this tells the caller why no
+		# USDZ came with it, so the UI can show an upgrade prompt.
+		response_payload["hasMultipleFormats"] = False  # type: ignore[index]
+		response_payload["conversionStatus"] = {  # type: ignore[index]
+			"usdz": {
+				"attempted": False,
+				"successful": False,
+				"error": None,
+				"reason": "plan_not_eligible",
+				"requiredPlans": list(LicensingService.USDZ_PLAN_CODES),
+				"message": LicensingService.USDZ_UPGRADE_MESSAGE,
+			}
+		}
 	return api_success(response_payload)
 
 

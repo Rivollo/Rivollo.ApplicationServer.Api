@@ -248,6 +248,42 @@ class LicensingService:
 
         return plan.code if plan else "free"
 
+    # Plans whose users may generate USDZ. GLB creation stays available on every
+    # plan — only the GLB -> USDZ conversion is paid-tier.
+    USDZ_PLAN_CODES = ("pro", "enterprise")
+
+    # Shown to the user when the gate below denies the conversion. It must read as
+    # "your GLB is here, the USDZ is not" — the upload/job paths deliberately keep
+    # succeeding, unlike the /createProductFal 403 which blocks outright.
+    USDZ_UPGRADE_MESSAGE = (
+        "USDZ conversion requires a Pro or Enterprise plan. Your GLB was saved; "
+        "please subscribe to generate a USDZ file."
+    )
+
+    @staticmethod
+    async def can_create_usdz(db: AsyncSession, user_id: uuid.UUID | str) -> bool:
+        """True when the user's plan includes USDZ conversion (pro/enterprise).
+
+        Callers treat a False result as "skip the USDZ, keep the GLB" — never as
+        an error. Any unusable user_id denies the conversion rather than raising,
+        so a bad id can't hand out a paid feature.
+        """
+        try:
+            uid = user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))
+        except (AttributeError, TypeError, ValueError):
+            logger.warning("can_create_usdz: unusable user_id %r — denying USDZ", user_id)
+            return False
+
+        plan_code = await LicensingService.get_user_plan_code(db, uid)
+        allowed = plan_code in LicensingService.USDZ_PLAN_CODES
+        if not allowed:
+            logger.info(
+                "USDZ conversion not included in plan '%s' (user %s) — GLB only",
+                plan_code,
+                uid,
+            )
+        return allowed
+
     @staticmethod
     async def create_free_plan_license(
         db: AsyncSession,

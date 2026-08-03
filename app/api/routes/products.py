@@ -102,6 +102,11 @@ public_router = APIRouter(
 
 PRODUCT_CREATION_AI_CREDIT_COST = 10
 
+# /createProduct generates via fal.ai SAM-3, which is cheaper than the Tripo path,
+# so it is priced separately. Do not fold this back into the constant above —
+# /products and /createProductFal still charge 10.
+SAM3_PRODUCT_CREATION_AI_CREDIT_COST = 2
+
 # Supported thumbnail image content types → file extension.
 _IMAGE_CONTENT_TYPE_EXT = {
     "image/jpeg": ".jpg",
@@ -347,7 +352,13 @@ async def create_product_with_image(
     db: DB,
     background_tasks: BackgroundTasks,
 ):
-    """Create a new product from existing original and mask image URLs."""
+    """Create a new product from existing original and mask image URLs.
+
+    3D generation runs on fal.ai SAM-3 (``fal-ai/sam-3/3d-objects``) in a
+    background task, so this returns while the product is still DRAFT. Poll
+    ``/products/{id}/status`` or listen on the product WebSocket for
+    QUEUE -> PROCESSING -> READY.
+    """
     # Validate user ID
     try:
         user_uuid = uuid.UUID(payload.userId)
@@ -357,48 +368,33 @@ async def create_product_with_image(
             detail="Invalid userId format. Expected UUID string.",
         )
 
-    if payload.quality not in {None, "fast", "high", "max"}:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid quality. Allowed values: fast, high, max.",
-        )
-
     # Product generation is limited by AI credits, not product count.
     allowed, quota_info = await LicensingService.check_quota(
         db,
         user_uuid,
         "ai_credits",
-        increment=PRODUCT_CREATION_AI_CREDIT_COST,
+        increment=SAM3_PRODUCT_CREATION_AI_CREDIT_COST,
     )
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Not enough AI credits. {PRODUCT_CREATION_AI_CREDIT_COST} credits "
+                f"Not enough AI credits. {SAM3_PRODUCT_CREATION_AI_CREDIT_COST} credits "
                 "are required to create a product."
             ),
         )
 
     # Use ProductService to create product from already-uploaded image URLs.
     try:
-        product, image_url, mask_image_url, glb_url, gpu_status = await product_service.create_product_with_image_urls(
+        product, image_url, mask_image_url = await product_service.create_product_with_image_urls(
             db=db,
             background_tasks=background_tasks,
             user_id=user_uuid,
             name=payload.name,
-            asset_id=1,
             mask_asset_id=2,
             mesh_asset_id=payload.mesh_asset_id,
-            target_format=payload.target_format,
             image_url=str(payload.imageURL),
             mask_image_url=str(payload.maskImageURL),
-            quality=payload.quality,
-            with_mesh_postprocess=payload.with_mesh_postprocess,
-            with_texture_baking=payload.with_texture_baking,
-            use_vertex_color=payload.use_vertex_color,
-            simplify=payload.simplify,
-            fill_holes=payload.fill_holes,
-            texture_size=payload.texture_size,
         )
 
         # Deduct AI credits after successful generation.
@@ -406,7 +402,7 @@ async def create_product_with_image(
             db,
             user_uuid,
             "ai_credits",
-            increment=PRODUCT_CREATION_AI_CREDIT_COST,
+            increment=SAM3_PRODUCT_CREATION_AI_CREDIT_COST,
         )
 
     except ValueError as e:
@@ -420,14 +416,13 @@ async def create_product_with_image(
             detail=str(e),
         )
     except Exception as e:
-        import traceback
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),
         )
 
-    # Refresh product to get the latest status set by the service layer
-    # (READY for PRO users after direct VM execution, QUEUE for FREE users pending Service Bus)
+    # Refresh product to pick up the status the service layer committed (DRAFT;
+    # the background task moves it to QUEUE -> PROCESSING -> READY).
     await db.refresh(product)
 
     response_data = ProductResponse(
@@ -446,10 +441,6 @@ async def create_product_with_image(
     response_dict = response_data.model_dump(exclude_none=True)
     response_dict["imageURL"] = image_url
     response_dict["maskImageURL"] = mask_image_url
-    response_dict["gpu"] = gpu_status
-    if glb_url:
-        # PRO users: 3D generation ran synchronously, GLB is ready now
-        response_dict["glbURL"] = glb_url
 
     return api_success(response_dict)
 

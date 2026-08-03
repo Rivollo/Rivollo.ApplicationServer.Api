@@ -21,6 +21,7 @@ from app.schemas.jobs import CreateJobRequest, JobStatusResponse, CreateJobRespo
 from app.utils.envelopes import api_success
 from app.services.storage import storage_service
 from app.services.model_converter import model_converter
+from app.services.licensing_service import LicensingService
 
 router = APIRouter(tags=["jobs"])
 
@@ -118,8 +119,16 @@ async def _process_completed_job(job: Job, resp, user_id: str, db: AsyncSession,
 		else:
 			original_extension = "glb"  # Default to GLB
 		
+		# USDZ conversion is a paid-plan feature. Free users still get their GLB:
+		# a non-eligible plan falls through to the single-file upload branch below.
+		usdz_allowed = (
+			await LicensingService.can_create_usdz(db, user_id)
+			if original_extension == "glb"
+			else False
+		)
+
 		# Convert GLB to USDZ and upload both formats if it's a GLB file
-		if original_extension == "glb":
+		if original_extension == "glb" and usdz_allowed:
 			try:
 				# Convert GLB to USDZ
 				glb_stream = io.BytesIO(resp.content)
@@ -287,7 +296,16 @@ async def _process_completed_job(job: Job, resp, user_id: str, db: AsyncSession,
 					},
 				})
 		else:
-			# Handle non-GLB files normally (GLTF, etc.)
+			# Single-format upload: non-GLB files (GLTF, etc.), and GLB files whose
+			# owner's plan does not include USDZ conversion.
+			usdz_skipped_for_plan = original_extension == "glb" and not usdz_allowed
+			if usdz_skipped_for_plan:
+				logger.info(
+					"USDZ conversion skipped for job %s — user %s is not on a "
+					"USDZ-eligible plan. Uploading GLB only.",
+					job.id, user_id
+				)
+
 			asset_stream = io.BytesIO(resp.content)
 			file_url, blob_url = storage_service.upload_asset_file(
 				user_id=user_id,
@@ -306,7 +324,14 @@ async def _process_completed_job(job: Job, resp, user_id: str, db: AsyncSession,
 				mime_type=content_type or "model/gltf-binary",
 				size_bytes=len(resp.content),
 				position=0,
-				meta={"format": original_extension},
+				meta={
+					"format": original_extension,
+					**(
+						{"usdz_skipped_reason": "plan_not_eligible"}
+						if usdz_skipped_for_plan
+						else {}
+					),
+				},
 			)
 			db.add(asset_part)
 		
@@ -324,14 +349,26 @@ async def _process_completed_job(job: Job, resp, user_id: str, db: AsyncSession,
 			logger.info("Successfully processed completed job %s, created asset %s with streaming URL %s", 
 					   job.id, asset.id, file_url)
 			
-			return api_success({
+			response_payload = {
 				"id": _job_public_id(job.id),
 				"status": job.status.value,
 				"assetId": str(asset.id),
 				"glburl": file_url,
 				"usdzURL": None,
-			})
-		
+			}
+			if usdz_skipped_for_plan:
+				response_payload["conversionStatus"] = {
+					"usdz": {
+						"attempted": False,
+						"successful": False,
+						"error": None,
+						"reason": "plan_not_eligible",
+						"requiredPlans": list(LicensingService.USDZ_PLAN_CODES),
+						"message": LicensingService.USDZ_UPGRADE_MESSAGE,
+					}
+				}
+			return api_success(response_payload)
+
 	except Exception as ex:
 		logger.exception("Failed to process completed job %s", job.id)
 		# Mark job as failed
