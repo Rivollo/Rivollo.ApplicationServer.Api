@@ -17,7 +17,11 @@ previously baked files and causes them to be regenerated on next use.
 from app.services.color import colors, glb_recolor
 from app.services.color.glb_recolor import PartInfo, RecolorOverride, inspect, recolor
 
-BAKER_VERSION = "1"
+# v2: textures behind EXT_texture_webp / KHR_texture_basisu are now found and
+#     repainted. Previously such parts looked untextured and fell back to a flat
+#     colour, so the same recipe can now produce different (correct) bytes —
+#     which must invalidate anything baked under v1.
+BAKER_VERSION = "2"
 
 __all__ = [
     "BAKER_VERSION",

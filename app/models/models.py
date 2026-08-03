@@ -763,6 +763,29 @@ class AssetPart(UUIDMixin, CreatedAtMixin, Base):
     meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
 
+class ModelGenerationStat(UUIDMixin, CreatedAtMixin, Base):
+    """One finished 3D generation, used to estimate how long the next will take.
+
+    fal.ai returns no ETA of its own, so the estimate is the median of a model's
+    recent measured runs. ``duration_seconds`` is wall-clock end-to-end — fal's
+    queue wait, generation, our download, Draco compression and the Azure upload
+    — because that is what the seller actually waits for.
+    """
+
+    __tablename__ = "tbl_model_generation_stats"
+    __table_args__ = (
+        Index("ix_generation_stats_model_recent", "model_key", "created_at"),
+    )
+
+    model_key: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Failures are recorded but excluded from the estimate: a run that died
+    # after 5s would drag the median down and understate the real wait.
+    succeeded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+
+
 class ProductColorVariant(UUIDMixin, AuditMixin, Base):
     """A saved colourway for a product — the RECIPE, not the file.
 

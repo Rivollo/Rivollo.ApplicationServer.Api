@@ -93,8 +93,32 @@ def _bufferview_bytes(gltf: GLTF2, blob: bytes, bv_index: int) -> bytes:
     return blob[start : start + bv.byteLength]
 
 
+# Texture extensions that relocate the image index out of `texture.source`.
+# Trellis emits EXT_texture_webp; Basis/KTX2 pipelines use the other two. A
+# texture using any of these has `source = None`, so reading only `source`
+# would make a fully textured part look untextured — and the recolour would
+# silently fall back to a flat colour, destroying the surface detail.
+_TEXTURE_SOURCE_EXTENSIONS = (
+    "EXT_texture_webp",
+    "KHR_texture_basisu",
+    "EXT_texture_avif",
+)
+
+
+def _texture_source(tex) -> int | None:
+    """Image index for a texture, honouring the source-relocating extensions."""
+    if tex.source is not None:
+        return tex.source
+    extensions = getattr(tex, "extensions", None) or {}
+    for name in _TEXTURE_SOURCE_EXTENSIONS:
+        node = extensions.get(name)
+        if isinstance(node, dict) and node.get("source") is not None:
+            return node["source"]
+    return None
+
+
 def _base_color_image_index(gltf: GLTF2, material_index: int) -> int | None:
-    """material -> pbr.baseColorTexture -> texture.source (image index)."""
+    """material -> pbr.baseColorTexture -> image index."""
     if material_index >= len(gltf.materials):
         return None
     mat = gltf.materials[material_index]
@@ -102,7 +126,7 @@ def _base_color_image_index(gltf: GLTF2, material_index: int) -> int | None:
     if pbr is None or pbr.baseColorTexture is None:
         return None
     tex = gltf.textures[pbr.baseColorTexture.index]
-    return tex.source
+    return _texture_source(tex)
 
 
 def _base_color_texture_and_sampler(gltf: GLTF2, material_index: int) -> tuple[int | None, int | None]:
@@ -111,7 +135,7 @@ def _base_color_texture_and_sampler(gltf: GLTF2, material_index: int) -> tuple[i
     if pbr is None or pbr.baseColorTexture is None:
         return None, None
     tex = gltf.textures[pbr.baseColorTexture.index]
-    return tex.source, tex.sampler
+    return _texture_source(tex), tex.sampler
 
 
 def _load_pil_from_image(gltf: GLTF2, blob: bytes, image_index: int) -> tuple[PILImage.Image, str]:

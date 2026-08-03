@@ -71,6 +71,8 @@ from app.schemas.products import (
 from app.services.activity_service import ActivityService
 from app.services.background_removal_service import background_removal_service
 from app.services.licensing_service import LicensingService
+from app.integrations.fal import get_model_spec
+from app.services.generation_estimate_service import generation_estimate_service
 from app.services.product_service import product_service
 from app.services.dimension_service import DimensionService
 from app.utils.envelopes import api_error, api_success
@@ -467,6 +469,16 @@ async def create_product_with_image_fal(
             detail="Invalid userId format. Expected UUID string.",
         )
 
+    # Resolve the requested model up front. An unknown key is a 400 — never a
+    # silent fallback, or the user is charged for a model they did not pick.
+    try:
+        model_spec = get_model_spec(payload.model)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
     # Only paid (Pro/Enterprise) users may generate products via fal.
     plan_code = await LicensingService.get_user_plan_code(db, user_uuid)
     if plan_code not in ("pro", "enterprise"):
@@ -475,24 +487,26 @@ async def create_product_with_image_fal(
             detail="Creating products requires a Pro or Enterprise plan. Please subscribe to continue.",
         )
 
-    # Product generation is limited by AI credits, not product count.
+    # Product generation is limited by AI credits, not product count. Cost is
+    # per model — the check and the deduction below read the same number.
+    credit_cost = model_spec.credit_cost
     allowed, quota_info = await LicensingService.check_quota(
         db,
         user_uuid,
         "ai_credits",
-        increment=PRODUCT_CREATION_AI_CREDIT_COST,
+        increment=credit_cost,
     )
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Not enough AI credits. {PRODUCT_CREATION_AI_CREDIT_COST} credits "
+                f"Not enough AI credits. {credit_cost} credits "
                 "are required to create a product."
             ),
         )
 
     # Use ProductService to create the product from the uploaded image URL,
-    # generating the 3D model via fal.ai Tripo instead of SAM 3D.
+    # generating the 3D model via fal.ai instead of SAM 3D.
     try:
         product, image_url, glb_url = await product_service.create_product_with_fal_image_urls(
             db=db,
@@ -502,6 +516,7 @@ async def create_product_with_image_fal(
             asset_id=1,
             mesh_asset_id=payload.mesh_asset_id,
             image_url=str(payload.imageURL),
+            model_key=model_spec.key,
         )
 
         # Deduct AI credits after successful generation.
@@ -509,7 +524,7 @@ async def create_product_with_image_fal(
             db,
             user_uuid,
             "ai_credits",
-            increment=PRODUCT_CREATION_AI_CREDIT_COST,
+            increment=credit_cost,
         )
 
     except ValueError as e:
@@ -549,6 +564,13 @@ async def create_product_with_image_fal(
     if glb_url:
         # 3D generation ran synchronously, GLB is ready now
         response_dict["glbURL"] = glb_url
+
+    # How long this model has actually been taking lately. fal returns no ETA
+    # of its own, so this is the median of recent measured runs (or the
+    # registry seed until enough have accumulated). Emitted under "gpu" to
+    # reuse the estimate contract the portal already renders a countdown from.
+    estimate = await generation_estimate_service.estimate(db, model_spec.key, model_spec)
+    response_dict["gpu"] = estimate.to_payload()
 
     return api_success(response_dict)
 
