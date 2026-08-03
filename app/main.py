@@ -26,6 +26,7 @@ from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.search import router as search_router
 from app.api.routes.health import router as health_router
 from app.api.routes.hotspots import router as hotspots_router
+from app.api.routes.color_variants import router as color_variants_router
 from app.api.routes.dimensions import router as dimensions_router
 from app.api.routes.product_links import router as product_links_router
 from app.api.routes.support import router as support_router
@@ -199,6 +200,7 @@ app.include_router(uploads_router, prefix=_api_prefix)
 app.include_router(jobs_router, prefix=_api_prefix)
 app.include_router(assets_router, prefix=_api_prefix)
 app.include_router(hotspots_router, prefix=_api_prefix)
+app.include_router(color_variants_router, prefix=_api_prefix)
 app.include_router(dimensions_router, prefix=_api_prefix)
 app.include_router(product_links_router, prefix=_api_prefix)
 app.include_router(support_router, prefix=_api_prefix)
