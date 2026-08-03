@@ -3,8 +3,10 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from typing import List, Optional
+
+from app.integrations.fal import DEFAULT_MODEL_KEY
 
 
 # === Core Product Schemas ===
@@ -47,7 +49,7 @@ class ProductCreateWithImageUrls(BaseModel):
 
 class ProductCreateWithFalImage(BaseModel):
     """Create a product from an already-uploaded original image URL, generating
-    the 3D model via fal.ai Tripo H3.1.
+    the 3D model via a fal.ai image-to-3D model.
 
     fal only needs the original image (it has no mask concept and ignores the
     SAM tuning options), so the request is intentionally smaller than
@@ -58,6 +60,19 @@ class ProductCreateWithFalImage(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     imageURL: HttpUrl
     mesh_asset_id: int = 9
+    model: str = Field(
+        DEFAULT_MODEL_KEY,
+        description=(
+            "Which fal.ai model generates the mesh. Valid keys come from "
+            "GET /ai/3d-models. Defaults to the original model so existing "
+            "clients keep working unchanged."
+        ),
+    )
+
+    # `model` collides with pydantic's reserved `model_` namespace warning only
+    # for prefixed names, but silence the namespace check explicitly so the
+    # field name can stay the obvious one for API consumers.
+    model_config = ConfigDict(protected_namespaces=())
 
 
 class ProductUpdate(BaseModel):

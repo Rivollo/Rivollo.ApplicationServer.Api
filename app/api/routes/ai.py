@@ -18,6 +18,8 @@ from app.services.ai_suggestion_service import (
     _USER_INPUT_NAME_MAX_CHARS,
     _USER_INPUT_DESC_MAX_CHARS,
 )
+from app.integrations.fal import DEFAULT_MODEL_KEY, list_model_specs
+from app.services.generation_estimate_service import generation_estimate_service
 from app.schemas.segmentation import Sam2AutoSegmentRequest, Sam2ImageSegmentRequest
 from app.services.image_segmentation_service import image_segmentation_service
 from app.utils.envelopes import api_success
@@ -29,6 +31,41 @@ router = APIRouter(
     tags=["ai"],
     dependencies=[Depends(get_current_user)],
 )
+
+
+# ---------------------------------------------------------------------------
+# 3D generation models
+# ---------------------------------------------------------------------------
+
+@router.get("/3d-models", response_model=dict)
+async def list_3d_models(current_user: CurrentUser, db: DB):
+    """Image-to-3D models a seller can choose from.
+
+    The portal renders its model picker from this response, so adding a model
+    to the registry makes it selectable with no frontend deploy. Credit cost is
+    per model because they are not priced the same, and so is the estimate.
+
+    ``estimated_seconds`` is the median of that model's recent measured runs —
+    fal.ai provides no ETA of its own — falling back to the registry seed until
+    enough runs exist. ``estimate_is_measured`` tells the UI whether it is
+    quoting real history or a starting guess.
+    """
+    models = []
+    for spec in list_model_specs():
+        estimate = await generation_estimate_service.estimate(db, spec.key, spec)
+        models.append(
+            {
+                "key": spec.key,
+                "label": spec.label,
+                "description": spec.description,
+                "credit_cost": spec.credit_cost,
+                "is_default": spec.key == DEFAULT_MODEL_KEY,
+                "estimated_seconds": estimate.seconds,
+                "estimated_time": estimate.display,
+                "estimate_is_measured": estimate.is_measured,
+            }
+        )
+    return api_success(models)
 
 
 # ---------------------------------------------------------------------------

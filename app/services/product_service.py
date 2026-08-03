@@ -2,6 +2,7 @@
 
 import io
 import os
+import time
 import uuid
 from typing import BinaryIO, Optional
 
@@ -18,14 +19,20 @@ from app.services.storage import storage_service
 from app.services.glb_compression_service import glb_compression_service
 from app.services.gpu_status_service import gpu_status_service
 from app.integrations.threed_model_client import threed_model_client
-from app.integrations.fal_tripo_client import fal_tripo_client
 from app.integrations.fal_sam3_client import fal_sam3_client
+from app.integrations.fal import DEFAULT_MODEL_KEY, fal_queue_client, get_model_spec
 from app.integrations.service_bus_publisher import ServiceBusPublisher
 from app.database.products_repo import ProductRepository
 from app.database.subscription_repo import SubscriptionRepository
 from app.schemas.products import ProductWithPrimaryAsset, ProductsByUserResponse
 from app.services.notification_service import NotificationService
+from app.services.generation_estimate_service import generation_estimate_service
 
+
+# Asset id under which a USDZ is stored, matching the GLB->USDZ conversion job
+# and the viewer's lookup (Rivollo.Viewer.Api ProductAssetsRepository: asset 9
+# is the GLB, asset 11 the USDZ).
+USDZ_ASSET_ID = 11
 
 _MAX_REMOTE_MASK_IMAGE_BYTES = 25 * 1024 * 1024
 _ALLOWED_REMOTE_MASK_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -587,8 +594,9 @@ class ProductService:
         asset_id: int,
         mesh_asset_id: int,
         image_url: str,
+        model_key: str = DEFAULT_MODEL_KEY,
     ) -> tuple[Product, str, Optional[str]]:
-        """Create a product from an uploaded image URL, generating 3D via fal.ai Tripo.
+        """Create a product from an uploaded image URL, generating 3D via fal.ai.
 
         Shares the same internals as :meth:`create_product_with_image_urls`
         (product record, original image asset, background 3D generation) but fal
@@ -646,7 +654,10 @@ class ProductService:
         except Exception:
             pass
 
-        logger.info("Scheduling background fal 3D generation for product %s", product.id)
+        logger.info(
+            "Scheduling background fal 3D generation for product %s (model=%s)",
+            product.id, model_key,
+        )
         background_tasks.add_task(
             ProductService._run_fal_3d_generation_background,
             user_id=user_id,
@@ -654,6 +665,7 @@ class ProductService:
             mesh_asset_id=mesh_asset_id,
             name=name,
             blob_url=image_url,
+            model_key=model_key,
         )
 
         return product, image_url, None
@@ -919,9 +931,10 @@ class ProductService:
         mesh_asset_id: int,
         name: str,
         blob_url: str,
+        model_key: str = DEFAULT_MODEL_KEY,
     ) -> str:
         """
-        Generate a GLB via the fal.ai Tripo H3.1 API and persist it.
+        Generate a GLB via a fal.ai image-to-3D model and persist it.
 
         Mirrors :meth:`generate_3d_and_finalize`; the only difference is the
         model-invocation step calls fal.ai instead of the SAM 3D service. fal
@@ -929,10 +942,16 @@ class ProductService:
         GLB it returns is downloaded and re-uploaded to Azure so it lands in our
         internal DB format identically to the SAM path.
 
+        ``model_key`` selects which fal model runs (see
+        :mod:`app.integrations.fal.registry`). Everything after generation —
+        Draco compression, upload, asset mapping, USDZ trigger — is identical
+        regardless of which model produced the mesh.
+
         Returns:
             glb_url: The URL of the stored GLB file.
         """
         logger = logging.getLogger(__name__)
+        spec = get_model_spec(model_key)
 
         # 1. Mark product as PROCESSING so callers / UI can show in-progress state
         product = await db.get(Product, product_id)
@@ -941,11 +960,17 @@ class ProductService:
 
         product.status = ProductStatus.PROCESSING
         await db.commit()
-        logger.info("Product %s status → PROCESSING (fal)", product_id)
+        logger.info("Product %s status → PROCESSING (fal/%s)", product_id, spec.key)
 
-        # 2. Call the fal.ai Tripo API (submit → poll → result → download GLB).
+        # Start the clock here, not at the fal call: the seller waits for the
+        # whole pipeline — queue, generation, download, compression, upload —
+        # and that full duration is what feeds the ETA for the next run.
+        started_at = time.perf_counter()
+
+        # 2. Call the fal.ai API (submit → poll → result → download GLB).
         #    The image must be a publicly reachable URL — pass the blob URL.
-        response = await fal_tripo_client.generate_3d(
+        response = await fal_queue_client.generate_3d(
+            spec=spec,
             product_id=product_id,
             image_url=blob_url,
         )
@@ -957,13 +982,18 @@ class ProductService:
 
         # 3. Handle failure
         if not response.success:
-            error_msg = response.error or "Unknown error from fal.ai Tripo API"
+            error_msg = response.error or f"Unknown error from fal.ai {spec.label} API"
             logger.error(
-                "fal 3D generation failed for product %s (request_id=%s): %s",
-                product_id, response.request_id, error_msg,
+                "fal %s 3D generation failed for product %s (request_id=%s): %s",
+                spec.key, product_id, response.request_id, error_msg,
             )
             product.status = ProductStatus.DRAFT
             await db.commit()
+            # Recorded but excluded from the median — a fast failure must not
+            # make the next estimate optimistic.
+            await generation_estimate_service.record(
+                db, spec.key, time.perf_counter() - started_at, succeeded=False
+            )
             raise RuntimeError(f"3D generation failed: {error_msg}")
 
         if not response.glb_bytes:
@@ -1038,7 +1068,15 @@ class ProductService:
             # 5. Mark as READY
             product.status = ProductStatus.READY
             await db.commit()
-            logger.info("Product %s → READY  glb_url=%s", product_id, glb_url)
+            elapsed = time.perf_counter() - started_at
+            logger.info(
+                "Product %s → READY  model=%s  elapsed=%.1fs  glb_url=%s",
+                product_id, spec.key, elapsed, glb_url,
+            )
+
+            # Feed the measured duration back so the next seller sees an ETA
+            # based on what this model actually takes right now.
+            await generation_estimate_service.record(db, spec.key, elapsed)
 
             try:
                 await NotificationService.create_and_push_notification(
@@ -1077,30 +1115,56 @@ class ProductService:
                 pass
             raise RuntimeError("Failed to save GLB asset to database") from exc
 
-        # 6. Fire-and-forget: trigger the GLB -> USDZ converter (Azure Container
-        #    Apps Job). It downloads the GLB via the Azure Blob SDK, so it needs
-        #    the DIRECT blob URL (glb_blob_url), NOT the CDN url (glb_url). The
-        #    container uploads the USDZ and writes its URL to the DB itself —
-        #    this service does not wait for or persist the USDZ result.
+        # 6. USDZ for iOS Quick Look.
         #
-        #    USDZ is a paid-plan feature. The product is already READY with its
-        #    GLB at this point, so a non-eligible plan just skips the trigger.
+        #    Two ways to obtain one:
+        #      * the generator exported it itself (Meshy) — store those bytes
+        #        directly; the vendor's own export beats a converted one on
+        #        fidelity and costs no extra job
+        #      * otherwise fire the Azure Container Apps Job, which downloads
+        #        the GLB via the Azure Blob SDK (so it needs the DIRECT blob
+        #        URL, NOT the CDN one), uploads the USDZ and writes its URL to
+        #        the DB itself — we neither wait for nor persist that result
+        #
+        #    Either route is a paid-plan feature, so the entitlement check wraps
+        #    BOTH: a vendor-supplied USDZ must not slip past the gate just
+        #    because it arrived for free. The product is already READY with its
+        #    GLB, so a non-eligible plan simply gets no USDZ.
         #    /createProductFal gates on plan too, but this runs in a background
         #    task long after that check, so it verifies the plan itself.
         try:
             from app.services.licensing_service import LicensingService
 
             if await LicensingService.can_create_usdz(db, user_id):
-                from app.services.usdz_trigger_service import usdz_trigger_service
-                await usdz_trigger_service.trigger_conversion(
-                    glb_blob_url=glb_blob_url,
-                    product_id=str(product_id),
-                    user_id=str(user_id),
-                    product_name=name,
-                )
+                stored_usdz = False
+                if response.usdz_bytes:
+                    try:
+                        stored_usdz = await ProductService._store_vendor_usdz(
+                            db=db,
+                            user_id=user_id,
+                            product_id=product_id,
+                            name=name,
+                            usdz_bytes=response.usdz_bytes,
+                            content_type=response.usdz_content_type,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to store %s USDZ for product %s — falling back "
+                            "to the conversion job (non-fatal)",
+                            spec.key, product_id, exc_info=True,
+                        )
+
+                if not stored_usdz:
+                    from app.services.usdz_trigger_service import usdz_trigger_service
+                    await usdz_trigger_service.trigger_conversion(
+                        glb_blob_url=glb_blob_url,
+                        product_id=str(product_id),
+                        user_id=str(user_id),
+                        product_name=name,
+                    )
             else:
                 logger.info(
-                    "USDZ conversion skipped for product %s — user %s is not on a "
+                    "USDZ skipped for product %s — user %s is not on a "
                     "USDZ-eligible plan. GLB remains available.",
                     product_id,
                     user_id,
@@ -1115,12 +1179,64 @@ class ProductService:
         return glb_url
 
     @staticmethod
+    async def _store_vendor_usdz(
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        product_id: uuid.UUID,
+        name: str,
+        usdz_bytes: bytes,
+        content_type: Optional[str],
+    ) -> bool:
+        """Persist a USDZ the generator produced itself. Returns True on success.
+
+        Lands in exactly the same shape the conversion job would have written,
+        so the viewer's Apple-device lookup finds it with no special-casing.
+        """
+        logger = logging.getLogger(__name__)
+
+        stream = io.BytesIO(usdz_bytes)
+        stream.seek(0)
+        usdz_url, _ = storage_service.upload_product_image(
+            user_id=str(user_id),
+            product_id=str(product_id),
+            filename="model.usdz",
+            content_type=content_type or "model/vnd.usdz+zip",
+            stream=stream,
+        )
+
+        usdz_asset = ProductAsset(
+            asset_id=USDZ_ASSET_ID,
+            image=usdz_url,
+            created_by=user_id,
+        )
+        db.add(usdz_asset)
+        await db.flush()
+
+        db.add(
+            ProductAssetMapping(
+                name=name,
+                productid=product_id,
+                product_asset_id=usdz_asset.id,
+                isactive=True,
+                created_by=user_id,
+            )
+        )
+        await db.commit()
+
+        logger.info(
+            "Stored vendor USDZ for product %s (%d bytes) — skipping conversion job",
+            product_id, len(usdz_bytes),
+        )
+        return True
+
+    @staticmethod
     async def _run_fal_3d_generation_background(
         user_id: uuid.UUID,
         product_id: uuid.UUID,
         mesh_asset_id: int,
         name: str,
         blob_url: str,
+        model_key: str = DEFAULT_MODEL_KEY,
     ) -> None:
         """Open a fresh DB session and run generate_3d_and_finalize_fal in the background.
 
@@ -1160,9 +1276,13 @@ class ProductService:
                     mesh_asset_id=mesh_asset_id,
                     name=name,
                     blob_url=blob_url,
+                    model_key=model_key,
                 )
         except Exception:
-            logger.exception("Background fal 3D generation failed for product %s", product_id)
+            logger.exception(
+                "Background fal 3D generation failed for product %s (model=%s)",
+                product_id, model_key,
+            )
 
     @staticmethod
     async def generate_3d_and_finalize_sam3_fal(
