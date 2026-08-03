@@ -1,3 +1,8 @@
+# NOTE: this file is for local/venv installs only.
+# The container image installs from pyproject.toml + uv.lock
+# (see Dockerfile: `uv export --frozen`), so any new runtime dependency MUST be
+# added to [project].dependencies in pyproject.toml and `uv lock` re-run —
+# adding it here alone will not ship it to dev/prod.
 aiosqlite==0.22.1
 alembic==1.17.2
 annotated-doc==0.0.4

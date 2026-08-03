@@ -29,6 +29,10 @@ RUN uv export --frozen > requirements.txt \
     && apt-get purge -y --auto-remove curl build-essential gcc \
     && rm -rf ~/.cache/uv /var/lib/apt/lists/*
 
+# Fail the build (instead of the container at start-up) if a dependency that
+# app.main imports transitively is missing from the lock file.
+RUN python -c "import pygltflib, numpy, PIL; print('colour configurator deps OK')"
+
 COPY . .
 
 # Install the glTF-Transform toolchain used for Draco GLB compression

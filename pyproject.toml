@@ -38,6 +38,10 @@ dependencies = [
 	"geoalchemy2>=0.14,<0.15",
 	"rembg>=2.0,<3",
 	"pillow>=10.0,<12",
+	# Colour configurator (app/services/color/*) — imported at app start-up via
+	# app.main -> color_variants router, so these are runtime, not optional.
+	"pygltflib>=1.16,<2",
+	"numpy>=1.26,<3",
 	"tenacity>=8.2,<9",
 	"firebase-admin>=6.5,<7",
 	"fal-client>=0.5,<1"
@@ -55,9 +59,10 @@ dev = [
 	"ruff>=0.6,<0.7",
 	"mypy>=1.10,<2"
 ]
+# Optional GLB -> USD/USDZ conversion path (app/services/model_converter.py
+# imports these lazily and degrades gracefully when absent).
 conversion = [
 	"usd-core>=24,<25",
-	"pygltflib>=1.16,<2",
 	"trimesh>=4.0,<5"
 ]
 
