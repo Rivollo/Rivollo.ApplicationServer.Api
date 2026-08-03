@@ -2627,6 +2627,7 @@ dependencies = [
     { name = "greenlet" },
     { name = "gunicorn" },
     { name = "httpx" },
+    { name = "numpy" },
     { name = "opentelemetry-instrumentation-logging" },
     { name = "orjson" },
     { name = "passlib", extra = ["argon2"] },
@@ -2634,6 +2635,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pygltflib" },
     { name = "python-dotenv" },
     { name = "python-jose", extra = ["cryptography"] },
     { name = "python-multipart" },
@@ -2645,7 +2647,6 @@ dependencies = [
 
 [package.optional-dependencies]
 conversion = [
-    { name = "pygltflib" },
     { name = "trimesh" },
     { name = "usd-core" },
 ]
@@ -2680,6 +2681,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27,<0.28" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27,<0.28" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10,<2" },
+    { name = "numpy", specifier = ">=1.26,<3" },
     { name = "opentelemetry-instrumentation-logging", specifier = ">=0.58b0,<0.59" },
     { name = "orjson", specifier = ">=3.10,<4" },
     { name = "passlib", extras = ["argon2"], specifier = ">=1.7.4,<2" },
@@ -2687,7 +2689,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pydantic", specifier = ">=2.9,<3" },
     { name = "pydantic-settings", specifier = ">=2.5,<3" },
-    { name = "pygltflib", marker = "extra == 'conversion'", specifier = ">=1.16,<2" },
+    { name = "pygltflib", specifier = ">=1.16,<2" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3,<9" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23,<0.24" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0,<6" },
