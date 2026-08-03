@@ -305,6 +305,60 @@ class StorageService:
 
 		return cdn_urls, blob_urls, asset_url_base
 
+	def upload_variant_model(
+		self,
+		product_id: str,
+		config_hash: str,
+		extension: str,
+		content_type: Optional[str],
+		stream: BinaryIO,
+	) -> tuple[str, str]:
+		"""Upload a baked colourway model. Returns (cdn_url, blob_url).
+
+		The path is content-addressed by the variant's config hash:
+
+		    {container}/products/{product_id}/variants/{config_hash}.{ext}
+
+		That makes bakes idempotent — re-baking the same recipe overwrites the
+		same blob rather than accumulating copies — and makes the file safely
+		cacheable forever, because a different colour always yields a different
+		hash and therefore a different URL.
+		"""
+		client = self._get_blob_service_client()
+		container = settings.STORAGE_CONTAINER_UPLOADS or "uploads"
+		blob_path = f"products/{product_id}/variants/{config_hash}.{extension.lstrip('.')}"
+		blob_client = client.get_blob_client(container=container, blob=blob_path)
+		settings_obj = ContentSettings(  # type: ignore
+			content_type=content_type or "model/gltf-binary",
+			# Immutable: the hash in the path changes whenever the bytes would.
+			cache_control="public, max-age=31536000, immutable",
+		)
+		blob_client.upload_blob(stream, overwrite=True, content_settings=settings_obj)
+		return self._cdn_url(container, blob_path), blob_client.url
+
+	def delete_blob_by_cdn_url(self, file_url: str) -> bool:
+		"""Delete a blob addressed by its CDN URL. Returns False if not found.
+
+		Used to purge superseded variant bakes. Never raises on a missing blob —
+		a purge that finds nothing to delete has already achieved its goal.
+		"""
+		cdn_base = (settings.CDN_BASE_URL or "").rstrip("/")
+		if not cdn_base or not file_url.startswith(f"{cdn_base}/"):
+			return False
+
+		remainder = file_url[len(cdn_base) + 1:]
+		slash = remainder.find("/")
+		if slash == -1:
+			return False
+
+		container, blob_path = remainder[:slash], remainder[slash + 1:]
+		try:
+			client = self._get_blob_service_client()
+			client.get_blob_client(container=container, blob=blob_path).delete_blob()
+			return True
+		except Exception:
+			return False
+
 	def _media_container(self) -> str:
 		"""Resolve the container for product/background images."""
 		return settings.STORAGE_CONTAINER_MEDIA or settings.STORAGE_CONTAINER_UPLOADS or "uploads"

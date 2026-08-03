@@ -763,6 +763,95 @@ class AssetPart(UUIDMixin, CreatedAtMixin, Base):
     meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
 
+class ProductColorVariant(UUIDMixin, AuditMixin, Base):
+    """A saved colourway for a product — the RECIPE, not the file.
+
+    ``overrides`` is the whole payload: a small JSON list of per-material colour
+    choices. It is retained even though the variant is baked into a real GLB,
+    because it is what makes re-baking possible when the source model is
+    re-uploaded or the baker is improved. The baked file is derived; this is the
+    source of truth.
+    """
+
+    __tablename__ = "tbl_product_color_variants"
+    __table_args__ = (
+        Index("ix_color_variants_product_order", "product_id", "order_index"),
+        UniqueConstraint("product_id", "slug", name="uq_variant_product_slug"),
+    )
+
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("tbl_products.id", ondelete="CASCADE"), nullable=False
+    )
+
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    # sRGB hex shown as the swatch dot — lets both portals render the colour
+    # picker without downloading a single byte of any model.
+    swatch_hex: Mapped[str] = mapped_column(Text, nullable=False)
+
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    is_original: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    isactive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+    # [{material_index, material_name, color, method, brightness}, ...]
+    overrides: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+
+    # sha256(source_asset_id + canonical(overrides) + BAKER_VERSION)
+    config_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    bake_status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    bake_error: Mapped[Optional[str]] = mapped_column(Text)
+    baked_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
+
+    @property
+    def created_at(self) -> datetime:
+        return self.created_date
+
+    product: Mapped[Product] = relationship("Product")
+    assets: Mapped[list["VariantAsset"]] = relationship(
+        "VariantAsset", back_populates="variant", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class VariantAsset(UUIDMixin, AuditMixin, Base):
+    """A baked model file for one colourway.
+
+    Pure cache. Every row here can be deleted and regenerated from its parent
+    variant's ``overrides``. ``config_hash`` must match the parent's; when it
+    doesn't, the file is stale and must not be served.
+    """
+
+    __tablename__ = "tbl_variant_assets"
+    __table_args__ = (
+        Index("ix_variant_assets_variant", "variant_id"),
+        UniqueConstraint("variant_id", "format", name="uq_variant_asset_format"),
+    )
+
+    variant_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("tbl_product_color_variants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    format: Mapped[str] = mapped_column(Text, nullable=False)  # 'glb' | 'usdz'
+    # CDN-fronted public URL served to clients.
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    # Raw Azure blob URL — used internally for re-processing / conversion jobs.
+    blob_url: Mapped[Optional[str]] = mapped_column(Text)
+    size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger)
+    config_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    @property
+    def created_at(self) -> datetime:
+        return self.created_date
+
+    variant: Mapped[ProductColorVariant] = relationship(
+        "ProductColorVariant", back_populates="assets"
+    )
+
+
 # Alias for backwards compatibility
 JobStatusEnum = JobStatus
 

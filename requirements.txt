@@ -60,3 +60,9 @@ watchfiles==1.1.1
 websockets==15.0.1
 zipp==3.23.0
 tenacity==8.5.0
+# Color configurator — GLB parsing/rebuild and texture recolouring.
+# Loose lower bounds so pip picks prebuilt wheels for the runtime's Python
+# version; pinned numpy/Pillow have no wheels on Python 3.14.
+pygltflib>=1.16
+Pillow>=11.1
+numpy>=2.2
