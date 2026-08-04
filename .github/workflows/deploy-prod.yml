@@ -33,9 +33,10 @@ jobs:
     if: ${{ inputs.image_tag == '' }}
     environment:
       name: prod
-    outputs:
-      image_num: ${{ steps.meta.outputs.image_num }}
-      image_tag: ${{ steps.meta.outputs.tag_num }}
+    # No `outputs:` here on purpose. The image reference contains the ACR login
+    # server, which matches secrets.PROD_ACR_USERNAME, and GitHub refuses to pass
+    # job outputs containing secret values — they arrive empty. The deploy job
+    # rebuilds the reference from env. See "Resolve and validate image reference".
 
     steps:
       - name: Checkout
@@ -97,33 +98,40 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # An empty --image makes `az containerapp update` a silent no-op that still
-      # exits 0: no new revision, old code keeps serving, workflow goes green.
-      # Production sat on a five-week-old image that way. Refuse to continue
-      # unless the image resolved.
+      # Deliberately NOT `needs.build.outputs.image_num`. GitHub drops any job
+      # output whose value contains a secret, and the ACR admin username is the
+      # registry name itself (secrets.PROD_ACR_USERNAME == "rivolloprodacr"), which
+      # appears inside every image reference. So that output always arrived empty,
+      # and `az containerapp update --image ""` is a no-op that exits 0 — which is
+      # how production sat on a five-week-old image behind green runs.
+      #
+      # Rebuild the reference here instead, from non-secret workflow env plus
+      # GITHUB_RUN_NUMBER, which is identical across jobs in the same run and so
+      # matches the tag the build job pushed. Nothing crosses a job boundary.
       - name: Resolve and validate image reference
         env:
           INPUT_TAG: ${{ inputs.image_tag }}
-          BUILT_IMAGE: ${{ needs.build.outputs.image_num }}
         run: |
           set -euo pipefail
-          if [ -n "${INPUT_TAG:-}" ]; then
-            IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${INPUT_TAG}"
-            echo "Redeploying an existing tag (build was skipped)."
-          else
-            IMAGE="${BUILT_IMAGE:-}"
-          fi
-          if [ -z "${IMAGE:-}" ]; then
-            echo "::error::Resolved image is empty. Either pass image_tag, or re-run the \
-          WHOLE workflow — re-running only the failed job loses the build job's outputs. Refusing to deploy."
+          if [ -z "${ACR_LOGIN_SERVER:-}" ] || [ -z "${IMAGE_NAME:-}" ]; then
+            echo "::error::ACR_LOGIN_SERVER or IMAGE_NAME is empty — cannot build an image reference."
             exit 1
           fi
           if [ -z "${CONTAINERAPP_NAME:-}" ] || [ -z "${AZURE_RESOURCE_GROUP:-}" ]; then
             echo "::error::CONTAINERAPP_NAME or AZURE_RESOURCE_GROUP is empty — check the repo/environment variables."
             exit 1
           fi
+          if [ -n "${INPUT_TAG:-}" ]; then
+            TAG="${INPUT_TAG}"
+            echo "Redeploying an existing tag (build was skipped)."
+          else
+            TAG="build-${GITHUB_RUN_NUMBER}"
+          fi
+          IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${TAG}"
           echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
-          echo "Deploying image: ${IMAGE}"
+          # The registry host is masked as *** in logs because it matches a secret;
+          # the tag is the useful part to read here.
+          echo "Deploying tag: ${TAG}"
 
       # A rollback tag must already exist, otherwise the app would be pointed at a
       # pullable-looking reference that fails at container start.
