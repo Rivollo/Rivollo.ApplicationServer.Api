@@ -1,9 +1,19 @@
 name: CI/CD - Docker to Azure Container Apps (Production)
 
+# Manual only. This used to trigger on push to main — the same trigger as the dev
+# deploy — so every merge attempted a production release. It never actually shipped
+# anything because of the empty-image bug below, which is why nobody noticed. Now
+# that the bug is fixed, an automatic main -> prod path would be live, so the
+# trigger is deliberately a manual dispatch instead.
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: >-
+          Existing tag in the prod ACR to deploy, e.g. build-116 (use for rollback).
+          Leave blank to build and deploy the branch selected above.
+        required: false
+        default: ''
 
 env:
   ACR_LOGIN_SERVER: rivolloprodacr.azurecr.io
@@ -19,6 +29,8 @@ jobs:
   build:
     name: Build and Push Image
     runs-on: ubuntu-latest
+    # Skipped when redeploying an existing tag — no need to rebuild to roll back.
+    if: ${{ inputs.image_tag == '' }}
     environment:
       name: prod
     outputs:
@@ -71,6 +83,9 @@ jobs:
     name: Deploy to Azure Container Apps (Production)
     runs-on: ubuntu-latest
     needs: build
+    # build is skipped on a tag redeploy, so don't require it to have succeeded —
+    # but never run if it actually failed.
+    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     environment:
       name: prod
 
@@ -82,26 +97,127 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # An empty --image makes `az containerapp update` a silent no-op that still
+      # exits 0: no new revision, old code keeps serving, workflow goes green.
+      # Production sat on a five-week-old image that way. Refuse to continue
+      # unless the image resolved.
+      - name: Resolve and validate image reference
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+          BUILT_IMAGE: ${{ needs.build.outputs.image_num }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${INPUT_TAG}"
+            echo "Redeploying an existing tag (build was skipped)."
+          else
+            IMAGE="${BUILT_IMAGE:-}"
+          fi
+          if [ -z "${IMAGE:-}" ]; then
+            echo "::error::Resolved image is empty. Either pass image_tag, or re-run the \
+          WHOLE workflow — re-running only the failed job loses the build job's outputs. Refusing to deploy."
+            exit 1
+          fi
+          if [ -z "${CONTAINERAPP_NAME:-}" ] || [ -z "${AZURE_RESOURCE_GROUP:-}" ]; then
+            echo "::error::CONTAINERAPP_NAME or AZURE_RESOURCE_GROUP is empty — check the repo/environment variables."
+            exit 1
+          fi
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+          echo "Deploying image: ${IMAGE}"
+
+      # A rollback tag must already exist, otherwise the app would be pointed at a
+      # pullable-looking reference that fails at container start.
+      - name: Confirm the image exists in ACR
+        run: |
+          set -euo pipefail
+          TAG="${IMAGE##*:}"
+          if ! az acr repository show-tags \
+                --name "${ACR_LOGIN_SERVER%%.*}" \
+                --repository "$IMAGE_NAME" \
+                --query "[?@=='${TAG}'] | [0]" -o tsv | grep -q .; then
+            echo "::error::Tag '${TAG}' not found in ${ACR_LOGIN_SERVER}/${IMAGE_NAME}."
+            exit 1
+          fi
+          echo "::notice::Confirmed ${IMAGE} exists in ACR"
+
+      # Captured before the update so the next step can prove Azure actually rolled
+      # something out, rather than trusting that asking was enough.
+      - name: Record currently deployed revision
+        run: |
+          set -euo pipefail
+          REV_BEFORE=$(az containerapp show \
+            --name "$CONTAINERAPP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "properties.latestRevisionName" -o tsv)
+          echo "REV_BEFORE=${REV_BEFORE}" >> "$GITHUB_ENV"
+          echo "Currently deployed revision: ${REV_BEFORE:-<none>}"
+
       - name: Deploy new image to Container App
         run: |
+          set -euo pipefail
           az containerapp update \
             --name "$CONTAINERAPP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "${{ needs.build.outputs.image_num }}"
+            --image "$IMAGE"
+
+      # Two assertions, and the second is the one that actually matters.
+      #
+      # Comparing the image string only proves the config says what we asked for.
+      # It does not prove a container was ever started from it: when the requested
+      # reference already equals the applied one -- a redeploy of the tag prod is
+      # already on, or a re-run re-pushing the same mutable build-N tag -- Azure has
+      # no template change to act on, creates no revision, and latestRevisionName
+      # stays pointing at the revision that was already running. A health check
+      # would then grade that old revision, find it Running, and pass. Production
+      # reported green that way for five weeks. So require the revision to change.
+      - name: Verify a new revision was created
+        run: |
+          set -euo pipefail
+          APPLIED=$(az containerapp show \
+            --name "$CONTAINERAPP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "properties.template.containers[0].image" -o tsv)
+          echo "Requested: $IMAGE"
+          echo "Applied  : $APPLIED"
+          if [ "$APPLIED" != "$IMAGE" ]; then
+            echo "::error::Image was NOT applied — app is still on '$APPLIED'. \
+          The update call reported success without changing the app configuration."
+            exit 1
+          fi
+
+          # latestRevisionName can lag the update by a few seconds, so poll rather
+          # than reading it once and racing.
+          REV="$REV_BEFORE"
+          for i in $(seq 1 12); do
+            REV=$(az containerapp show \
+              --name "$CONTAINERAPP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --query "properties.latestRevisionName" -o tsv)
+            [ "$REV" != "$REV_BEFORE" ] && break
+            echo "Waiting for a new revision to appear (still ${REV:-<none>}) ... ($i/12)"
+            sleep 5
+          done
+
+          if [ "$REV" = "$REV_BEFORE" ]; then
+            echo "::error::No new revision was created — still '$REV_BEFORE'. The image \
+          reference did not change, so Azure had nothing to roll out. The previously running \
+          revision is still serving and this deploy did NOT take effect. If you are \
+          redeploying the tag production is already on, there is nothing to ship."
+            exit 1
+          fi
+          echo "REV=${REV}" >> "$GITHUB_ENV"
+          echo "::notice::New revision created: ${REV} (previous: ${REV_BEFORE:-<none>})"
 
       - name: Wait for revision to be healthy
         run: |
           set -euo pipefail
           MAX_ATTEMPTS=30   # 30 × 10s = 5 min
-          REV=""
           RUNNING_STATE=""
           PROV_STATE=""
+          # Poll the revision this deploy created (properties.latestRevisionName),
+          # NOT "newest by createdTime" — the latter can lock onto an unrelated
+          # revision and report healthy for the wrong one.
           for i in $(seq 1 $MAX_ATTEMPTS); do
-            REV=$(az containerapp revision list \
-              --name "$CONTAINERAPP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --query "sort_by([], &properties.createdTime)[-1].name" \
-              -o tsv)
             RUNNING_STATE=$(az containerapp revision show \
               --name "$CONTAINERAPP_NAME" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -118,9 +234,11 @@ jobs:
                 echo "::notice::Revision $REV is healthy"
                 exit 0
                 ;;
-              ScaledToZero)
+              # Prod runs minReplicas=1 so it should reach Running, but keep the
+              # idle case handled in case the scale floor is ever lowered.
+              Stopped|ScaledToZero)
                 if [ "$PROV_STATE" = "Provisioned" ]; then
-                  echo "::notice::Revision $REV provisioned (scaled to zero). Deploy succeeded."
+                  echo "::notice::Revision $REV provisioned and idle (scaled to zero). Deploy succeeded."
                   exit 0
                 fi
                 ;;
@@ -149,11 +267,16 @@ jobs:
             --type system --tail 200 || true
           echo "::endgroup::"
 
-          echo "::group::Revision details"
+          # Narrow projection on purpose. `revision show -o yaml` dumps the whole
+          # template including every container env var, which printed live API
+          # keys into this log on every failed deploy.
+          echo "::group::Revision summary (no env vars)"
           az containerapp revision show \
             --name "$CONTAINERAPP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision "$REV" -o yaml || true
+            --revision "$REV" \
+            --query "{name:name, image:properties.template.containers[0].image, running:properties.runningState, provisioning:properties.provisioningState, health:properties.healthState, replicas:properties.replicas, created:properties.createdTime}" \
+            -o json || true
           echo "::endgroup::"
 
           exit 1
