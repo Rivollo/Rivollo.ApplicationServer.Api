@@ -189,6 +189,16 @@ class Settings(BaseSettings):
 	OPENAI_TIMEOUT_SECONDS: int = Field(default=30)
 	# fal.ai API key for server-side model calls such as SAM2 image segmentation.
 	FAL_KEY: str = Field(default="")
+	# Max outbound SAM2 calls to fal.ai per minute, across ALL users. fal.ai
+	# rate-limits per API key, so this mirrors the upstream constraint; the
+	# per-user limit below is a separate, fairness concern. Confirm the real
+	# ceiling for your fal tier before raising it.
+	FAL_SEGMENT_RATE_LIMIT_PER_MINUTE: int = Field(default=5)
+	# Max /ai/image-segment calls per user per minute before HTTP 429 is returned.
+	# Deliberately separate from OPENAI_RATE_LIMIT_PER_MINUTE: SAM2 runs are billed
+	# by fal.ai and are far slower than a GPT-4o suggestion, so the two budgets are
+	# tuned independently.
+	SEGMENTATION_RATE_LIMIT_PER_MINUTE: int = Field(default=5)
 
 	# USDZ Azure Container Apps Job — triggers the GLB -> USDZ converter job.
 	# Use the SAME values as the SAM-3D service so it hits the SAME job.
