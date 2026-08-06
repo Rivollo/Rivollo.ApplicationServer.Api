@@ -75,27 +75,40 @@ async def list_3d_models(current_user: CurrentUser, db: DB):
 # (user_id, "YYYY-MM-DDTHH:MM")).  Stale minute-buckets are evicted on
 # every check to prevent unbounded memory growth.
 #
+# Each budget gets its own instance, so the counters are spent independently:
+# a burst of image segmentation must not lock a seller out of AI suggestions.
+#
 # KNOWN LIMITATION: this counter is per-process.  When the app runs on
 # multiple replicas (e.g. Azure Container Apps scaled-out), each replica
 # has its own counter, so a user can effectively make
-#   OPENAI_RATE_LIMIT_PER_MINUTE × replica_count
+#   <limit> × replica_count
 # calls per minute.
 #
 # To enforce the limit across replicas, replace _RateLimiter.check() with
-# a Redis INCR/EXPIRE implementation — the call site (_rate_limiter.check)
-# is unchanged.
+# a Redis INCR/EXPIRE implementation — the call sites (<limiter>.check)
+# are unchanged.
 # ---------------------------------------------------------------------------
 
 class _RateLimiter:
-    def __init__(self) -> None:
+    """Per-user, per-minute call counter for one AI budget.
+
+    ``limit_attr`` is read from settings on every check so an env override takes
+    effect without rebuilding the limiter, and ``quota_label`` names the budget
+    in the log line and the 429 body — a segmentation 429 should not tell the
+    caller it hit the AI-suggestion cap.
+    """
+
+    def __init__(self, limit_attr: str, quota_label: str) -> None:
+        self._limit_attr = limit_attr
+        self._quota_label = quota_label
         self._counter: dict[tuple[str, str], int] = defaultdict(int)
 
     def check(self, user_id: str, count: int = 1) -> None:
         """
-        Raises HTTP 429 if the user has exceeded OPENAI_RATE_LIMIT_PER_MINUTE
-        AI calls within the current UTC minute.  Pass count > 1 for batch calls.
+        Raises HTTP 429 if the user has exceeded this budget's per-minute limit
+        within the current UTC minute.  Pass count > 1 for batch calls.
         """
-        limit = settings.OPENAI_RATE_LIMIT_PER_MINUTE
+        limit = getattr(settings, self._limit_attr)
         current_bucket = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
         stale_keys = [k for k in self._counter if k[1] != current_bucket]
@@ -107,13 +120,13 @@ class _RateLimiter:
 
         if self._counter[key] > limit:
             logger.warning(
-                "AI rate limit exceeded for user %s (count=%d, limit=%d)",
-                user_id, self._counter[key], limit,
+                "%s rate limit exceeded for user %s (count=%d, limit=%d)",
+                self._quota_label, user_id, self._counter[key], limit,
             )
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=(
-                    f"AI suggestion limit reached. "
+                    f"{self._quota_label} limit reached. "
                     f"You can make {limit} requests per minute. "
                     "Please wait and try again."
                 ),
@@ -121,7 +134,10 @@ class _RateLimiter:
             )
 
 
-_rate_limiter = _RateLimiter()
+_rate_limiter = _RateLimiter("OPENAI_RATE_LIMIT_PER_MINUTE", "AI suggestion")
+_segmentation_rate_limiter = _RateLimiter(
+    "SEGMENTATION_RATE_LIMIT_PER_MINUTE", "Image segmentation"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -392,8 +408,12 @@ async def image_segment(
     payload: Sam2ImageSegmentRequest,
     current_user: CurrentUser,
 ):
-    """Segment an image with fal.ai SAM2 and return the generated mask/segment image URL."""
-    _rate_limiter.check(str(current_user.id), count=1)
+    """Segment an image with fal.ai SAM2 and return the generated mask/segment image URL.
+
+    Metered by its own SEGMENTATION_RATE_LIMIT_PER_MINUTE budget rather than the
+    shared AI-suggestion one, because a SAM2 run is a paid fal.ai call.
+    """
+    _segmentation_rate_limiter.check(str(current_user.id), count=1)
     result = await image_segmentation_service.segment_with_sam2(payload)
     return api_success(result.model_dump(exclude_none=True))
 
