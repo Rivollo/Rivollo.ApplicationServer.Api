@@ -113,7 +113,15 @@ SAM3_PRODUCT_CREATION_AI_CREDIT_COST = 2
 # /createProductWithParts runs TWO chained Tripo tasks (segmented geometry, then
 # texture) against Tripo's own billed account, so it costs more than the
 # single-task paths.
-PARTS_PRODUCT_CREATION_AI_CREDIT_COST = 20
+#
+# Priced 1:1 with what Tripo actually bills us: 40 credits for the segmented
+# geometry task + 20 for texturing = 60. Measured, not estimated — see
+# docs/MULTIPART_3D_GENERATION.md §6.
+#
+# Keep in sync with AI_CREDIT_COST.multiPart in the web portal
+# (lib/product/creditCosts.ts), which is only what the UI quotes; this constant
+# is what actually charges.
+PARTS_PRODUCT_CREATION_AI_CREDIT_COST = 60
 
 # Seed ETA for the two-stage pipeline, superseded by real progress over the
 # WebSocket once generation starts. Unmeasured — the Tripo account had no

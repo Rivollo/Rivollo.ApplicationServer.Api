@@ -207,11 +207,19 @@ Compared with the other creation paths:
 |---|---|---|---|
 | `/createProduct` | fal SAM-3 | 2 | ✗ |
 | `/createProductFal` | fal (Tripo/Hunyuan/Trellis/Meshy) | 10–20 | ✗ |
-| **`/createProductWithParts`** | **Tripo direct** | **20** ⚠️ | **✓** |
+| **`/createProductWithParts`** | **Tripo direct** | **60** | **✓** |
 | `/createProductFromGlb` | none | 0 | n/a |
 
-> ⚠️ The 20 was set before measuring and under-prices a path that costs 60 Tripo
-> credits. Worth revisiting.
+We charge **60 AI credits — 1:1 with what Tripo bills us**, so this path neither
+subsidises nor profits on provider cost. It was briefly priced at 20, set before
+the pipeline had been measured.
+
+> ⚠️ **Plan headroom.** `max_ai_credits_month` is **100 on Pro** (10 free, 5
+> weekly), so 60 credits buys a Pro seller **one multi-part product per month**,
+> with 40 left over. There is also no `enterprise` row in `tbl_mstr_plans` —
+> only `free`, `pro`, `weekly` — even though the route gates on
+> `("pro", "enterprise")`. If multi-part is meant to be usable more than once a
+> month, the Pro allowance is what needs raising, not this price.
 
 **Untested cost variations:** `geometry_quality: detailed`, `texture_quality:
 extreme`, and different `face_limit` values may all change the price. Tripo
@@ -279,7 +287,7 @@ These log a warning and continue rather than failing the product:
 |---|---|---|
 | `503` on the request | `TRIPO_API_KEY` empty | Set it, **restart** — settings load at import |
 | `403` on the request | Not Pro/Enterprise | Upgrade the account |
-| `400` on the request | Under 20 AI credits | Top up (your credits, not Tripo's) |
+| `400` on the request | Under 60 AI credits | Top up (your credits, not Tripo's) |
 | `201` then stuck at `draft` | Generation failed | **Read the console** — the Tripo `code` and message are logged |
 | Tripo `code 2010` | Tripo account out of credit | Top up at Tripo |
 | Tripo `code 2` "Invalid API key" | Wrong credential | See below |
