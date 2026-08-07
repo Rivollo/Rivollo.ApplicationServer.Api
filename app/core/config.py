@@ -199,6 +199,17 @@ class Settings(BaseSettings):
 	# by fal.ai and are far slower than a GPT-4o suggestion, so the two budgets are
 	# tuned independently.
 	SEGMENTATION_RATE_LIMIT_PER_MINUTE: int = Field(default=5)
+	# How many segmentation attempts the UI offers per uploaded image.
+	#
+	# Served to the portal via GET /ai/segmentation-config so the number lives in
+	# one place instead of being hardcoded in both the API and the frontend.
+	#
+	# ENFORCED BY THE FRONTEND ONLY — the API does not count attempts per image.
+	# A caller hitting /ai/image-segment directly is bounded only by
+	# SEGMENTATION_RATE_LIMIT_PER_MINUTE, and the count resets whenever the user
+	# reloads the page. This is a UX guardrail against over-clicking, not a spend
+	# control; bounding fal.ai cost would need server-side per-image state.
+	SEGMENTATION_MAX_ATTEMPTS_PER_IMAGE: int = Field(default=5)
 
 	# USDZ Azure Container Apps Job — triggers the GLB -> USDZ converter job.
 	# Use the SAME values as the SAM-3D service so it hits the SAME job.
