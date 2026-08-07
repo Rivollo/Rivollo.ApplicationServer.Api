@@ -21,9 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: dev
-    outputs:
-      image_num: ${{ steps.meta.outputs.image_num }}
-      image_tag: ${{ steps.meta.outputs.tag_num }}
+    # No `outputs:` here on purpose. The image reference contains the ACR login
+    # server, which matches secrets.ACR_USERNAME, and GitHub refuses to pass job
+    # outputs containing secret values — they arrive empty. The deploy job rebuilds
+    # the reference from env instead. See "Resolve and validate image reference".
 
     steps:
       - name: Checkout
@@ -82,26 +83,111 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # Deliberately NOT `needs.build.outputs.image_num`. GitHub drops any job
+      # output whose value contains a secret, and the ACR admin username is the
+      # registry name itself (secrets.ACR_USERNAME == "rivollodevacr"), which
+      # appears inside every image reference. So that output always arrived empty,
+      # and `az containerapp update --image ""` is a no-op that exits 0 — the cause
+      # of weeks of green deploys that shipped nothing to dev and prod.
+      #
+      # Rebuild the reference here instead, from non-secret workflow env plus
+      # GITHUB_RUN_NUMBER, which is identical across jobs in the same run and so
+      # matches the tag the build job pushed. Nothing crosses a job boundary.
+      - name: Resolve and validate image reference
+        run: |
+          set -euo pipefail
+          if [ -z "${ACR_LOGIN_SERVER:-}" ] || [ -z "${IMAGE_NAME:-}" ]; then
+            echo "::error::ACR_LOGIN_SERVER or IMAGE_NAME is empty — cannot build an image reference."
+            exit 1
+          fi
+          if [ -z "${CONTAINERAPP_NAME:-}" ] || [ -z "${AZURE_RESOURCE_GROUP:-}" ]; then
+            echo "::error::CONTAINERAPP_NAME or AZURE_RESOURCE_GROUP is empty — check the repo/environment variables."
+            exit 1
+          fi
+          TAG_NUM="build-${GITHUB_RUN_NUMBER}"
+          IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${TAG_NUM}"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+          # The registry host is masked as *** in logs because it matches a secret;
+          # the tag is the useful part to read here.
+          echo "Deploying tag: ${TAG_NUM}"
+
+      # Captured before the update so the next step can prove Azure actually rolled
+      # something out, rather than trusting that asking was enough.
+      - name: Record currently deployed revision
+        run: |
+          set -euo pipefail
+          REV_BEFORE=$(az containerapp show \
+            --name "$CONTAINERAPP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "properties.latestRevisionName" -o tsv)
+          echo "REV_BEFORE=${REV_BEFORE}" >> "$GITHUB_ENV"
+          echo "Currently deployed revision: ${REV_BEFORE:-<none>}"
+
       - name: Deploy new image to Container App
         run: |
+          set -euo pipefail
           az containerapp update \
             --name "$CONTAINERAPP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "${{ needs.build.outputs.image_num }}"
+            --image "$IMAGE"
+
+      # Two assertions, and the second is the one that actually matters.
+      #
+      # Comparing the image string only proves the config says what we asked for.
+      # It does not prove a container was ever started from it: when the requested
+      # reference already equals the applied one -- a re-run re-pushing the same
+      # mutable build-N tag, or a redeploy of the current tag -- Azure has no
+      # template change to act on, creates no revision, and latestRevisionName
+      # stays pointing at the revision that was already running. A health check
+      # would then grade that old revision, find it Running, and pass. Green run,
+      # nothing shipped. So require the revision to have actually changed.
+      - name: Verify a new revision was created
+        run: |
+          set -euo pipefail
+          APPLIED=$(az containerapp show \
+            --name "$CONTAINERAPP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "properties.template.containers[0].image" -o tsv)
+          echo "Requested: $IMAGE"
+          echo "Applied  : $APPLIED"
+          if [ "$APPLIED" != "$IMAGE" ]; then
+            echo "::error::Image was NOT applied — app is still on '$APPLIED'. \
+          The update call reported success without changing the app configuration."
+            exit 1
+          fi
+
+          # latestRevisionName can lag the update by a few seconds, so poll rather
+          # than reading it once and racing.
+          REV="$REV_BEFORE"
+          for i in $(seq 1 12); do
+            REV=$(az containerapp show \
+              --name "$CONTAINERAPP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --query "properties.latestRevisionName" -o tsv)
+            [ "$REV" != "$REV_BEFORE" ] && break
+            echo "Waiting for a new revision to appear (still ${REV:-<none>}) ... ($i/12)"
+            sleep 5
+          done
+
+          if [ "$REV" = "$REV_BEFORE" ]; then
+            echo "::error::No new revision was created — still '$REV_BEFORE'. The image \
+          reference did not change, so Azure had nothing to roll out. The previously running \
+          revision is still serving and this deploy did NOT take effect."
+            exit 1
+          fi
+          echo "REV=${REV}" >> "$GITHUB_ENV"
+          echo "::notice::New revision created: ${REV} (previous: ${REV_BEFORE:-<none>})"
 
       - name: Wait for revision to be healthy
         run: |
           set -euo pipefail
           MAX_ATTEMPTS=30   # 30 × 10s = 5 min
-          REV=""
           RUNNING_STATE=""
           PROV_STATE=""
+          # Poll the revision this deploy created (properties.latestRevisionName),
+          # NOT "newest by createdTime" — the latter can lock onto an unrelated
+          # revision and report healthy for the wrong one.
           for i in $(seq 1 $MAX_ATTEMPTS); do
-            REV=$(az containerapp revision list \
-              --name "$CONTAINERAPP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --query "sort_by([], &properties.createdTime)[-1].name" \
-              -o tsv)
             RUNNING_STATE=$(az containerapp revision show \
               --name "$CONTAINERAPP_NAME" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -118,9 +204,13 @@ jobs:
                 echo "::notice::Revision $REV is healthy"
                 exit 0
                 ;;
-              ScaledToZero)
+              # This app runs minReplicas=0 behind an HTTP scaler, so an idle
+              # revision reports Stopped (or ScaledToZero) with 0 replicas. That
+              # is a successful deploy waiting for its first request — not a
+              # failure. Provisioned is the signal that matters here.
+              Stopped|ScaledToZero)
                 if [ "$PROV_STATE" = "Provisioned" ]; then
-                  echo "::notice::Revision $REV provisioned (scaled to zero). Deploy succeeded."
+                  echo "::notice::Revision $REV provisioned and idle (scaled to zero). Deploy succeeded."
                   exit 0
                 fi
                 ;;
@@ -149,11 +239,16 @@ jobs:
             --type system --tail 200 || true
           echo "::endgroup::"
 
-          echo "::group::Revision details"
+          # Narrow projection on purpose. `revision show -o yaml` dumps the whole
+          # template including every container env var, which printed live API
+          # keys into this public-to-the-org log on every failed deploy.
+          echo "::group::Revision summary (no env vars)"
           az containerapp revision show \
             --name "$CONTAINERAPP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision "$REV" -o yaml || true
+            --revision "$REV" \
+            --query "{name:name, image:properties.template.containers[0].image, running:properties.runningState, provisioning:properties.provisioningState, health:properties.healthState, replicas:properties.replicas, created:properties.createdTime}" \
+            -o json || true
           echo "::endgroup::"
 
           exit 1

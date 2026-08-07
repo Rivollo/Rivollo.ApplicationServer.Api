@@ -197,6 +197,27 @@ class Settings(BaseSettings):
 
 	# fal.ai API key for server-side model calls such as SAM2 image segmentation.
 	FAL_KEY: str = Field(default="")
+	# Max outbound SAM2 calls to fal.ai per minute, across ALL users. fal.ai
+	# rate-limits per API key, so this mirrors the upstream constraint; the
+	# per-user limit below is a separate, fairness concern. Confirm the real
+	# ceiling for your fal tier before raising it.
+	FAL_SEGMENT_RATE_LIMIT_PER_MINUTE: int = Field(default=5)
+	# Max /ai/image-segment calls per user per minute before HTTP 429 is returned.
+	# Deliberately separate from OPENAI_RATE_LIMIT_PER_MINUTE: SAM2 runs are billed
+	# by fal.ai and are far slower than a GPT-4o suggestion, so the two budgets are
+	# tuned independently.
+	SEGMENTATION_RATE_LIMIT_PER_MINUTE: int = Field(default=5)
+	# How many segmentation attempts the UI offers per uploaded image.
+	#
+	# Served to the portal via GET /ai/segmentation-config so the number lives in
+	# one place instead of being hardcoded in both the API and the frontend.
+	#
+	# ENFORCED BY THE FRONTEND ONLY — the API does not count attempts per image.
+	# A caller hitting /ai/image-segment directly is bounded only by
+	# SEGMENTATION_RATE_LIMIT_PER_MINUTE, and the count resets whenever the user
+	# reloads the page. This is a UX guardrail against over-clicking, not a spend
+	# control; bounding fal.ai cost would need server-side per-image state.
+	SEGMENTATION_MAX_ATTEMPTS_PER_IMAGE: int = Field(default=5)
 
 	# Tripo's OWN API (openapi.tripo3d.ai), separate from the Tripo model we call
 	# through fal. Only this direct integration exposes `generate_parts`, which
