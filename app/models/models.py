@@ -450,6 +450,13 @@ class Job(UUIDMixin, AuditMixin, Base):
     engine: Mapped[Optional[str]] = mapped_column(Text)
     completed_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
 
+    # Provider-side task tracking, for pipelines that run more than one task.
+    # The Tripo parts pipeline stores its STAGE 1 (geometry) task id here so a
+    # failed texturing step can resume rather than regenerate paid-for geometry.
+    external_task_id: Mapped[Optional[str]] = mapped_column(Text)
+    stage: Mapped[Optional[str]] = mapped_column(Text)
+    provider_credits: Mapped[Optional[int]] = mapped_column(Integer)
+
     # Virtual columns - these don't exist in actual database
     gpu_type = column_property(literal_column("NULL::text"))
     credits_used = column_property(literal_column("1::integer"))

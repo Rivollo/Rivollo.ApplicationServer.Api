@@ -52,6 +52,7 @@ from app.schemas.products import (
     ProductCreate,
     ProductCreateWithImageUrls,
     ProductCreateWithFalImage,
+    ProductCreateWithParts,
     ProductDetailsUpdate,
     ProductImageItem,
     ProductOriginalImageUploadResponse,
@@ -73,7 +74,7 @@ from app.services.background_removal_service import background_removal_service
 from app.services.licensing_service import LicensingService
 from app.integrations.fal import get_model_spec
 from app.services.generation_estimate_service import generation_estimate_service
-from app.services.product_service import product_service
+from app.services.product_service import product_service, TRIPO_PARTS_MODEL_KEY
 from app.services.dimension_service import DimensionService
 from app.utils.envelopes import api_error, api_success
 from app.models.models import PublishLink
@@ -108,6 +109,16 @@ PRODUCT_CREATION_AI_CREDIT_COST = 10
 # so it is priced separately. Do not fold this back into the constant above —
 # /products and /createProductFal still charge 10.
 SAM3_PRODUCT_CREATION_AI_CREDIT_COST = 2
+
+# /createProductWithParts runs TWO chained Tripo tasks (segmented geometry, then
+# texture) against Tripo's own billed account, so it costs more than the
+# single-task paths.
+PARTS_PRODUCT_CREATION_AI_CREDIT_COST = 20
+
+# Seed ETA for the two-stage pipeline, superseded by real progress over the
+# WebSocket once generation starts. Unmeasured — the Tripo account had no
+# credit at build time, so this is a placeholder to correct with real runs.
+TRIPO_PARTS_BASELINE_SECONDS = 420
 
 # Supported thumbnail image content types → file extension.
 _IMAGE_CONTENT_TYPE_EXT = {
@@ -569,7 +580,130 @@ async def create_product_with_image_fal(
     # of its own, so this is the median of recent measured runs (or the
     # registry seed until enough have accumulated). Emitted under "gpu" to
     # reuse the estimate contract the portal already renders a countdown from.
-    estimate = await generation_estimate_service.estimate(db, model_spec.key, model_spec)
+    estimate = await generation_estimate_service.estimate(
+        db, model_spec.key, model_spec.baseline_estimate_seconds
+    )
+    response_dict["gpu"] = estimate.to_payload()
+
+    return api_success(response_dict)
+
+
+@router.post(
+    "/createProductWithParts",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_product_with_parts(
+    payload: ProductCreateWithParts,
+    db: DB,
+    background_tasks: BackgroundTasks,
+):
+    """Create a product as a SEGMENTED, textured 3D model.
+
+    Generation runs against Tripo's direct API rather than fal, because only
+    that API exposes ``generate_parts``. It is a two-stage pipeline — segmented
+    geometry, then texture — since Tripo refuses to produce parts and texture in
+    a single task.
+
+    Returns immediately with the product in DRAFT/QUEUE. Progress is broadcast
+    over the product-status WebSocket using Tripo's real ``progress`` value, so
+    the UI can show a true progress bar rather than an estimated countdown.
+    """
+    try:
+        user_uuid = uuid.UUID(payload.userId)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid userId format. Expected UUID string.",
+        )
+
+    # Fail fast and clearly if the provider was never configured, rather than
+    # letting a background task die with an opaque error the caller never sees.
+    if not (settings.TRIPO_API_KEY or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Multi-part 3D generation is not configured on this server "
+                "(TRIPO_API_KEY is missing)."
+            ),
+        )
+
+    # Same plan gate as the other AI generation paths.
+    plan_code = await LicensingService.get_user_plan_code(db, user_uuid)
+    if plan_code not in ("pro", "enterprise"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Creating products requires a Pro or Enterprise plan. "
+                "Please subscribe to continue."
+            ),
+        )
+
+    credit_cost = PARTS_PRODUCT_CREATION_AI_CREDIT_COST
+    allowed, quota_info = await LicensingService.check_quota(
+        db, user_uuid, "ai_credits", increment=credit_cost
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Not enough AI credits. {credit_cost} credits are required to "
+                "create a multi-part product."
+            ),
+        )
+
+    try:
+        product, image_url, glb_url = (
+            await product_service.create_product_with_parts_image_urls(
+                db=db,
+                background_tasks=background_tasks,
+                user_id=user_uuid,
+                name=payload.name,
+                asset_id=1,
+                mesh_asset_id=payload.mesh_asset_id,
+                image_url=str(payload.imageURL),
+            )
+        )
+
+        await LicensingService.increment_usage(
+            db, user_uuid, "ai_credits", increment=credit_cost
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )
+
+    await db.refresh(product)
+
+    response_data = ProductResponse(
+        id=str(product.id),
+        name=product.name,
+        description=None,
+        brand=None,
+        accent_color="#2563EB",
+        accent_overlay=None,
+        tags=[],
+        status=product.status.value,
+        created_at=product.created_at,
+        updated_at=product.updated_at,
+    )
+
+    response_dict = response_data.model_dump(exclude_none=True)
+    response_dict["imageURL"] = image_url
+    if glb_url:
+        response_dict["glbURL"] = glb_url
+
+    # Seed estimate only. Once generation starts, the WebSocket carries Tripo's
+    # real progress, which supersedes any prediction made here.
+    estimate = await generation_estimate_service.estimate(
+        db, TRIPO_PARTS_MODEL_KEY, TRIPO_PARTS_BASELINE_SECONDS
+    )
     response_dict["gpu"] = estimate.to_payload()
 
     return api_success(response_dict)

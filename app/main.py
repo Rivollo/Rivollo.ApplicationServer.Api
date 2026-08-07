@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import Optional
 from uuid import UUID
 import os
+import sys
 
 from opentelemetry.trace import get_current_span
 
@@ -118,7 +119,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
 # Ensure we also write logs to a local file `.server.log`
-def _ensure_file_logging() -> None:
+def _configure_logging() -> None:
+	"""Send application logs to BOTH .server.log and the console."""
 	root_logger = logging.getLogger()
 	server_log_path = os.path.join(os.getcwd(), ".server.log")
 	already_added = False
@@ -136,9 +138,37 @@ def _ensure_file_logging() -> None:
 		formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
 		fh.setFormatter(formatter)
 		root_logger.addHandler(fh)
-		# Make sure INFO logs propagate to file
-		if root_logger.level > logging.INFO or root_logger.level == logging.NOTSET:
-			root_logger.setLevel(logging.INFO)
+
+	# --- Console output -------------------------------------------------
+	# Without this, every application log lands ONLY in .server.log and a
+	# developer watching the terminal sees nothing but uvicorn's access lines.
+	# Tagged with a marker attribute because --reload re-imports this module and
+	# would otherwise stack a new handler on every code change, duplicating
+	# every log line N times.
+	_CONSOLE_MARKER = "_rivollo_console"
+	has_console = any(getattr(h, _CONSOLE_MARKER, False) for h in root_logger.handlers)
+	if not has_console:
+		sh = logging.StreamHandler(sys.stdout)
+		sh.setFormatter(
+			logging.Formatter("%(asctime)s %(levelname)-7s %(name)s  %(message)s")
+		)
+		setattr(sh, _CONSOLE_MARKER, True)
+		root_logger.addHandler(sh)
+
+	level = getattr(logging, (settings.LOG_LEVEL or "INFO").upper(), logging.INFO)
+	root_logger.setLevel(level)
+
+	# httpx logs one line per outbound request — exactly what you want when
+	# debugging a provider call (it shows the URL and status), so it is on by
+	# default and can be silenced via config.
+	logging.getLogger("httpx").setLevel(
+		logging.INFO if settings.LOG_HTTP_REQUESTS else logging.WARNING
+	)
+	# These are chatty at INFO and rarely what anyone is looking for.
+	logging.getLogger("httpcore").setLevel(logging.WARNING)
+	logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(
+		logging.WARNING
+	)
 try:
 	if settings.ENABLE_APP_INSIGHTS and settings.AZURE_MONITOR_CONN_STR:
 		from azure.monitor.opentelemetry import configure_azure_monitor
@@ -163,8 +193,8 @@ except Exception as telemetry_exc:
 	# Do not block app startup if telemetry fails
 	logging.getLogger(__name__).warning("Failed to initialize Azure Monitor telemetry: %s", telemetry_exc)
 
-# Initialize file logging regardless of telemetry
-_ensure_file_logging()
+# Configure logging (file + console) regardless of telemetry
+_configure_logging()
 
 # CORS (adjust for real origins later)
 app.add_middleware(
