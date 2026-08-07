@@ -211,6 +211,11 @@ async def track_product_status(
         # so every subsequent keepalive also carries the estimate.
         estimated_time: int | None = None
         gpu_message: str | None = None
+        # Real completion percentage (0-100), currently broadcast only by the
+        # multi-part Tripo pipeline, which reports provider-measured progress
+        # rather than an estimate. Persisted like the fields above so keepalives
+        # keep carrying the last known value between updates.
+        progress: int | None = None
 
         while True:
 
@@ -239,6 +244,8 @@ async def track_product_status(
                     }
                     if estimated_time is not None:
                         keepalive_payload["estimated_time"] = estimated_time
+                    if progress is not None:
+                        keepalive_payload["progress"] = progress
                     await websocket.send_json(keepalive_payload)
                     keepalive_count += 1
                 except Exception:
@@ -301,6 +308,7 @@ async def track_product_status(
             # not on plain pg_notify trigger payloads.
             _etl = notification.get("estimated_time")
             _msg = notification.get("message")
+            _pct = notification.get("progress")
             if _etl is not None:
                 try:
                     estimated_time = int(_etl)
@@ -308,6 +316,13 @@ async def track_product_status(
                     estimated_time = None
             if _msg:
                 gpu_message = _msg
+            if _pct is not None:
+                try:
+                    # Clamp: a provider reporting >100 must not drive a progress
+                    # bar past full.
+                    progress = max(0, min(100, int(_pct)))
+                except (TypeError, ValueError):
+                    progress = None
 
             status_update_payload: dict = {
                 "type":         "status_update",
@@ -321,6 +336,8 @@ async def track_product_status(
                 status_update_payload["estimated_time"] = estimated_time
             if gpu_message:
                 status_update_payload["message"] = gpu_message
+            if progress is not None:
+                status_update_payload["progress"] = progress
             await websocket.send_json(status_update_payload)
 
             if new_status == TERMINAL_STATUS:

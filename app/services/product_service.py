@@ -14,7 +14,7 @@ from sqlalchemy import select, func, insert
 from datetime import datetime
 
 from app.core.config import settings
-from app.models.models import Product, ProductAsset, ProductAssetMapping, ProductStatus, Background
+from app.models.models import Product, ProductAsset, ProductAssetMapping, ProductStatus, Background, Job
 from app.services.storage import storage_service
 from app.services.glb_compression_service import glb_compression_service
 from app.services.gpu_status_service import gpu_status_service
@@ -27,12 +27,17 @@ from app.database.subscription_repo import SubscriptionRepository
 from app.schemas.products import ProductWithPrimaryAsset, ProductsByUserResponse
 from app.services.notification_service import NotificationService
 from app.services.generation_estimate_service import generation_estimate_service
+from app.integrations.tripo import TripoError, tripo_parts_pipeline
 
 
 # Asset id under which a USDZ is stored, matching the GLB->USDZ conversion job
 # and the viewer's lookup (Rivollo.Viewer.Api ProductAssetsRepository: asset 9
 # is the GLB, asset 11 the USDZ).
 USDZ_ASSET_ID = 11
+
+# Stats/estimate key for the two-stage Tripo pipeline. Deliberately distinct
+# from the single-stage fal "tripo" so their durations never mix.
+TRIPO_PARTS_MODEL_KEY = "tripo-parts"
 
 _MAX_REMOTE_MASK_IMAGE_BYTES = 25 * 1024 * 1024
 _ALLOWED_REMOTE_MASK_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -1519,6 +1524,357 @@ class ProductService:
         except Exception:
             logger.exception(
                 "Background fal SAM-3 generation failed for product %s", product_id
+            )
+
+    # ------------------------------------------------------------------ #
+    # Tripo parts pipeline — segmented + textured mesh
+    #
+    # Kept entirely separate from the fal paths above. It speaks a different
+    # protocol, bills against a different account and runs two chained tasks,
+    # so sharing code with them would couple things that fail differently.
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    async def create_product_with_parts_image_urls(
+        db: AsyncSession,
+        background_tasks: BackgroundTasks,
+        user_id: uuid.UUID,
+        name: str,
+        asset_id: int,
+        mesh_asset_id: int,
+        image_url: str,
+    ) -> tuple[Product, str, Optional[str]]:
+        """Create a product whose 3D model is generated as separate parts.
+
+        Mirrors the shape of the fal creation methods: the product row and its
+        image asset commit immediately, generation is scheduled in the
+        background, and ``glb_url`` is None because nothing exists yet.
+        """
+        logger = logging.getLogger(__name__)
+
+        base_slug = ProductService._slugify(name)
+        slug = await ProductService._generate_unique_slug(db, base_slug)
+
+        product = Product(
+            name=name,
+            slug=slug,
+            status=ProductStatus.DRAFT,
+            created_by=user_id,
+        )
+        db.add(product)
+        await db.flush()
+
+        try:
+            product_asset = ProductAsset(
+                asset_id=1,
+                image=image_url,
+                created_by=user_id,
+            )
+            db.add(product_asset)
+            await db.flush()
+            await db.refresh(product_asset)
+
+            db.add(
+                ProductAssetMapping(
+                    name=name,
+                    productid=product.id,
+                    product_asset_id=product_asset.id,
+                    isactive=True,
+                    created_by=user_id,
+                )
+            )
+        except Exception as exc:
+            await db.rollback()
+            raise RuntimeError("Failed to store the product image") from exc
+
+        await db.commit()
+
+        try:
+            await db.refresh(product)
+        except Exception:
+            pass
+
+        logger.info(
+            "Scheduling background Tripo parts generation for product %s", product.id
+        )
+        background_tasks.add_task(
+            ProductService._run_parts_generation_background,
+            user_id=user_id,
+            product_id=product.id,
+            mesh_asset_id=mesh_asset_id,
+            name=name,
+            image_url=image_url,
+        )
+
+        return product, image_url, None
+
+    @staticmethod
+    async def generate_3d_with_parts_and_finalize(
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        product_id: uuid.UUID,
+        mesh_asset_id: int,
+        name: str,
+        image_url: str,
+        resume_geometry_task_id: Optional[str] = None,
+    ) -> str:
+        """Run the two-stage Tripo pipeline and persist the resulting GLB.
+
+        Progress is broadcast from Tripo's own ``progress`` field rather than
+        estimated — the main operational advantage of this provider over fal.
+
+        ``resume_geometry_task_id`` skips stage 1 when a previous attempt got
+        that far: geometry is the expensive half and is already paid for.
+        """
+        logger = logging.getLogger(__name__)
+        from app.api.websocket.broadcaster import broadcaster
+
+        product = await db.get(Product, product_id)
+        if not product:
+            raise RuntimeError(f"Product {product_id} not found")
+
+        product.status = ProductStatus.PROCESSING
+        await db.commit()
+        logger.info("Product %s status -> PROCESSING (tripo-parts)", product_id)
+
+        # Written BEFORE generation starts so a crash mid-run still leaves a
+        # trace that can be resumed.
+        job = Job(
+            product_id=product_id,
+            status=ProductStatus.PROCESSING.value,
+            engine=TRIPO_PARTS_MODEL_KEY,
+            stage="geometry",
+            created_by=user_id,
+        )
+        db.add(job)
+        await db.commit()
+        job_id = job.id
+
+        started_at = time.perf_counter()
+
+        # Tripo reports progress continuously; logging every change would emit
+        # ~100 lines per run. Log at 10% milestones so a long generation visibly
+        # advances in the console without drowning it.
+        last_logged_decile = -1
+
+        async def on_progress(percent: int, label: str) -> None:
+            nonlocal last_logged_decile
+            decile = percent // 10
+            if decile != last_logged_decile:
+                last_logged_decile = decile
+                logger.info(
+                    "Tripo parts %3d%%  %s  (product %s)", percent, label, product_id
+                )
+
+            # Fire-and-forget: a dropped socket must never fail generation.
+            try:
+                await broadcaster.broadcast_to_product(
+                    str(product_id),
+                    {
+                        "new_status": ProductStatus.PROCESSING.value,
+                        "message": label,
+                        "progress": percent,
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "Progress broadcast failed for %s", product_id, exc_info=True
+                )
+
+        try:
+            result = await tripo_parts_pipeline.generate(
+                image_url=image_url,
+                on_progress=on_progress,
+                geometry_task_id=resume_geometry_task_id,
+            )
+        except TripoError as exc:
+            elapsed = time.perf_counter() - started_at
+            logger.error(
+                "Tripo parts generation failed for product %s (task=%s): %s",
+                product_id, exc.task_id, exc,
+            )
+            await db.rollback()
+            failed_product = await db.get(Product, product_id)
+            if failed_product:
+                failed_product.status = ProductStatus.DRAFT
+            failed_job = await db.get(Job, job_id)
+            if failed_job:
+                failed_job.status = "failed"
+                # Persist whichever task id we reached so a retry can resume.
+                if exc.task_id:
+                    failed_job.external_task_id = exc.task_id
+            await db.commit()
+            await generation_estimate_service.record(
+                db, TRIPO_PARTS_MODEL_KEY, elapsed, succeeded=False
+            )
+            raise RuntimeError(f"3D generation failed: {exc}") from exc
+
+        done_job = await db.get(Job, job_id)
+        if done_job:
+            # The GEOMETRY id is the resumable half, so that is what we keep.
+            done_job.external_task_id = result.geometry_task_id
+            done_job.stage = "complete"
+            done_job.provider_credits = result.total_credits
+            await db.commit()
+
+        glb_bytes = result.glb_bytes
+        if settings.ENABLE_DRACO_COMPRESSION:
+            try:
+                glb_bytes = glb_compression_service.compress(result.glb_bytes)
+            except Exception:
+                logger.warning(
+                    "Draco compression failed for product %s — uploading original",
+                    product_id, exc_info=True,
+                )
+                glb_bytes = result.glb_bytes
+
+        try:
+            stream = io.BytesIO(glb_bytes)
+            stream.seek(0)
+            glb_url, glb_blob_url = storage_service.upload_product_image(
+                user_id=str(user_id),
+                product_id=str(product_id),
+                filename="model.glb",
+                content_type=result.content_type or "model/gltf-binary",
+                stream=stream,
+            )
+        except Exception as exc:
+            logger.exception("Failed to store parts GLB for product %s", product_id)
+            failed_product = await db.get(Product, product_id)
+            if failed_product:
+                failed_product.status = ProductStatus.DRAFT
+                await db.commit()
+            raise RuntimeError("Failed to store generated GLB in Azure storage") from exc
+
+        try:
+            glb_asset = ProductAsset(
+                asset_id=mesh_asset_id,
+                image=glb_url,
+                created_by=user_id,
+            )
+            db.add(glb_asset)
+            await db.flush()
+
+            db.add(
+                ProductAssetMapping(
+                    name=name,
+                    productid=product_id,
+                    product_asset_id=glb_asset.id,
+                    isactive=True,
+                    created_by=user_id,
+                )
+            )
+
+            ready_product = await db.get(Product, product_id)
+            if ready_product:
+                ready_product.status = ProductStatus.READY
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            failed_product = await db.get(Product, product_id)
+            if failed_product:
+                failed_product.status = ProductStatus.DRAFT
+                await db.commit()
+            raise RuntimeError("Failed to save GLB asset to database") from exc
+
+        elapsed = time.perf_counter() - started_at
+        logger.info(
+            "Product %s -> READY (tripo-parts)  %.1fs  credits=%s  glb=%s",
+            product_id, elapsed, result.total_credits, glb_url,
+        )
+        await generation_estimate_service.record(db, TRIPO_PARTS_MODEL_KEY, elapsed)
+
+        try:
+            await NotificationService.create_and_push_notification(
+                db=db,
+                user_id=user_id,
+                notification_type="product.ready",
+                title="Product Ready",
+                body=f"Your product '{name}' is ready.",
+                data={
+                    "product_id": str(product_id),
+                    "product_name": name,
+                    "status": ProductStatus.READY.value,
+                    "glb_url": glb_url,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Failed to send product-ready notification for product %s",
+                product_id, exc_info=True,
+            )
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+        # USDZ, on the same paid-plan terms as every other creation path.
+        try:
+            from app.services.licensing_service import LicensingService
+
+            if await LicensingService.can_create_usdz(db, user_id):
+                from app.services.usdz_trigger_service import usdz_trigger_service
+
+                await usdz_trigger_service.trigger_conversion(
+                    glb_blob_url=glb_blob_url,
+                    product_id=str(product_id),
+                    user_id=str(user_id),
+                    product_name=name,
+                )
+            else:
+                logger.info(
+                    "USDZ skipped for product %s — user %s is not on a "
+                    "USDZ-eligible plan.",
+                    product_id, user_id,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to schedule USDZ conversion for product %s (non-fatal)",
+                product_id, exc_info=True,
+            )
+
+        return glb_url
+
+    @staticmethod
+    async def _run_parts_generation_background(
+        user_id: uuid.UUID,
+        product_id: uuid.UUID,
+        mesh_asset_id: int,
+        name: str,
+        image_url: str,
+    ) -> None:
+        """Open a fresh session and run the parts pipeline in the background."""
+        from app.core.db import new_session
+        from app.api.websocket.broadcaster import broadcaster
+
+        logger = logging.getLogger(__name__)
+        try:
+            async with new_session() as db:
+                queued = await db.get(Product, product_id)
+                if queued:
+                    queued.status = ProductStatus.QUEUE
+                    await db.commit()
+
+            await broadcaster.broadcast_to_product(
+                str(product_id),
+                {
+                    "new_status": ProductStatus.QUEUE.value,
+                    "message": "Your 3D model generation is starting.",
+                },
+            )
+
+            async with new_session() as db:
+                await ProductService.generate_3d_with_parts_and_finalize(
+                    db=db,
+                    user_id=user_id,
+                    product_id=product_id,
+                    mesh_asset_id=mesh_asset_id,
+                    name=name,
+                    image_url=image_url,
+                )
+        except Exception:
+            logger.exception(
+                "Background Tripo parts generation failed for product %s", product_id
             )
 
     @staticmethod

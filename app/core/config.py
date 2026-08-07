@@ -187,6 +187,14 @@ class Settings(BaseSettings):
 	OPENAI_MAX_RETRIES: int = Field(default=3)
 	# Per-request HTTP timeout in seconds (applies to each attempt, not the total)
 	OPENAI_TIMEOUT_SECONDS: int = Field(default=30)
+	# Root log level for application loggers. Also controls what reaches the
+	# console: without a stream handler at this level, INFO logs land only in
+	# .server.log and a developer watching the terminal sees nothing.
+	LOG_LEVEL: str = Field(default="INFO")
+	# Per-request HTTP client logs (httpx). Useful when debugging an outbound
+	# provider call — it prints the exact URL and status — but noisy otherwise.
+	LOG_HTTP_REQUESTS: bool = Field(default=True)
+
 	# fal.ai API key for server-side model calls such as SAM2 image segmentation.
 	FAL_KEY: str = Field(default="")
 	# Max outbound SAM2 calls to fal.ai per minute, across ALL users. fal.ai
@@ -210,6 +218,19 @@ class Settings(BaseSettings):
 	# reloads the page. This is a UX guardrail against over-clicking, not a spend
 	# control; bounding fal.ai cost would need server-side per-image state.
 	SEGMENTATION_MAX_ATTEMPTS_PER_IMAGE: int = Field(default=5)
+
+	# Tripo's OWN API (openapi.tripo3d.ai), separate from the Tripo model we call
+	# through fal. Only this direct integration exposes `generate_parts`, which
+	# produces a segmented mesh — fal's wrapper has no such parameter.
+	TRIPO_API_KEY: str = Field(default="", description="Bearer token for Tripo's direct API.")
+	TRIPO_API_BASE_URL: str = Field(default="https://openapi.tripo3d.ai/v3")
+	# Geometry and texture use different model versions on purpose: Tripo
+	# documents the v3.0 texture model as the recommended pairing for BOTH v3.0
+	# and v3.1 geometry — there is no v3.1 texture model.
+	TRIPO_GEOMETRY_MODEL: str = Field(default="v3.1-20260211")
+	TRIPO_TEXTURE_MODEL: str = Field(default="v3.0-20250812")
+	# Two chained long-running tasks, so this covers both stages plus queueing.
+	TRIPO_MAX_WAIT_SECONDS: float = Field(default=1800.0)
 
 	# USDZ Azure Container Apps Job — triggers the GLB -> USDZ converter job.
 	# Use the SAME values as the SAM-3D service so it hits the SAME job.

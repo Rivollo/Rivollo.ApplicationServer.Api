@@ -75,6 +75,25 @@ class ProductCreateWithFalImage(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
 
+class ProductCreateWithParts(BaseModel):
+    """Create a product as a SEGMENTED, textured 3D model via Tripo's direct API.
+
+    Deliberately named by capability rather than vendor: the multi-part mesh is
+    the product feature, and the provider behind it should be swappable without
+    renaming a public route.
+
+    Intentionally carries no generation options. Which Tripo model version runs,
+    the face limit, texture quality and the mandatory
+    ``generate_parts``/``texture`` combination are all server-side concerns —
+    exposing them would let a client produce a mesh our configurator cannot read.
+    """
+
+    userId: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1, max_length=200)
+    imageURL: HttpUrl
+    mesh_asset_id: int = 9
+
+
 class ProductUpdate(BaseModel):
     """Product update request (all fields optional)."""
 

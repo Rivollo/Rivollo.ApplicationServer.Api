@@ -52,7 +52,9 @@ async def list_3d_models(current_user: CurrentUser, db: DB):
     """
     models = []
     for spec in list_model_specs():
-        estimate = await generation_estimate_service.estimate(db, spec.key, spec)
+        estimate = await generation_estimate_service.estimate(
+            db, spec.key, spec.baseline_estimate_seconds
+        )
         models.append(
             {
                 "key": spec.key,

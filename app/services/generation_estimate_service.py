@@ -28,7 +28,6 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.integrations.fal import FalModelSpec, get_model_spec
 from app.models.models import ModelGenerationStat
 
 logger = logging.getLogger(__name__)
@@ -38,6 +37,8 @@ logger = logging.getLogger(__name__)
 SAMPLE_SIZE = 20
 # Below this, one unusual run would swing the estimate wildly — keep the seed.
 MIN_SAMPLES = 3
+# Used when a provider supplies no baseline and the fal registry has no entry.
+DEFAULT_BASELINE_SECONDS = 300
 
 
 class GenerationEstimate:
@@ -116,19 +117,42 @@ class GenerationEstimateService:
                 pass
 
     @staticmethod
+    def _baseline_for(model_key: str) -> int:
+        """Seed estimate for a model with too little history.
+
+        Resolved lazily and defensively: the fal registry is one provider among
+        several now, so a key it does not know (the Tripo parts pipeline, say)
+        must fall back rather than raise.
+        """
+        try:
+            from app.integrations.fal import get_model_spec
+
+            return get_model_spec(model_key).baseline_estimate_seconds
+        except Exception:
+            return DEFAULT_BASELINE_SECONDS
+
+    @staticmethod
     async def estimate(
         db: AsyncSession,
         model_key: str,
-        spec: Optional[FalModelSpec] = None,
+        baseline_seconds: Optional[int] = None,
     ) -> GenerationEstimate:
-        """Predicted duration for the next run of ``model_key``."""
-        resolved = spec or get_model_spec(model_key)
+        """Predicted duration for the next run of ``model_key``.
+
+        ``baseline_seconds`` is used until enough real runs exist. Callers
+        outside the fal registry (other providers) should pass their own.
+        """
+        baseline = (
+            baseline_seconds
+            if baseline_seconds is not None
+            else GenerationEstimateService._baseline_for(model_key)
+        )
 
         try:
             result = await db.execute(
                 select(ModelGenerationStat.duration_seconds)
                 .where(
-                    ModelGenerationStat.model_key == resolved.key,
+                    ModelGenerationStat.model_key == model_key,
                     ModelGenerationStat.succeeded.is_(True),
                 )
                 .order_by(ModelGenerationStat.created_at.desc())
@@ -136,20 +160,20 @@ class GenerationEstimateService:
             )
             samples = [row for row in result.scalars().all()]
         except Exception:  # noqa: BLE001 - fall back to the seed on any DB issue
-            logger.exception("Could not read generation stats for %s", resolved.key)
+            logger.exception("Could not read generation stats for %s", model_key)
             samples = []
 
         if len(samples) < MIN_SAMPLES:
             return GenerationEstimate(
-                seconds=resolved.baseline_estimate_seconds,
+                seconds=baseline,
                 sample_count=len(samples),
-                model_key=resolved.key,
+                model_key=model_key,
             )
 
         return GenerationEstimate(
             seconds=int(round(median(samples))),
             sample_count=len(samples),
-            model_key=resolved.key,
+            model_key=model_key,
         )
 
 
