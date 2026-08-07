@@ -403,6 +403,22 @@ async def link_suggest(
     return api_success(results)
 
 
+@router.get("/segmentation-config", response_model=dict)
+async def segmentation_config(current_user: CurrentUser):
+    """Client-side limits for the segmentation UI.
+
+    The portal reads maxAttemptsPerImage from here rather than hardcoding it, so
+    changing the allowance is an env var and a restart — no frontend deploy, and
+    no chance of the two drifting apart.
+
+    The API does NOT enforce this number; the frontend does. Server-side, an
+    image-segment caller is bounded only by SEGMENTATION_RATE_LIMIT_PER_MINUTE.
+    """
+    return api_success(
+        {"maxAttemptsPerImage": settings.SEGMENTATION_MAX_ATTEMPTS_PER_IMAGE}
+    )
+
+
 @router.post("/image-segment", response_model=dict)
 async def image_segment(
     payload: Sam2ImageSegmentRequest,
