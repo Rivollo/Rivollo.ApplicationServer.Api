@@ -205,21 +205,23 @@ Compared with the other creation paths:
 
 | Endpoint | Provider | Your AI credits | Parts? |
 |---|---|---|---|
-| `/createProduct` | fal SAM-3 | 2 | ✗ |
-| `/createProductFal` | fal (Tripo/Hunyuan/Trellis/Meshy) | 10–20 | ✗ |
-| **`/createProductWithParts`** | **Tripo direct** | **60** | **✓** |
+| `/createProduct` | fal SAM-3 | 20 | ✗ |
+| `/createProductFal` | fal (SAM 3D 20; Tripo/Hunyuan/Trellis 100; Meshy 200) | 20–200 | ✗ |
+| **`/createProductWithParts`** | **Tripo direct** | **200** | **✓** |
 | `/createProductFromGlb` | none | 0 | n/a |
 
-We charge **60 AI credits — 1:1 with what Tripo bills us**, so this path neither
-subsidises nor profits on provider cost. It was briefly priced at 20, set before
-the pipeline had been measured.
+We charge **200 AI credits**, no longer 1:1 with what Tripo itself bills us
+(60 — see the table above). The seller-facing price is a Rivollo pricing
+decision independent of provider cost; keep `PARTS_PRODUCT_CREATION_AI_CREDIT_COST`
+in `app/api/routes/products.py` and `AI_CREDIT_COST.multiPart` in the portal's
+`lib/product/creditCosts.ts` in sync if it changes again.
 
-> ⚠️ **Plan headroom.** `max_ai_credits_month` is **100 on Pro** (10 free, 5
-> weekly), so 60 credits buys a Pro seller **one multi-part product per month**,
-> with 40 left over. There is also no `enterprise` row in `tbl_mstr_plans` —
-> only `free`, `pro`, `weekly` — even though the route gates on
-> `("pro", "enterprise")`. If multi-part is meant to be usable more than once a
-> month, the Pro allowance is what needs raising, not this price.
+> ⚠️ **Plan headroom.** `max_ai_credits_month` was **100 on Pro** (10 free, 5
+> weekly) as of the last measurement in this doc — confirm the current value
+> before relying on it, since 200 credits now exceeds that figure and would
+> make multi-part unusable within a month's allowance if it hasn't been raised
+> to match. There is also no `enterprise` row in `tbl_mstr_plans` — only
+> `free`, `pro`, `weekly` — even though the route gates on `("pro", "enterprise")`.
 
 **Untested cost variations:** `geometry_quality: detailed`, `texture_quality:
 extreme`, and different `face_limit` values may all change the price. Tripo

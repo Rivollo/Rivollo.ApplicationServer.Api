@@ -65,6 +65,7 @@ async def list_3d_models(current_user: CurrentUser, db: DB):
                 "estimated_seconds": estimate.seconds,
                 "estimated_time": estimate.display,
                 "estimate_is_measured": estimate.is_measured,
+                "free_plan_eligible": spec.free_plan_eligible,
             }
         )
     return api_success(models)

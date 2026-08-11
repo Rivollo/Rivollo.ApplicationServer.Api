@@ -50,6 +50,13 @@ class FalModelSpec:
     # Upper bound on the fal poll loop. Most models finish inside the default;
     # Meshy documents 5-10 minutes, which would race a 600s ceiling.
     max_wait_seconds: float = 600.0
+    # Whether Free-plan sellers may use this model on the direct-image path.
+    # False for every model except SAM 3D: the others are billed vendor calls
+    # we only extend to paying plans, while SAM 3D is kept free to give Free
+    # sellers a no-segmentation option too. The route and quota check both
+    # read this flag, so granting/revoking free access is a one-line change
+    # here rather than a route-level special case.
+    free_plan_eligible: bool = False
 
     @property
     def submit_url(self) -> str:
@@ -231,6 +238,37 @@ def _build_trellis_body(image_url: str) -> dict:
     }
 
 
+def _build_sam3_body(image_url: str) -> dict:
+    """SAM-3 request for the direct-image (no mask) path.
+
+    ``prompt`` defaults to "car" upstream and drives auto-segmentation — wrong
+    for an arbitrary product photo. Nulling it (rather than omitting the key)
+    is what the segmented path's own client does when it wants no
+    auto-segmentation competing with its input; here there is no mask either,
+    so per fal's docs the whole image is reconstructed as one object.
+    """
+    return {
+        "image_url": image_url,
+        "export_textured_glb": True,
+        "prompt": None,
+    }
+
+
+def _extract_sam3_glb(result: dict) -> Optional[str]:
+    """SAM-3 returns model_glb (combined scene), falling back to the first
+    per-object GLB in individual_glbs for a single-object reconstruction."""
+    url = _file_url(result.get("model_glb"))
+    if url:
+        return url
+    individual = result.get("individual_glbs") or []
+    if isinstance(individual, list):
+        for entry in individual:
+            url = _file_url(entry)
+            if url:
+                return url
+    return None
+
+
 def _build_meshy_body(image_url: str) -> dict:
     """Meshy-6 Preview request, tuned for a product viewer.
 
@@ -266,9 +304,31 @@ def _build_meshy_body(image_url: str) -> dict:
 # --------------------------------------------------------------------------- #
 # The registry
 # --------------------------------------------------------------------------- #
-DEFAULT_MODEL_KEY = "tripo"
+DEFAULT_MODEL_KEY = "sam3"
 
 FAL_MODELS: dict[str, FalModelSpec] = {
+    # Listed first: it's both the registry default and the only model every
+    # plan (including Free) can use, so it belongs at the top of the picker
+    # rather than wherever alphabetical/insertion order would otherwise put it.
+    "sam3": FalModelSpec(
+        key="sam3",
+        label="SAM 3D",
+        description="Whole-image reconstruction",
+        endpoint_id="fal-ai/sam-3/3d-objects",
+        # SAM 3D is priced the same on both paths it powers — this direct
+        # (no-mask) path and the segmented (/createProduct) path, which reads
+        # its own SAM3_PRODUCT_CREATION_AI_CREDIT_COST constant in
+        # app/api/routes/products.py. Keep the two in sync if this changes.
+        credit_cost=20,
+        # No independent measurement yet for the direct (no-mask) request
+        # shape; seeded from the segmented path's fal_sam3_client history,
+        # which the measured median replaces after 3 runs on this path.
+        baseline_estimate_seconds=180,
+        build_body=_build_sam3_body,
+        extract_glb_url=_extract_sam3_glb,
+        # The one direct-image model Free-plan sellers may use.
+        free_plan_eligible=True,
+    ),
     "tripo": FalModelSpec(
         key="tripo",
         label="Tripo",
@@ -276,7 +336,7 @@ FAL_MODELS: dict[str, FalModelSpec] = {
         # time and credit cost in the model picker.
         description="Fast and reliable",
         endpoint_id="tripo3d/h3.1/image-to-3d",
-        credit_cost=10,
+        credit_cost=100,
         # Measured at 165s end-to-end on a real product photo with face_limit
         # applied. Seeded slightly above so the countdown does not hit zero
         # before the model lands; the measured median replaces it after 3 runs.
@@ -289,7 +349,7 @@ FAL_MODELS: dict[str, FalModelSpec] = {
         label="Hunyuan",
         description="Full PBR textures",
         endpoint_id="fal-ai/hunyuan-3d/v3.1/pro/image-to-3d",
-        credit_cost=10,
+        credit_cost=100,
         # Measured end-to-end at ~202s (submit → GLB downloaded) on a live run.
         baseline_estimate_seconds=240,
         build_body=_build_hunyuan_body,
@@ -300,7 +360,7 @@ FAL_MODELS: dict[str, FalModelSpec] = {
         label="Trellis",
         description="Sharpest detail",
         endpoint_id="fal-ai/trellis-2",
-        credit_cost=10,
+        credit_cost=100,
         # Seed from live runs on a real product photo: 241s and 57s for the
         # same input on different runners — fal's queue variance is wide, so
         # this sits between them until the measured median takes over.
@@ -313,7 +373,7 @@ FAL_MODELS: dict[str, FalModelSpec] = {
         label="Meshy",
         description="Best overall quality",
         endpoint_id="fal-ai/meshy/v6/image-to-3d",
-        credit_cost=20,
+        credit_cost=200,
         # Meshy documents 5-10 minutes; a live run on a real product photo took
         # 204s. Seed between the two rather than trusting either alone — the
         # measured median replaces this after three runs.
