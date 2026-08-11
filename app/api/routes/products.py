@@ -105,23 +105,21 @@ public_router = APIRouter(
 
 PRODUCT_CREATION_AI_CREDIT_COST = 10
 
-# /createProduct generates via fal.ai SAM-3, which is cheaper than the Tripo path,
-# so it is priced separately. Do not fold this back into the constant above —
-# /products and /createProductFal still charge 10.
-SAM3_PRODUCT_CREATION_AI_CREDIT_COST = 2
+# /createProduct generates via fal.ai SAM-3, priced the same as the direct-image
+# "sam3" entry in the fal model registry (app/integrations/fal/registry.py) —
+# both hit the same underlying fal-ai/sam-3/3d-objects call. Keep the two in
+# sync if this changes; do not fold it into the constant above, which still
+# covers /products and the legacy /createProductFal default.
+SAM3_PRODUCT_CREATION_AI_CREDIT_COST = 20
 
 # /createProductWithParts runs TWO chained Tripo tasks (segmented geometry, then
 # texture) against Tripo's own billed account, so it costs more than the
 # single-task paths.
 #
-# Priced 1:1 with what Tripo actually bills us: 40 credits for the segmented
-# geometry task + 20 for texturing = 60. Measured, not estimated — see
-# docs/MULTIPART_3D_GENERATION.md §6.
-#
 # Keep in sync with AI_CREDIT_COST.multiPart in the web portal
 # (lib/product/creditCosts.ts), which is only what the UI quotes; this constant
 # is what actually charges.
-PARTS_PRODUCT_CREATION_AI_CREDIT_COST = 60
+PARTS_PRODUCT_CREATION_AI_CREDIT_COST = 200
 
 # Seed ETA for the two-stage pipeline, superseded by real progress over the
 # WebSocket once generation starts. Unmeasured — the Tripo account had no
@@ -498,13 +496,20 @@ async def create_product_with_image_fal(
             detail=str(exc),
         )
 
-    # Only paid (Pro/Enterprise) users may generate products via fal.
-    plan_code = await LicensingService.get_user_plan_code(db, user_uuid)
-    if plan_code not in ("pro", "enterprise"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Creating products requires a Pro or Enterprise plan. Please subscribe to continue.",
-        )
+    # Only paid (Pro/Enterprise) users may generate products via billed fal
+    # vendors. SAM 3D is the one model flagged free-eligible in the registry,
+    # so Free-plan sellers can still use the direct-image path with it.
+    if not model_spec.free_plan_eligible:
+        plan_code = await LicensingService.get_user_plan_code(db, user_uuid)
+        if plan_code not in ("pro", "enterprise"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"{model_spec.label} requires a Pro or Enterprise plan. "
+                    "Please subscribe to continue, or select SAM 3D, which is "
+                    "free on every plan."
+                ),
+            )
 
     # Product generation is limited by AI credits, not product count. Cost is
     # per model — the check and the deduction below read the same number.
