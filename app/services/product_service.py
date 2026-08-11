@@ -16,7 +16,7 @@ from datetime import datetime
 from app.core.config import settings
 from app.models.models import Product, ProductAsset, ProductAssetMapping, ProductStatus, Background, Job
 from app.services.storage import storage_service
-from app.services.glb_compression_service import glb_compression_service
+from app.services.glb_compression_service import CompressedMeshPackage, glb_compression_service
 from app.services.gpu_status_service import gpu_status_service
 from app.integrations.threed_model_client import threed_model_client
 from app.integrations.fal_sam3_client import fal_sam3_client
@@ -38,6 +38,115 @@ USDZ_ASSET_ID = 11
 # Stats/estimate key for the two-stage Tripo pipeline. Deliberately distinct
 # from the single-stage fal "tripo" so their durations never mix.
 TRIPO_PARTS_MODEL_KEY = "tripo-parts"
+
+
+def _compress_mesh_for_storage(
+    glb_bytes: bytes, *, product_id, context: str = ""
+) -> tuple[bytes, Optional["CompressedMeshPackage"]]:
+    """Draco-compress a generated GLB, and build the glTF package alongside it.
+
+    Returns ``(glb_to_upload, gltf_package_or_None)``. Never raises: every
+    generation path treats compression as an optimisation, so any failure
+    degrades to the next-best artifact rather than losing a product the seller
+    already paid to generate.
+
+    The degradation ladder is deliberate:
+        package  ->  GLB-only  ->  original uncompressed bytes
+    A glTF-specific failure therefore still leaves asset id 9 with a properly
+    Draco-compressed GLB, exactly as before this feature existed.
+    """
+    logger = logging.getLogger(__name__)
+
+    if not settings.ENABLE_DRACO_COMPRESSION:
+        return glb_bytes, None
+
+    if settings.ENABLE_GLTF_DRACO_PACKAGE:
+        try:
+            package = glb_compression_service.compress_package(glb_bytes)
+            return package.glb, package
+        except Exception:
+            logger.warning(
+                "Draco glTF package build failed for product %s%s — "
+                "falling back to GLB-only compression",
+                product_id, context, exc_info=True,
+            )
+
+    try:
+        return glb_compression_service.compress(glb_bytes), None
+    except Exception:
+        logger.warning(
+            "Draco compression failed for product %s%s — uploading original GLB",
+            product_id, context, exc_info=True,
+        )
+        return glb_bytes, None
+
+
+async def _persist_gltf_draco_asset(
+    db: AsyncSession,
+    *,
+    package: Optional["CompressedMeshPackage"],
+    user_id,
+    product_id,
+    name: str,
+) -> Optional[str]:
+    """Upload the glTF package and map it to the product. Never raises.
+
+    MUST be called only after the GLB asset has been committed. It runs in its
+    own transaction so that a failure here — bad blob credentials, a missing
+    tbl_asset row because the seed script has not been applied yet — rolls back
+    only these rows and leaves the product READY with its GLB, which is still
+    what every current client reads.
+
+    Returns the CDN URL of the .gltf entry file, or None if nothing was stored.
+    """
+    if package is None:
+        return None
+
+    logger = logging.getLogger(__name__)
+    try:
+        gltf_url, _gltf_blob_url, prefix = storage_service.upload_gltf_package(
+            user_id=str(user_id),
+            product_id=str(product_id),
+            files=package.gltf_files,
+            entry=package.gltf_entry,
+        )
+
+        gltf_asset = ProductAsset(
+            asset_id=settings.GLTF_DRACO_ASSET_ID,
+            image=gltf_url,
+            size_bytes=package.gltf_total_bytes,
+            created_by=user_id,
+        )
+        db.add(gltf_asset)
+        await db.flush()
+
+        db.add(
+            ProductAssetMapping(
+                name=name,
+                productid=product_id,
+                product_asset_id=gltf_asset.id,
+                isactive=True,
+                created_by=user_id,
+            )
+        )
+        await db.commit()
+
+        logger.info(
+            "Draco glTF package stored for product %s: prefix=%s  files=%d  url=%s",
+            product_id, prefix, len(package.gltf_files), gltf_url,
+        )
+        return gltf_url
+    except Exception:
+        logger.warning(
+            "Failed to store Draco glTF package for product %s — "
+            "product keeps its GLB (asset %s) and stays READY",
+            product_id, settings.GLTF_DRACO_ASSET_ID, exc_info=True,
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return None
 
 _MAX_REMOTE_MASK_IMAGE_BYTES = 25 * 1024 * 1024
 _ALLOWED_REMOTE_MASK_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -1011,18 +1120,13 @@ class ProductService:
             raise RuntimeError("3D generation succeeded but returned no GLB data")
 
         # 3a. Draco-compress the mesh geometry before it goes anywhere near
-        #     Azure. Non-fatal: on any failure the original GLB is uploaded.
-        glb_bytes = response.glb_bytes
-        if settings.ENABLE_DRACO_COMPRESSION:
-            try:
-                glb_bytes = glb_compression_service.compress(response.glb_bytes)
-            except Exception:
-                logger.warning(
-                    "Draco compression failed for product %s (request_id=%s) — "
-                    "uploading original GLB",
-                    product_id, response.request_id, exc_info=True,
-                )
-                glb_bytes = response.glb_bytes
+        #     Azure, and build the Draco glTF package from the SAME pass.
+        #     Non-fatal: on any failure the original GLB is uploaded.
+        glb_bytes, gltf_package = _compress_mesh_for_storage(
+            response.glb_bytes,
+            product_id=product_id,
+            context=f" (request_id={response.request_id})",
+        )
 
         # 3b. Re-upload the downloaded GLB to Azure so it lands in our storage
         #     domain exactly like the SAM path's hosted glb_url.
@@ -1077,6 +1181,14 @@ class ProductService:
             logger.info(
                 "Product %s → READY  model=%s  elapsed=%.1fs  glb_url=%s",
                 product_id, spec.key, elapsed, glb_url,
+            )
+
+            # 5a. Additive: the Draco glTF package for the viewer. Runs only
+            #     after the product is committed READY, so a failure here can
+            #     never cost the seller the GLB they waited for.
+            await _persist_gltf_draco_asset(
+                db, package=gltf_package, user_id=user_id,
+                product_id=product_id, name=name,
             )
 
             # Feed the measured duration back so the next seller sees an ETA
@@ -1355,18 +1467,13 @@ class ProductService:
             raise RuntimeError("3D generation succeeded but returned no GLB data")
 
         # 3a. Draco-compress the mesh geometry before it goes anywhere near
-        #     Azure. Non-fatal: on any failure the original GLB is uploaded.
-        glb_bytes = response.glb_bytes
-        if settings.ENABLE_DRACO_COMPRESSION:
-            try:
-                glb_bytes = glb_compression_service.compress(response.glb_bytes)
-            except Exception:
-                logger.warning(
-                    "Draco compression failed for product %s (request_id=%s) — "
-                    "uploading original GLB",
-                    product_id, response.request_id, exc_info=True,
-                )
-                glb_bytes = response.glb_bytes
+        #     Azure, and build the Draco glTF package from the SAME pass.
+        #     Non-fatal: on any failure the original GLB is uploaded.
+        glb_bytes, gltf_package = _compress_mesh_for_storage(
+            response.glb_bytes,
+            product_id=product_id,
+            context=f" (request_id={response.request_id})",
+        )
 
         # 3b. Re-upload the downloaded GLB to Azure so it lands in our storage
         #     domain exactly like the other generation paths.
@@ -1416,6 +1523,13 @@ class ProductService:
             product.status = ProductStatus.READY
             await db.commit()
             logger.info("Product %s → READY (fal SAM-3)  glb_url=%s", product_id, glb_url)
+
+            # Additive: the Draco glTF package for the viewer. Runs only after
+            # the product is committed READY — see _persist_gltf_draco_asset.
+            await _persist_gltf_draco_asset(
+                db, package=gltf_package, user_id=user_id,
+                product_id=product_id, name=name,
+            )
 
             try:
                 await NotificationService.create_and_push_notification(
@@ -1717,16 +1831,9 @@ class ProductService:
             done_job.provider_credits = result.total_credits
             await db.commit()
 
-        glb_bytes = result.glb_bytes
-        if settings.ENABLE_DRACO_COMPRESSION:
-            try:
-                glb_bytes = glb_compression_service.compress(result.glb_bytes)
-            except Exception:
-                logger.warning(
-                    "Draco compression failed for product %s — uploading original",
-                    product_id, exc_info=True,
-                )
-                glb_bytes = result.glb_bytes
+        glb_bytes, gltf_package = _compress_mesh_for_storage(
+            result.glb_bytes, product_id=product_id, context=" (tripo-parts)"
+        )
 
         try:
             stream = io.BytesIO(glb_bytes)
@@ -1782,6 +1889,14 @@ class ProductService:
             "Product %s -> READY (tripo-parts)  %.1fs  credits=%s  glb=%s",
             product_id, elapsed, result.total_credits, glb_url,
         )
+
+        # Additive: the Draco glTF package for the viewer. Runs only after the
+        # product is committed READY — see _persist_gltf_draco_asset.
+        await _persist_gltf_draco_asset(
+            db, package=gltf_package, user_id=user_id,
+            product_id=product_id, name=name,
+        )
+
         await generation_estimate_service.record(db, TRIPO_PARTS_MODEL_KEY, elapsed)
 
         try:
