@@ -89,7 +89,12 @@ async def _persist_gltf_draco_asset(
     product_id,
     name: str,
 ) -> Optional[str]:
-    """Upload the glTF package and map it to the product. Never raises.
+    """Zip the glTF package, upload it, and map it to the product. Never raises.
+
+    The package is stored as a SINGLE .zip containing model.gltf + model.bin +
+    the texture files, flat at the archive root. The client downloads the zip,
+    unpacks it in the browser, and resolves the glTF's relative uris against
+    the unpacked entries.
 
     MUST be called only after the GLB asset has been committed. It runs in its
     own transaction so that a failure here — bad blob credentials, a missing
@@ -97,24 +102,29 @@ async def _persist_gltf_draco_asset(
     only these rows and leaves the product READY with its GLB, which is still
     what every current client reads.
 
-    Returns the CDN URL of the .gltf entry file, or None if nothing was stored.
+    Returns the CDN URL of the .zip, or None if nothing was stored.
     """
     if package is None:
         return None
 
     logger = logging.getLogger(__name__)
     try:
-        gltf_url, _gltf_blob_url, prefix = storage_service.upload_gltf_package(
+        zip_bytes = package.to_zip_bytes()
+
+        # One blob, so the ordinary product-asset upload applies — same path
+        # shape and same random-suffix behaviour as model.glb next to it.
+        gltf_url, _gltf_blob_url = storage_service.upload_product_image(
             user_id=str(user_id),
             product_id=str(product_id),
-            files=package.gltf_files,
-            entry=package.gltf_entry,
+            filename="model.zip",
+            content_type="application/zip",
+            stream=io.BytesIO(zip_bytes),
         )
 
         gltf_asset = ProductAsset(
             asset_id=settings.GLTF_DRACO_ASSET_ID,
             image=gltf_url,
-            size_bytes=package.gltf_total_bytes,
+            size_bytes=len(zip_bytes),
             created_by=user_id,
         )
         db.add(gltf_asset)
@@ -132,13 +142,15 @@ async def _persist_gltf_draco_asset(
         await db.commit()
 
         logger.info(
-            "Draco glTF package stored for product %s: prefix=%s  files=%d  url=%s",
-            product_id, prefix, len(package.gltf_files), gltf_url,
+            "Draco glTF zip stored for product %s: files=%d  raw=%d bytes  "
+            "zip=%d bytes  url=%s",
+            product_id, len(package.gltf_files), package.gltf_total_bytes,
+            len(zip_bytes), gltf_url,
         )
         return gltf_url
     except Exception:
         logger.warning(
-            "Failed to store Draco glTF package for product %s — "
+            "Failed to store Draco glTF zip for product %s — "
             "product keeps its GLB (asset %s) and stays READY",
             product_id, settings.GLTF_DRACO_ASSET_ID, exc_info=True,
         )
