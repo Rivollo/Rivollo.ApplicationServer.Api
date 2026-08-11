@@ -2,8 +2,9 @@
 --  gltf_draco asset type
 --
 --  Adds ONE reference row to tbl_asset for the Draco-compressed glTF
---  PACKAGE (model.gltf + model.bin + texture files) that the 3D viewer
---  loads. Does not modify any existing row. Safe to re-run.
+--  PACKAGE (model.gltf + model.bin + texture files), stored as a single
+--  .zip that the client unpacks in the browser before rendering.
+--  Does not modify any existing row. Safe to re-run.
 --
 --  Why a new id instead of reusing 8 ("gltf") or 9 ("glb"):
 --    * 9 (glb) keeps serving the Draco GLB. The USDZ converter job, the
@@ -48,7 +49,7 @@ VALUES (
     17,
     2,                              -- kind: 3D model (same as glb / gltf / usdz)
     'gltf_draco',
-    'Draco-compressed glTF package (model.gltf + model.bin + textures). URL points at the .gltf entry file; siblings resolve by relative uri from the same folder.',
+    'Draco-compressed glTF package (model.gltf + model.bin + textures) as a single .zip, flat at the archive root. URL points at the .zip; the client unpacks it and resolves the glTF relative uris against the unpacked entries.',
     TRUE
 )
 ON CONFLICT (id) DO NOTHING;

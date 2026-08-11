@@ -18,11 +18,13 @@ Two entry points:
                       GLB, and the two describe identical geometry.
 """
 
+import io
 import json
 import logging
 import subprocess
 import tempfile
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,6 +51,28 @@ class CompressedMeshPackage:
     @property
     def gltf_total_bytes(self) -> int:
         return sum(len(b) for b in self.gltf_files.values())
+
+    def to_zip_bytes(self) -> bytes:
+        """The whole glTF package as a single flat .zip.
+
+        Files sit at the ROOT of the archive — no wrapping directory — so a
+        client reads the entry as ``zip.file("model.gltf")`` and resolves every
+        relative uri inside it against the archive root, exactly as it would
+        against a folder.
+
+        Deflate buys little here (the JPEGs and the Draco buffer are already
+        compressed; only the JSON shrinks much) but costs little too, and it is
+        what every unzip implementation expects.
+        """
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            # Entry last, mirroring the loose-file upload order — harmless in an
+            # archive, but it keeps the two layouts describing the same thing.
+            for name in sorted(self.gltf_files):
+                if name != self.gltf_entry:
+                    archive.writestr(name, self.gltf_files[name])
+            archive.writestr(self.gltf_entry, self.gltf_files[self.gltf_entry])
+        return buffer.getvalue()
 
 
 class GLBCompressionService:
