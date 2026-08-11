@@ -247,6 +247,20 @@ class Settings(BaseSettings):
 	# and before it is uploaded to Azure. On failure the original GLB is uploaded
 	# instead, so disabling this only stops compression from being attempted.
 	ENABLE_DRACO_COMPRESSION: bool = Field(default=True, description="Compress generated GLBs with Draco before upload to Azure.")
+
+	# Draco-compressed glTF PACKAGE (model.gltf + model.bin + textures), stored
+	# alongside — never instead of — the Draco GLB at asset id 9. Produced from
+	# the ORIGINAL generated GLB in the same glTF-Transform pass as the GLB, so
+	# the two describe identical geometry and share material indices.
+	#
+	# Entirely non-fatal: if this fails the product still completes with its GLB
+	# exactly as before, so turning it off only stops the extra artifact being
+	# built. Requires sql/add_gltf_draco_asset_type.sql to have been applied.
+	ENABLE_GLTF_DRACO_PACKAGE: bool = Field(default=True, description="Also store a Draco-compressed glTF package for generated meshes.")
+	# tbl_asset id for the gltf_draco type. Must match the row inserted by
+	# sql/add_gltf_draco_asset_type.sql (17 unless that script had to allocate
+	# a different id in this environment).
+	GLTF_DRACO_ASSET_ID: int = Field(default=17, description="tbl_asset id of the Draco glTF package type.")
 	# Input length caps
 	AI_USER_PROMPT_MAX_CHARS: int = Field(default=500)
 	AI_USER_INPUT_NAME_MAX_CHARS: int = Field(default=100)

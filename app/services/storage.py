@@ -375,6 +375,78 @@ class StorageService:
 		blob_url = blob_client.url
 		return cdn_url, blob_url
 
+	# Content types for the files that make up a glTF package. A `.bin` served as
+	# text/html is rejected by some loaders, so these are set explicitly rather
+	# than left to the storage account's default.
+	_GLTF_CONTENT_TYPES = {
+		".gltf": "model/gltf+json",
+		".bin": "application/octet-stream",
+		".png": "image/png",
+		".jpg": "image/jpeg",
+		".jpeg": "image/jpeg",
+		".webp": "image/webp",
+		".ktx2": "image/ktx2",
+	}
+
+	def upload_gltf_package(
+		self,
+		user_id: str,
+		product_id: str,
+		files: Dict[str, bytes],
+		entry: str = "model.gltf",
+		version: Optional[str] = None,
+	) -> tuple[str, str, str]:
+		"""Upload a multi-file glTF package. Returns (entry_cdn_url, entry_blob_url, prefix).
+
+		Unlike every other upload helper here, filenames are written VERBATIM —
+		``_sanitize_filename``'s random suffix must not be applied. ``model.gltf``
+		references its ``.bin`` and textures by RELATIVE uri, so a renamed
+		sibling is an unresolvable reference and a model that fails to load.
+		Every file therefore lands next to the entry file under one prefix:
+
+		    {container}/{user_id}/{product_id}/gltf/{version}/model.gltf
+		                                              /model.bin
+		                                              /baseColor_1.png
+
+		The prefix carries a fresh ``version`` per upload, so a regenerated model
+		never overwrites the one a client may still be loading, and every file is
+		safely immutable — new bytes always mean a new path.
+
+		Upload order matters: the entry file goes LAST. Azure has no atomic
+		multi-blob write, so publishing ``model.gltf`` first would expose a window
+		in which the model is readable but its geometry 404s.
+		"""
+		if entry not in files:
+			raise RuntimeError(f"glTF package is missing its entry file {entry!r}")
+
+		client = self._get_blob_service_client()
+		container = self._media_container()
+		version = version or uuid.uuid4().hex[:16]
+		prefix = f"{user_id}/{product_id}/gltf/{version}"
+
+		def _upload(name: str) -> tuple[str, str]:
+			# basename only — a package must never write outside its prefix.
+			safe_name = os.path.basename(name)
+			if safe_name != name or not safe_name or safe_name.startswith("."):
+				raise RuntimeError(f"unsafe filename in glTF package: {name!r}")
+			blob_path = f"{prefix}/{safe_name}"
+			blob_client = client.get_blob_client(container=container, blob=blob_path)
+			ext = os.path.splitext(safe_name)[1].lower()
+			settings_obj = ContentSettings(  # type: ignore
+				content_type=self._GLTF_CONTENT_TYPES.get(ext, "application/octet-stream"),
+				# Immutable: the version in the path changes whenever the bytes would.
+				cache_control="public, max-age=31536000, immutable",
+			)
+			blob_client.upload_blob(files[name], overwrite=True, content_settings=settings_obj)
+			return self._cdn_url(container, blob_path), blob_client.url
+
+		for name in sorted(files):
+			if name != entry:
+				_upload(name)
+
+		entry_cdn_url, entry_blob_url = _upload(entry)
+		return entry_cdn_url, entry_blob_url, prefix
+
 	def upload_background_image(self, user_id: str, product_id: str, filename: str, content_type: Optional[str], stream: BinaryIO) -> tuple[str, str]:
 		"""Upload background image. Returns (cdn_url, blob_url)."""
 		client = self._get_blob_service_client()

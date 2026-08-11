@@ -1099,7 +1099,26 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
             detail="Product not found.",
         )
 
-    # Single query for image (assetid=1), mask (assetid=2), and mesh (assetid=9) assets
+    # tbl_asset has TWO id columns and they mean different things:
+    #   `assetid` is the KIND        -> 1 = image view, 2 = 3D model
+    #   `id`      is the FORMAT      -> 1 primary, 2 left, ..., 8 gltf, 9 glb,
+    #                                   11 usdz, 17 gltf_draco, ...
+    # `ProductAsset.asset_id` stores the FORMAT id, which is what the rest of
+    # the pipeline writes (mesh_asset_id=9, USDZ_ASSET_ID=11,
+    # settings.GLTF_DRACO_ASSET_ID=17) and what clients switch on.
+    #
+    # The mesh bucket below used to test `assetid == 9`, but `assetid` only ever
+    # holds 1 or 2, so it never matched and every 3D model fell through to the
+    # mask bucket. Testing the KIND for meshes fixes that and — the reason it is
+    # touched here — is what lets gltf_draco (17) appear without this needing to
+    # be edited again for each new 3D format.
+    _IMAGE_KIND = 1
+    _MESH_KIND = 2
+    _MASK_FORMAT_ID = 2  # masks are written under tbl_asset.id 2 (mask_asset_id)
+
+    # Single query for image (kind 1) and 3D model (kind 2) assets. The `9` that
+    # used to be in this list matched nothing — kinds are only ever 1 or 2 — so
+    # the rows returned here are unchanged.
     assets_stmt = (
         select(
             ProductAsset.asset_id,
@@ -1111,7 +1130,7 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
         .join(AssetStatic, ProductAsset.asset_id == AssetStatic.id)
         .where(ProductAssetMapping.productid == str(product_uuid))
         .where(ProductAssetMapping.isactive == True)
-        .where(AssetStatic.assetid.in_([1, 2, 9]))
+        .where(AssetStatic.assetid.in_([_IMAGE_KIND, _MESH_KIND]))
         .order_by(ProductAssetMapping.created_date.desc())
     )
     assets_result = await db.execute(assets_stmt)
@@ -1121,10 +1140,12 @@ async def _build_product_assets_response(product_id: str, db: DB) -> dict:
     mesh = []
     masks = []
     for row in all_asset_rows:
-        if row.assetid == 9:
+        if row.assetid == _MESH_KIND:
+            # Every 3D format the product has: glb (9), usdz (11),
+            # gltf_draco (17), ... Clients select by asset_id, never by position.
             mesh.append(ProductMeshItem(asset_id=row.asset_id, url=row.image))
             mesh_urls.add(row.image)
-        elif row.assetid == 2:
+        elif row.asset_id == _MASK_FORMAT_ID:
             masks.append(ProductImageItem(asset_id=row.asset_id, url=row.image, type=row.asset_name))
 
     # Deduplicate: exclude image entries whose URL already exists in mesh.
