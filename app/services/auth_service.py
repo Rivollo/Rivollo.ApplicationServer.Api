@@ -337,7 +337,11 @@ class AuthService:
             return None
 
         result = await db.execute(
-            select(User).where(User.id == reset.user_id, User.deleted_at.is_(None))
+            select(User).where(
+                User.id == reset.user_id,
+                User.deleted_at.is_(None),
+                User.is_active.is_(True),
+            )
         )
         user = result.scalar_one_or_none()
         if not user:

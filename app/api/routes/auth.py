@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 
-from app.api.deps import DB, AppTokenVerified
+from app.api.deps import ACCOUNT_DEACTIVATED_DETAIL, DB, AppTokenVerified
 from app.schemas.auth import (
     AppTokenRequest,
     AppTokenResponse,
@@ -169,6 +169,13 @@ async def login(
             detail="Invalid email or password",
         )
 
+    # Checked after the password is verified so this cannot be used to probe emails
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ACCOUNT_DEACTIVATED_DETAIL,
+        )
+
     # Generate token
     token = AuthService.generate_token(user.id, payload.remember_me)
 
@@ -210,6 +217,12 @@ async def forgot_password(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ACCOUNT_DEACTIVATED_DETAIL,
         )
 
     otp = await AuthService.create_password_reset_otp(db, payload.email)
@@ -323,6 +336,12 @@ async def google_auth(
         email=email,
         name=display_name,
     )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ACCOUNT_DEACTIVATED_DETAIL,
+        )
 
     updated = False
     if display_name and user.name != display_name:

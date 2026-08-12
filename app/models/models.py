@@ -151,6 +151,10 @@ class User(UUIDMixin, CreatedAtMixin, AuditMixin, SoftDeleteMixin, Base):
     name: Mapped[Optional[str]] = mapped_column(Text)
     avatar_url: Mapped[Optional[str]] = mapped_column(Text)
     bio: Mapped[Optional[str]] = mapped_column(Text)
+    # False = account deactivated: login is refused and existing tokens stop working
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true"), default=True
+    )
 
     # Property for backward compatibility
     @property
