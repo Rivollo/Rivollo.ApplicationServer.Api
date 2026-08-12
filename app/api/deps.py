@@ -17,6 +17,9 @@ from app.services.auth_service import AuthService
 bearer_scheme = HTTPBearer(auto_error=False)
 security = HTTPBearer()
 
+# Shown whenever a deactivated account (is_active = false) tries to authenticate
+ACCOUNT_DEACTIVATED_DETAIL = "Your account has been deactivated. Please contact support."
+
 
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
@@ -51,6 +54,13 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
 
+    # Deactivated accounts: reject tokens issued before deactivation
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ACCOUNT_DEACTIVATED_DETAIL,
+        )
+
     return user
 
 
@@ -73,7 +83,13 @@ async def get_current_user_optional(
             return None
 
         user_id = uuid.UUID(user_id_str)
-        result = await db.execute(select(User).where(User.id == user_id, User.deleted_at.is_(None)))
+        result = await db.execute(
+            select(User).where(
+                User.id == user_id,
+                User.deleted_at.is_(None),
+                User.is_active.is_(True),
+            )
+        )
         return result.scalar_one_or_none()
     except Exception:
         return None

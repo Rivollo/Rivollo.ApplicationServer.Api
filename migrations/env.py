@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from logging.config import fileConfig
 from typing import Dict, Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from alembic import context
 from sqlalchemy import pool
@@ -15,22 +17,34 @@ from app.models import Base
 config = context.config
 
 
+def _psycopg_ssl_param(url: str) -> str:
+    """asyncpg spells the TLS option `ssl=require`; psycopg only accepts `sslmode`."""
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+    params = parse_qsl(parts.query, keep_blank_values=True)
+    converted = [("sslmode", v) if k == "ssl" else (k, v) for k, v in params]
+    if converted == params:
+        return url
+    return urlunsplit(parts._replace(query=urlencode(converted)))
+
+
 def _get_database_url() -> str:
     url = settings.DATABASE_URL
     if not url:
         raise RuntimeError("DATABASE_URL is not configured; cannot run migrations.")
     # If app uses asyncpg, switch to psycopg for Alembic (sync)
     if url.startswith("postgresql+asyncpg://"):
-        return url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+        url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
     # Normalize short scheme and plain postgresql to psycopg
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+psycopg://", 1)
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+    elif url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
     # Avoid needing psycopg2 in environments; prefer psycopg v3
-    if url.startswith("postgresql+psycopg2://"):
-        return url.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
-    return url
+    elif url.startswith("postgresql+psycopg2://"):
+        url = url.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
+    return _psycopg_ssl_param(url)
 
 
 if config.config_file_name is not None:
@@ -38,7 +52,9 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-config.set_main_option("sqlalchemy.url", _get_database_url())
+# Escape % so configparser does not read it as interpolation syntax — URL-encoded
+# passwords (e.g. %23 for "#") would otherwise raise ValueError at import time.
+config.set_main_option("sqlalchemy.url", _get_database_url().replace("%", "%%"))
 
 
 def run_migrations_offline() -> None:
@@ -78,5 +94,12 @@ async def run_migrations_online() -> None:
 
 if context.is_offline_mode():
 	run_migrations_offline()
+elif sys.platform == "win32":
+	# psycopg's async mode cannot run on Windows' default ProactorEventLoop
+	if sys.version_info >= (3, 12):
+		asyncio.run(run_migrations_online(), loop_factory=asyncio.SelectorEventLoop)
+	else:
+		asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+		asyncio.run(run_migrations_online())
 else:
 	asyncio.run(run_migrations_online())
