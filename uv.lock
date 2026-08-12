@@ -640,6 +640,15 @@ wheels = [
 ]
 
 [[package]]
+name = "disposable-email-domains"
+version = "0.0.237"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/27/ce/7eff1757ecca42a2bd13611a4e7788b5817a5c6c87cad368a138cd9d354d/disposable_email_domains-0.0.237.tar.gz", hash = "sha256:80a055f2b20260510169b9f966a0d06f2a05d73a214b7e15f1545e0fccf87a58", size = 100114, upload-time = "2026-08-02T13:37:17.675Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/12/6e21324dfd8750cb475114c48e42a876af7746a3f8818cabf35b1cd115a9/disposable_email_domains-0.0.237-py3-none-any.whl", hash = "sha256:d1bde8c216d117e001da3aa0d3f22dce2bbd7044e44e8dfbebc1aca33e0779a7", size = 51491, upload-time = "2026-08-02T13:37:16.166Z" },
+]
+
+[[package]]
 name = "dnspython"
 version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2619,6 +2628,8 @@ dependencies = [
     { name = "azure-monitor-opentelemetry" },
     { name = "azure-servicebus" },
     { name = "azure-storage-blob" },
+    { name = "disposable-email-domains" },
+    { name = "dnspython" },
     { name = "email-validator" },
     { name = "fal-client" },
     { name = "fastapi" },
@@ -2671,6 +2682,8 @@ requires-dist = [
     { name = "azure-monitor-opentelemetry", specifier = ">=1.5,<2" },
     { name = "azure-servicebus", specifier = ">=7.11,<8" },
     { name = "azure-storage-blob", specifier = ">=12.19,<13" },
+    { name = "disposable-email-domains", specifier = ">=0.0.100" },
+    { name = "dnspython", specifier = ">=2.6,<3" },
     { name = "email-validator", specifier = ">=2.1,<3" },
     { name = "fal-client", specifier = ">=0.5,<1" },
     { name = "fastapi", specifier = ">=0.115,<0.116" },

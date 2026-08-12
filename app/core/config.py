@@ -47,6 +47,34 @@ class Settings(BaseSettings):
 	SIGNUP_OTP_EXPIRES_MINUTES: int = Field(default=10)
 	SIGNUP_TOKEN_EXPIRES_MINUTES: int = Field(default=15)
 
+	# Signup email domain check (app/utils/email_domain_check.py).
+	# TIMEOUT is the per-nameserver attempt; LIFETIME is the total budget
+	# across retries and is what actually caps added request latency, so keep
+	# it well under any upstream gateway timeout. dnspython's own defaults are
+	# far too patient for a request/response cycle.
+	EMAIL_DNS_TIMEOUT_SECONDS: float = Field(default=2.0)
+	EMAIL_DNS_LIFETIME_SECONDS: float = Field(default=4.0)
+	# Kill switch: set false to skip the MX lookup and disposable blocklist
+	# entirely if DNS ever becomes a signup outage.
+	EMAIL_DOMAIN_CHECK_ENABLED: bool = Field(default=True)
+	# Trusted domains, checked FIRST and short-circuited straight to allowed —
+	# no syntax pass, no blocklist, no DNS. Comma-separated; override to add
+	# customer/enterprise domains without a code change. These are the
+	# providers whose mail servers are not in question, so the only thing a
+	# lookup could do is add latency or, if an upstream blocklist release ever
+	# went wrong, block signups from Gmail.
+	EMAIL_DOMAIN_ALLOWLIST: str = Field(
+		default=(
+			"gmail.com,googlemail.com,outlook.com,hotmail.com,live.com,"
+			"yahoo.com,icloud.com,me.com,proton.me,protonmail.com,fastmail.com"
+		)
+	)
+
+	def get_email_domain_allowlist(self) -> frozenset[str]:
+		return frozenset(
+			d.strip().lower() for d in self.EMAIL_DOMAIN_ALLOWLIST.split(",") if d.strip()
+		)
+
 	# Resend email
 	RESEND_API_KEY: str = Field(default="")
 	RESEND_FROM_EMAIL: str = Field(default="noreply@rivollomail.com")

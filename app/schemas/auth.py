@@ -5,72 +5,38 @@ from typing import Optional
 
 from pydantic import BaseModel, EmailStr, Field, model_validator, field_validator
 
-# Blocked disposable / temporary email keywords (blacklist approach).
-# If the domain contains any of these keywords it is rejected —
-# regardless of TLD (e.g. mailinator.com, mailinator.in, mailinator.xyz all blocked).
-BLOCKED_DOMAIN_KEYWORDS: frozenset[str] = frozenset({
-    "mailinator",
-    "guerrillamail",
-    "guerrillamailblock",
-    "trashmail",
-    "trash-mail",
-    "tempmail",
-    "temp-mail",
-    "throwam",
-    "throwaway",
-    "yopmail",
-    "maildrop",
-    "mailnull",
-    "mailnesia",
-    "mailscrap",
-    "fakeinbox",
-    "dispostable",
-    "sharklasers",
-    "spamgourmet",
-    "spamhereplease",
-    "spambox",
-    "spamcannon",
-    "spamfree",
-    "spamgob",
-    "spamhole",
-    "spamify",
-    "spaminator",
-    "spamkill",
-    "spammotel",
-    "spamslicer",
-    "spamspot",
-    "spamtroll",
-    "tempalias",
-    "tempemail",
-    "tempinbox",
-    "tempmailer",
-    "tmailinator",
-    "trashdevil",
-    "trashemail",
-    "trashmailer",
-    "trashspam",
-    "discard",
-    "disposable",
-    "filzmail",
-    "shiftmail",
-    "sneakemail",
-    "willselfdestruct",
-    "whyspam",
-})
+from app.utils.email_domain_check import MESSAGES, Verdict, is_disposable
 
 
 def is_valid_email_domain(email: str) -> bool:
-    """
-    Returns True if the email domain does NOT contain any blocked keyword.
-    Blocks known disposable / temporary email providers by keyword —
-    so mailinator.com, mailinator.in, mailinator.xyz are all blocked.
-    All other domains (including business / company emails) are allowed.
+    """Returns True if the email domain is not a known disposable provider.
+
+    Set-based lookup against the maintained `disposable-email-domains` list,
+    walking up subdomains so wildcards like xyz.mailinator.com are caught.
+    Replaces the old substring keyword blacklist, which both missed unlisted
+    temp-mail services and falsely rejected legitimate domains that merely
+    contained a keyword.
+
+    Disposable-only, deliberately: this runs inside a sync pydantic validator,
+    and the MX/DNS half of the check is async and lives in the signup route.
     """
     try:
         domain = email.strip().lower().split("@")[1]
-        return not any(keyword in domain for keyword in BLOCKED_DOMAIN_KEYWORDS)
     except IndexError:
         return False
+    return not is_disposable(domain)
+
+
+def _reject_disposable(v: str) -> str:
+    """Shared `email` field validator for the SIGNUP path only.
+
+    Not applied to login / password-reset: those addresses are already in the
+    database, and gating them would lock an existing user out of their own
+    account if their domain later landed on the blocklist.
+    """
+    if not is_valid_email_domain(v):
+        raise ValueError(MESSAGES[Verdict.DISPOSABLE])
+    return v
 
 
 class SendSignupOtpRequest(BaseModel):
@@ -78,14 +44,7 @@ class SendSignupOtpRequest(BaseModel):
 
     email: EmailStr
 
-    @field_validator("email", mode="after")
-    @classmethod
-    def email_domain_allowed(cls, v: str) -> str:
-        if not is_valid_email_domain(v):
-            raise ValueError(
-                "Please use a valid email address. Disposable or temporary email addresses are not allowed."
-            )
-        return v
+    _check_email = field_validator("email", mode="after")(_reject_disposable)
 
 
 class VerifySignupOtpRequest(BaseModel):
@@ -94,14 +53,7 @@ class VerifySignupOtpRequest(BaseModel):
     email: EmailStr
     otp: str = Field(..., min_length=6, max_length=6)
 
-    @field_validator("email", mode="after")
-    @classmethod
-    def email_domain_allowed(cls, v: str) -> str:
-        if not is_valid_email_domain(v):
-            raise ValueError(
-                "Please use a valid email address. Disposable or temporary email addresses are not allowed."
-            )
-        return v
+    _check_email = field_validator("email", mode="after")(_reject_disposable)
 
 
 class LoginRequest(BaseModel):
@@ -110,15 +62,8 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
     remember_me: bool = False
-
-    @field_validator("email", mode="after")
-    @classmethod
-    def email_domain_allowed(cls, v: str) -> str:
-        if not is_valid_email_domain(v):
-            raise ValueError(
-                "Please use a valid email address. Disposable or temporary email addresses are not allowed."
-            )
-        return v
+    # No disposable-domain gate here: the address is already registered, so
+    # rejecting it would lock an existing user out of their own account.
 
 
 class SignupRequest(BaseModel):
@@ -130,14 +75,7 @@ class SignupRequest(BaseModel):
     remember_me: bool = False
     signup_token: str = Field(..., min_length=1, description="Token returned by /auth/verify-signup-otp")
 
-    @field_validator("email", mode="after")
-    @classmethod
-    def email_domain_allowed(cls, v: str) -> str:
-        if not is_valid_email_domain(v):
-            raise ValueError(
-                "Please use a valid email address. Disposable or temporary email addresses are not allowed."
-            )
-        return v
+    _check_email = field_validator("email", mode="after")(_reject_disposable)
 
 
 class GoogleAuthRequest(BaseModel):
@@ -185,15 +123,7 @@ class ForgotPasswordRequest(BaseModel):
     """Request to initiate a password reset."""
 
     email: EmailStr
-
-    @field_validator("email", mode="after")
-    @classmethod
-    def email_domain_allowed(cls, v: str) -> str:
-        if not is_valid_email_domain(v):
-            raise ValueError(
-                "Please use a valid email address. Disposable or temporary email addresses are not allowed."
-            )
-        return v
+    # No disposable-domain gate — existing-user path, see LoginRequest.
 
 
 class VerifyOTPRequest(BaseModel):
@@ -201,15 +131,7 @@ class VerifyOTPRequest(BaseModel):
 
     email: EmailStr
     otp: str = Field(..., min_length=6, max_length=6)
-
-    @field_validator("email", mode="after")
-    @classmethod
-    def email_domain_allowed(cls, v: str) -> str:
-        if not is_valid_email_domain(v):
-            raise ValueError(
-                "Please use a valid email address. Disposable or temporary email addresses are not allowed."
-            )
-        return v
+    # No disposable-domain gate — existing-user path, see LoginRequest.
 
 
 class ResetPasswordRequest(BaseModel):
