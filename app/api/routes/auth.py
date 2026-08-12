@@ -25,6 +25,7 @@ from app.schemas.auth import (
 from app.services.activity_service import ActivityService
 from app.services.auth_service import AuthService
 from app.services.email_service import EmailService
+from app.utils.email_domain_check import check_email
 from app.utils.envelopes import api_success
 from app.core.config import settings
 
@@ -44,6 +45,18 @@ async def send_signup_otp(
             status_code=status.HTTP_409_CONFLICT,
             detail="Email already registered",
         )
+
+    # Confirm the domain actually exists and accepts mail before spending an
+    # OTP email on it. Only checked here — by /auth/signup the signup_token
+    # already proves the address received mail, so a second lookup there
+    # would be pure latency. Fails open on DNS trouble; see check_email.
+    if settings.EMAIL_DOMAIN_CHECK_ENABLED:
+        domain_check = await check_email(payload.email)
+        if not domain_check.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=domain_check.message,
+            )
 
     otp = await AuthService.create_signup_otp(db, payload.email)
     await EmailService.send_signup_verification_otp(
