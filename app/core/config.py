@@ -80,6 +80,11 @@ class Settings(BaseSettings):
 	RESEND_FROM_EMAIL: str = Field(default="noreply@rivollomail.com")
 	RESEND_FROM_NAME: str = Field(default="Rivollo")
 	SUPPORT_EMAIL: str = Field(default="")
+	# Comma-separated addresses CC'd on the welcome email sent at signup.
+	WELCOME_EMAIL_CC: str = Field(default="contact@rivollo.com")
+
+	def get_welcome_email_cc(self) -> list[str]:
+		return [e.strip() for e in self.WELCOME_EMAIL_CC.split(",") if e.strip()]
 
 	# Frontend base URL (used in email links)
 	FRONTEND_URL: str = Field(default="http://localhost:3000")

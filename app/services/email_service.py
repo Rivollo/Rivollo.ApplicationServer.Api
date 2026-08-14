@@ -16,7 +16,13 @@ logger = logging.getLogger(__name__)
 _RESEND_URL = "https://api.resend.com/emails"
 
 
-async def _send(to_email: str, to_name: str, subject: str, html_body: str) -> None:
+async def _send(
+    to_email: str,
+    to_name: str,
+    subject: str,
+    html_body: str,
+    cc: Optional[list[str]] = None,
+) -> None:
     """Send an email via Resend."""
     if not settings.RESEND_API_KEY:
         raise RuntimeError("RESEND_API_KEY is not configured.")
@@ -27,6 +33,11 @@ async def _send(to_email: str, to_name: str, subject: str, html_body: str) -> No
         "subject": subject,
         "html": html_body,
     }
+
+    # Drop any CC that duplicates the recipient — Resend would deliver twice.
+    cc_list = [addr for addr in (cc or []) if addr.lower() != to_email.lower()]
+    if cc_list:
+        payload["cc"] = cc_list
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -86,10 +97,19 @@ class EmailService:
 
     @staticmethod
     async def send_welcome_email(to_email: str, name: str) -> None:
-        """Send a welcome email after successful account creation."""
+        """Send a welcome email after successful account creation.
+
+        CC'd to WELCOME_EMAIL_CC so the team is notified of every new signup.
+        """
         subject = f"Welcome to {settings.RESEND_FROM_NAME}!"
         html_body = _welcome_template(name=name, frontend_url=settings.FRONTEND_URL)
-        await _send(to_email=to_email, to_name=name, subject=subject, html_body=html_body)
+        await _send(
+            to_email=to_email,
+            to_name=name,
+            subject=subject,
+            html_body=html_body,
+            cc=settings.get_welcome_email_cc(),
+        )
 
     @staticmethod
     async def send_signup_verification_otp(to_email: str, otp: str, expires_minutes: int) -> None:
