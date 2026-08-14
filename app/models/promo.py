@@ -61,6 +61,12 @@ class PromoCode(Base):
         nullable=True,
     )
 
+    # NULL = applies to every billing interval of the plan.
+    billing_interval = Column(
+        String(20),
+        nullable=True,
+    )
+
     valid_from = Column(
         DateTime(timezone=True),
         nullable=False,
