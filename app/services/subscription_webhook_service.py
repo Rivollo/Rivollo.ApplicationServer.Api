@@ -25,8 +25,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -36,7 +35,7 @@ from app.models.payment import Payment, PaymentStatus
 from app.models.plan import Plan, PlanFeature
 from app.models.subscription import Subscription
 from app.models.subscription_enums import LicenseStatus, SubscriptionStatus
-from app.models.webhook_event import WebhookEvent
+from app.services import webhook_inbox
 
 _logger = logging.getLogger("rivollo.subscription_webhook_service")
 
@@ -490,61 +489,65 @@ async def handle_subscription_webhook(
         _logger.error("Webhook payload structure error: %s", exc)
         return {"status": "ok"}
 
-    # ── 5. Save event log (idempotency — skip if already processed) ──────────
-    # Use Razorpay event_id if present, otherwise fall back to a generated UUID
-    effective_event_id = event_id or f"{event}_{rz_subscription_id}"
-    stmt = (
-        pg_insert(WebhookEvent)
-        .values(
-            event_id=effective_event_id,
-            event=event,
-            rz_sub_id=rz_subscription_id,
-            payload=payload,
-            processed=False,
-        )
-        .on_conflict_do_nothing(index_elements=["event_id"])
+    # ── 4b. USD subscriptions branch off here ────────────────────────────────
+    # Placed after the signature is verified and the subscription ID is known,
+    # because that is the earliest point where the currency can be resolved.
+    # Everything below this block is the original INR path and is unchanged —
+    # an INR payload never enters the USD handler.
+    #
+    # Imported inside the function: the USD webhook module imports the
+    # status-only handlers from this one, so a module-level import would be
+    # circular. (is_usd_subscription lives in usd_entitlement, which has no such
+    # cycle, but both are kept together here for one readable block.)
+    from app.services.usd_entitlement import is_usd_subscription
+    from app.services.usd_subscription_webhook_service import (
+        handle_usd_subscription_event,
     )
-    result = await db.execute(stmt)
-    await db.flush()
 
-    # If nothing was inserted, this event was already processed — skip
-    if result.rowcount == 0:
-        _logger.info("Webhook event_id=%s already processed — skipping.", effective_event_id)
+    if await is_usd_subscription(db, rz_subscription_id):
+        return await handle_usd_subscription_event(
+            db,
+            event=event,
+            event_id=event_id,
+            rz_subscription_id=rz_subscription_id,
+            payload=payload,
+            payload_data=payload_data,
+        )
+
+    # ── 5. Record the event durably, then claim it ───────────────────────────
+    # The row is committed BEFORE the handler runs, so a handler failure can no
+    # longer roll away the record that the event ever arrived. It stays
+    # processed=false, which marks it as outstanding work that can be replayed.
+    effective_event_id = event_id or f"{event}_{rz_subscription_id}"
+
+    event_row = await webhook_inbox.claim_event(
+        db,
+        event_id=effective_event_id,
+        event=event,
+        rz_subscription_id=rz_subscription_id,
+        payload=payload,
+    )
+    if event_row is None:
+        # Already processed, or a concurrent delivery of the same event owns it.
         return {"status": "ok"}
 
     # ── 6. Process the event ─────────────────────────────────────────────────
-    error_message: Optional[str] = None
     try:
         await handler(db, rz_subscription_id, payload_data)
-
-        # Mark event as successfully processed
-        await db.execute(
-            update(WebhookEvent)
-            .where(WebhookEvent.event_id == effective_event_id)
-            .values(processed=True)
-        )
-
-        await db.commit()
+        await webhook_inbox.mark_processed(db, event_row)
 
     except Exception as exc:
-        error_message = str(exc)
         _logger.exception(
             "Webhook handler failed for event=%s rz_sub_id=%s: %s",
             event,
             rz_subscription_id,
             exc,
         )
-        await db.rollback()
+        await webhook_inbox.record_failure(
+            db, event_id=effective_event_id, error=str(exc)
+        )
 
-        # Save error on the event log row in a new transaction
-        try:
-            await db.execute(
-                update(WebhookEvent)
-                .where(WebhookEvent.event_id == effective_event_id)
-                .values(error=error_message)
-            )
-            await db.commit()
-        except Exception:
-            pass
-
+    # Always 200: Razorpay treats any non-2xx as a delivery failure and disables
+    # the webhook after 24h of them, which would take every subscription down.
+    # Failed events are recoverable from tbl_webhook_events instead.
     return {"status": "ok"}
