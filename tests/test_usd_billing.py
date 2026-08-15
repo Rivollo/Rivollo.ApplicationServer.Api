@@ -23,7 +23,7 @@ from app.core.geo import (
     resolve_checkout_country,
     resolve_display_country,
 )
-from app.models.promo_usd import DISCOUNT_FIXED, DISCOUNT_PERCENTAGE
+from app.services.usd_promo_service import DISCOUNT_FIXED, DISCOUNT_PERCENTAGE
 from app.schemas.pricing import PricingResponse
 from app.services import usd_promo_service as promo
 from app.utils.billing_dates import add_calendar_months, next_period_start, to_razorpay_start_at

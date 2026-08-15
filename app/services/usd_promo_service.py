@@ -20,11 +20,17 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.promo_usd import DISCOUNT_FIXED, DISCOUNT_PERCENTAGE, PromoCodeUsd
+from app.core.geo import USD
+from app.models.promo import PromoCode
 from app.models.subscription import Subscription
 from app.services.billing_currency import PAID_STATUSES
 
 _logger = logging.getLogger("rivollo.usd_promo_service")
+
+# Same vocabulary as the existing INR promos, so the two currencies cannot
+# disagree about what a discount type is called.
+DISCOUNT_PERCENTAGE = "percentage"
+DISCOUNT_FIXED = "fixed"
 
 # No promo may take more than this off the list price. A guard rail, not a
 # business rule: it is what stops a mistyped flat value (or an INR-denominated
@@ -66,7 +72,7 @@ async def has_prior_paid_subscription(db: AsyncSession, user_id: uuid.UUID) -> b
     return (result.scalar() or 0) > 0
 
 
-def _is_live(promo: PromoCodeUsd, now: datetime) -> Optional[str]:
+def _is_live(promo: PromoCode, now: datetime) -> Optional[str]:
     """Return a rejection reason if the promo is not currently redeemable."""
     if not promo.is_active:
         return "This promo code is no longer active."
@@ -74,12 +80,12 @@ def _is_live(promo: PromoCodeUsd, now: datetime) -> Optional[str]:
         return "This promo code is not valid yet."
     if promo.valid_to and now > promo.valid_to:
         return "This promo code has expired."
-    if promo.max_redemptions is not None and promo.used_count >= promo.max_redemptions:
+    if promo.max_usage is not None and promo.used_count >= promo.max_usage:
         return "This promo code has reached its redemption limit."
     return None
 
 
-def compute_upfront_amount(list_amount_minor: int, promo: Optional[PromoCodeUsd]) -> int:
+def compute_upfront_amount(list_amount_minor: int, promo: Optional[PromoCode]) -> int:
     """The amount to charge for the first period, in minor units.
 
     With no promo this is the full list price. Every monthly subscription — promo
@@ -138,7 +144,7 @@ def assert_within_guard_rails(
 
 async def get_public_promo(
     db: AsyncSession, *, plan_code: str, billing_interval: str
-) -> Optional[PromoCodeUsd]:
+) -> Optional[PromoCode]:
     """The promo advertised on the pricing page for this tier and interval.
 
     Returns None for ineligible intervals, so annual never advertises one.
@@ -148,19 +154,23 @@ async def get_public_promo(
 
     now = datetime.now(timezone.utc)
     result = await db.execute(
-        select(PromoCodeUsd).where(
-            PromoCodeUsd.is_public.is_(True),
-            PromoCodeUsd.is_active.is_(True),
-            PromoCodeUsd.billing_interval == billing_interval,
-            PromoCodeUsd.valid_from <= now,
-            PromoCodeUsd.valid_to >= now,
+        select(PromoCode).where(
+            # USD promos only. The table holds both currencies, and an INR
+            # promo auto-applied to a dollar checkout would discount the wrong
+            # amount in the wrong currency.
+            PromoCode.currency == USD,
+            PromoCode.is_public.is_(True),
+            PromoCode.is_active.is_(True),
+            PromoCode.billing_interval == billing_interval,
+            PromoCode.valid_from <= now,
+            PromoCode.valid_to >= now,
             # NOT `plan_code.in_([plan_code, None])`. In SQL's three-valued
             # logic `x IN (a, NULL)` is NULL rather than TRUE when x is NULL, so
             # that form silently never matches an all-plans promo — which would
             # leave it advertised nowhere yet still redeemable when typed.
             or_(
-                PromoCodeUsd.plan_code == plan_code,
-                PromoCodeUsd.plan_code.is_(None),
+                PromoCode.plan_code == plan_code,
+                PromoCode.plan_code.is_(None),
             ),
         )
     )
@@ -178,7 +188,7 @@ async def resolve_promo_for_checkout(
     plan_code: str,
     billing_interval: str,
     submitted_code: Optional[str],
-) -> Optional[PromoCodeUsd]:
+) -> Optional[PromoCode]:
     """Decide which promo, if any, applies to this checkout.
 
     A code the customer typed is validated strictly and raises PromoRejected on
@@ -202,9 +212,9 @@ async def resolve_promo_for_checkout(
         # while this lookup is case-insensitive. That would raise
         # MultipleResultsFound and 500 instead of validating a promo code.
         result = await db.execute(
-            select(PromoCodeUsd)
-            .where(func.upper(PromoCodeUsd.code) == code)
-            .order_by(PromoCodeUsd.created_date.asc())
+            select(PromoCode)
+            .where(func.upper(PromoCode.code) == code, PromoCode.currency == USD)
+            .order_by(PromoCode.created_date.asc())
             .limit(1)
         )
         promo = result.scalars().first()
@@ -236,7 +246,7 @@ async def record_redemption_by_code(db: AsyncSession, code: str) -> None:
     """Count one redemption of ``code``. Caller commits.
 
     Called when the payment is actually captured, not when checkout opens, so
-    that abandoned checkouts do not consume a promo's max_redemptions. The
+    that abandoned checkouts do not consume a promo's max_usage. The
     webhook that calls this is idempotent on the Razorpay event ID, so a
     replayed event cannot double-count.
 
@@ -244,7 +254,10 @@ async def record_redemption_by_code(db: AsyncSession, code: str) -> None:
     captures cannot lose an increment to a read-modify-write race.
     """
     await db.execute(
-        update(PromoCodeUsd)
-        .where(func.upper(PromoCodeUsd.code) == code.strip().upper())
-        .values(used_count=PromoCodeUsd.used_count + 1)
+        update(PromoCode)
+        .where(
+            func.upper(PromoCode.code) == code.strip().upper(),
+            PromoCode.currency == USD,
+        )
+        .values(used_count=PromoCode.used_count + 1)
     )

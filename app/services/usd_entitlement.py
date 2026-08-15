@@ -20,7 +20,7 @@ from sqlalchemy.orm import selectinload
 from app.core.geo import USD
 from app.models.license_assignment import LicenseAssignment
 from app.models.plan import Plan, PlanFeature
-from app.models.plan_price_usd import PlanPriceUsd
+from app.models.plan import PlanPrice
 from app.models.subscription import Subscription
 from app.models.subscription_enums import LicenseStatus
 
@@ -89,17 +89,17 @@ def feature_limits(subscription: Subscription) -> dict:
 async def usd_ai_credit_limit(
     db: AsyncSession, plan_id: uuid.UUID, billing_interval: Optional[str], limits: dict
 ) -> int:
-    """AI credits for a USD subscription, read from the USD price list.
+    """AI credits for a USD subscription, read from its own price row.
 
-    The INR path resolves this from tbl_plan_prices. Reading the USD table here
-    means the two cannot silently diverge for a USD customer, even though they
-    are seeded identical today.
+    Reads the USD row rather than the plan's INR row so the two cannot silently
+    diverge for a USD customer, even though they are seeded identical today.
     """
     result = await db.execute(
-        select(PlanPriceUsd.ai_credit_limit).where(
-            PlanPriceUsd.plan_id == plan_id,
-            PlanPriceUsd.billing_interval == (billing_interval or "monthly"),
-            PlanPriceUsd.isactive.is_(True),
+        select(PlanPrice.ai_credit_limit).where(
+            PlanPrice.plan_id == plan_id,
+            PlanPrice.billing_interval == (billing_interval or "monthly"),
+            PlanPrice.currency == USD,
+            PlanPrice.isactive.is_(True),
         )
     )
     credits = result.scalars().first()

@@ -48,8 +48,16 @@ class PlanPrice(Base):
     """Pricing for a plan at a specific billing interval."""
 
     __tablename__ = "tbl_plan_prices"
+    # Currency is part of the key: a plan has one price per interval *per
+    # currency*, so (pro, monthly) exists once in INR and once in USD. Every
+    # read must filter on currency — without it a lookup matches both rows.
     __table_args__ = (
-        UniqueConstraint("plan_id", "billing_interval", name="tbl_plan_prices_plan_interval_key"),
+        UniqueConstraint(
+            "plan_id",
+            "billing_interval",
+            "currency",
+            name="tbl_plan_prices_plan_interval_currency_key",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

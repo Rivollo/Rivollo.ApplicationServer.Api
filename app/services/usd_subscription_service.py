@@ -34,9 +34,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.geo import INR, USD, is_india
-from app.models.plan import Plan
-from app.models.plan_price_usd import PlanPriceUsd
-from app.models.promo_usd import PromoCodeUsd
+from app.models.plan import Plan, PlanPrice
+from app.models.promo import PromoCode
 from app.models.subscription import Subscription
 from app.models.subscription_enums import SubscriptionStatus
 from app.services import usd_promo_service
@@ -52,6 +51,11 @@ from app.services.usd_entitlement import (
 )
 from app.services.usd_promo_service import PromoRejected
 from app.utils.billing_dates import next_period_start, to_razorpay_start_at
+# tbl_plan_prices.price_inr holds WHOLE units of the row's currency — rupees on
+# an INR row, dollars on a USD one. Razorpay is told amounts in minor units, so
+# every read of it converts here rather than storing cents in a column the INR
+# path reads as rupees.
+from app.utils.money import to_minor_units
 
 _logger = logging.getLogger("rivollo.usd_subscription_service")
 
@@ -71,7 +75,7 @@ def _check_credentials() -> None:
 
 async def _load_usd_plan(
     db: AsyncSession, plan_code: str, billing_interval: str
-) -> tuple[Plan, PlanPriceUsd]:
+) -> tuple[Plan, PlanPrice]:
     """Resolve the tier and its USD price, or fail.
 
     Never falls through to a default. An unknown tier is a 400, not a silent
@@ -89,10 +93,13 @@ async def _load_usd_plan(
         )
 
     price_result = await db.execute(
-        select(PlanPriceUsd).where(
-            PlanPriceUsd.plan_id == plan.id,
-            PlanPriceUsd.billing_interval == billing_interval,
-            PlanPriceUsd.isactive.is_(True),
+        select(PlanPrice).where(
+            PlanPrice.plan_id == plan.id,
+            PlanPrice.billing_interval == billing_interval,
+            # The row that is priced in dollars, never the rupee row for the
+            # same plan and interval.
+            PlanPrice.currency == USD,
+            PlanPrice.isactive.is_(True),
         )
     )
     plan_price = price_result.scalar_one_or_none()
@@ -102,7 +109,7 @@ async def _load_usd_plan(
             detail=f"Plan '{plan_code}' is not available in USD for {billing_interval} billing.",
         )
 
-    if not plan_price.razorpay_plan_id_usd:
+    if not plan_price.razorpay_plan_id:
         # Never fall back to an INR plan — that would charge a foreign customer
         # in rupees.
         raise HTTPException(
@@ -110,7 +117,7 @@ async def _load_usd_plan(
             detail=f"Plan '{plan_code}' is not yet configured for {billing_interval} USD billing.",
         )
 
-    if plan_price.price_usd <= 0:
+    if plan_price.price_inr <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Plan '{plan_code}' is not a paid plan.",
@@ -224,9 +231,9 @@ async def create_usd_subscription(
 
     # ── 2. Resolve the price server-side ─────────────────────────────────────
     plan, plan_price = await _load_usd_plan(db, plan_code, billing_interval)
-    full_amount = plan_price.price_usd
+    full_amount = to_minor_units(plan_price.price_inr, USD)
 
-    promo: Optional[PromoCodeUsd] = None
+    promo: Optional[PromoCode] = None
     upfront_amount: Optional[int] = None
     start_at_dt: Optional[datetime] = None
     now = datetime.now(timezone.utc)
@@ -297,7 +304,7 @@ async def create_usd_subscription(
 
     # ── 3. Create the subscription at Razorpay ───────────────────────────────
     payload: dict[str, Any] = {
-        "plan_id": plan_price.razorpay_plan_id_usd,
+        "plan_id": plan_price.razorpay_plan_id,
         "total_count": plan_price.total_count,
         "customer_notify": 1,
         "notes": _build_notes(
@@ -396,7 +403,7 @@ async def create_usd_subscription(
 
     # The redemption is NOT counted here. A subscription row at this point only
     # means checkout was opened, and counting it now would let abandoned
-    # checkouts burn a promo's max_redemptions without anyone ever paying. It is
+    # checkouts burn a promo's max_usage without anyone ever paying. It is
     # counted when the upfront payment is actually captured, in the webhook's
     # subscription.authenticated handler.
 
@@ -538,14 +545,14 @@ async def validate_usd_promo_code(
     # a reason rather than a bare 500.
     try:
         upfront_amount = usd_promo_service.compute_upfront_amount(
-            plan_price.price_usd, promo
+            to_minor_units(plan_price.price_inr, USD), promo
         )
     except PromoRejected as exc:
         _logger.error("USD promo %s is misconfigured: %s", promo.code, exc.reason)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.reason)
 
     usd_promo_service.assert_within_guard_rails(
-        list_amount_minor=plan_price.price_usd,
+        list_amount_minor=to_minor_units(plan_price.price_inr, USD),
         upfront_amount_minor=upfront_amount,
         billing_interval=billing_interval,
     )
@@ -554,7 +561,7 @@ async def validate_usd_promo_code(
         "valid": True,
         "code": promo.code,
         "currency": USD,
-        "fullAmount": plan_price.price_usd,
+        "fullAmount": to_minor_units(plan_price.price_inr, USD),
         "upfrontAmount": upfront_amount,
         "description": promo.description,
     }

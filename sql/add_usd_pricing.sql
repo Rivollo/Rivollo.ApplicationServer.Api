@@ -1,94 +1,75 @@
 -- USD billing for customers outside India.
 -- Run this script manually against the database.
 --
--- Every statement is additive and idempotent. Nothing here alters or drops an
--- existing column, and every new column on tbl_subscriptions is either nullable
--- or carries a default chosen so existing INR rows and existing INR code read
--- correctly with no changes.
+-- USD lives in the existing tbl_plan_prices and tbl_promo_codes, distinguished
+-- by their `currency` column, rather than in parallel USD tables. Two things
+-- had to change for that to be safe, and both are in this script:
+--
+--   1. tbl_plan_prices was unique on (plan_id, billing_interval), which a USD
+--      row for an interval that already has an INR row would violate. The
+--      constraint now includes currency.
+--   2. The INR read paths did not filter on currency. They now do -- see
+--      razorpay_subscription_service._get_plan_with_features and
+--      PromoRepository.get_by_code. Without that filter the INR lookup would
+--      match two rows and raise MultipleResultsFound, breaking every rupee
+--      checkout for the plan. Deploy the application BEFORE seeding USD rows,
+--      or seed them last, as this script does.
+--
+-- Every statement is additive and idempotent. No existing column is altered or
+-- dropped, and every new column is nullable or carries a default chosen so
+-- existing INR rows and existing INR code read correctly with no changes.
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 1. USD price list
+-- 1. Make tbl_plan_prices multi-currency
 -- ─────────────────────────────────────────────────────────────────────────────
--- Separate table rather than rows on tbl_plan_prices: that table has a unique
--- constraint on (plan_id, billing_interval) and the INR lookup queries it by
--- that pair with no currency filter.
 
-CREATE TABLE IF NOT EXISTS tbl_plan_prices_usd (
-    id                   SERIAL PRIMARY KEY,
-    plan_id              UUID NOT NULL REFERENCES tbl_mstr_plans(id) ON DELETE CASCADE,
-    billing_interval     VARCHAR(20) NOT NULL,
-    price_usd            INTEGER NOT NULL DEFAULT 0,     -- cents: $20.00 => 2000
-    ai_credit_limit      INTEGER NOT NULL DEFAULT 0,
-    razorpay_plan_id_usd VARCHAR(255) NULL,
-    total_count          INTEGER NOT NULL DEFAULT 1200,
-    description          VARCHAR(100) NULL,
-    isactive             BOOLEAN NOT NULL DEFAULT true,
-    created_date         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT tbl_plan_prices_usd_plan_interval_key UNIQUE (plan_id, billing_interval)
-);
+-- Already present on the model; here so an older snapshot converges.
+ALTER TABLE tbl_plan_prices ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NULL DEFAULT 'INR';
 
-ALTER TABLE tbl_plan_prices_usd
-    DROP CONSTRAINT IF EXISTS tbl_plan_prices_usd_billing_interval_check;
+UPDATE tbl_plan_prices SET currency = 'INR' WHERE currency IS NULL OR currency = '';
 
-ALTER TABLE tbl_plan_prices_usd
-    ADD CONSTRAINT tbl_plan_prices_usd_billing_interval_check
-    CHECK (billing_interval IN ('monthly', 'yearly'));
+-- The old constraint permits only one row per (plan, interval), which is
+-- exactly one currency. Widen it rather than drop it: without a uniqueness rule
+-- a duplicate USD row would make the USD lookup ambiguous in the same way.
+ALTER TABLE tbl_plan_prices
+    DROP CONSTRAINT IF EXISTS tbl_plan_prices_plan_interval_key;
 
-COMMENT ON COLUMN tbl_plan_prices_usd.price_usd IS
-    'List price in cents. Always the full price — never a discounted price. '
-    'Promotional pricing is applied as a subscription upfront amount, never by '
-    'creating a cheaper plan, because Razorpay plan amounts cannot be edited '
-    'after creation and a promotional plan is therefore a permanent price cut.';
+ALTER TABLE tbl_plan_prices
+    DROP CONSTRAINT IF EXISTS tbl_plan_prices_plan_interval_currency_key;
 
-COMMENT ON COLUMN tbl_plan_prices_usd.razorpay_plan_id_usd IS
-    'Razorpay plan ID for the USD plan. NULL until the plans exist in the '
-    'Razorpay dashboard; the USD checkout route rejects the interval while NULL.';
+ALTER TABLE tbl_plan_prices
+    ADD CONSTRAINT tbl_plan_prices_plan_interval_currency_key
+    UNIQUE (plan_id, billing_interval, currency);
+
+COMMENT ON COLUMN tbl_plan_prices.price_inr IS
+    'Price in WHOLE units of `currency` -- rupees for INR rows, dollars for USD '
+    'rows. The column name predates multi-currency support and is kept because '
+    'renaming it would touch every INR read path. Whole units only: 1999 is '
+    'valid, 19.99 is not representable. A price ending in .99 would need a '
+    'schema change, not just a different value.';
+
+COMMENT ON COLUMN tbl_plan_prices.currency IS
+    'ISO currency of this price row. Every read MUST filter on it -- two rows '
+    'now exist per (plan, interval), and an unfiltered lookup matches both.';
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 2. USD promo codes
+-- 2. Make tbl_promo_codes multi-currency
 -- ─────────────────────────────────────────────────────────────────────────────
--- Razorpay Offers are INR-locked on this account and fail silently in USD, so
--- USD discounts are computed server-side. No razorpay_offer_id column here.
 
-CREATE TABLE IF NOT EXISTS tbl_promo_codes_usd (
-    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    code             VARCHAR(64) UNIQUE NOT NULL,
-    discount_type    VARCHAR(20) NOT NULL,
-    discount_value   INTEGER NOT NULL,
-    billing_interval VARCHAR(20) NOT NULL DEFAULT 'monthly',
-    plan_code        VARCHAR(50) NULL,
-    max_redemptions  INTEGER NULL,
-    used_count       INTEGER NOT NULL DEFAULT 0,
-    valid_from       TIMESTAMPTZ NOT NULL,
-    valid_to         TIMESTAMPTZ NOT NULL,
-    is_active        BOOLEAN NOT NULL DEFAULT true,
-    is_public        BOOLEAN NOT NULL DEFAULT false,
-    description      VARCHAR(255) NULL,
-    created_date     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+ALTER TABLE tbl_promo_codes ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NULL DEFAULT 'INR';
 
-ALTER TABLE tbl_promo_codes_usd
-    DROP CONSTRAINT IF EXISTS tbl_promo_codes_usd_discount_type_check;
+-- Marks the promo advertised on the pricing page. It is auto-applied at
+-- checkout when the customer submits no code, so the price shown and the price
+-- charged cannot drift apart.
+ALTER TABLE tbl_promo_codes ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT false;
 
--- Same vocabulary as tbl_promo_codes.discount_type, so the two promo tables do
--- not disagree about what a discount type is called.
-ALTER TABLE tbl_promo_codes_usd
-    ADD CONSTRAINT tbl_promo_codes_usd_discount_type_check
-    CHECK (discount_type IN ('percentage', 'fixed'));
+UPDATE tbl_promo_codes SET currency = 'INR' WHERE currency IS NULL OR currency = '';
 
--- Annual is never eligible: the two-months-free discount is permanent and
--- already inside the annual list price, so a promo on top would double-count it.
-ALTER TABLE tbl_promo_codes_usd
-    DROP CONSTRAINT IF EXISTS tbl_promo_codes_usd_billing_interval_check;
-
-ALTER TABLE tbl_promo_codes_usd
-    ADD CONSTRAINT tbl_promo_codes_usd_billing_interval_check
-    CHECK (billing_interval = 'monthly');
-
-COMMENT ON COLUMN tbl_promo_codes_usd.is_public IS
-    'True for the promo advertised on the pricing page. The public promo is '
-    'auto-applied at checkout when the customer submits no code, so the price '
-    'shown is always the price charged.';
+COMMENT ON COLUMN tbl_promo_codes.currency IS
+    'ISO currency this promo applies to. INR promos are applied through a '
+    'Razorpay Offer (razorpay_offer_id); USD promos are computed server-side '
+    'and charged as a subscription addon, because Offers are INR-locked on '
+    'this account and fail silently against a USD plan.';
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 3. Currency-aware subscription columns
@@ -104,7 +85,7 @@ ALTER TABLE tbl_subscriptions ADD COLUMN IF NOT EXISTS start_at            TIMES
 
 COMMENT ON COLUMN tbl_subscriptions.currency IS
     'Currency this subscription bills in. Locked at first subscription and never '
-    'changed — a customer who subscribes in USD keeps paying USD even if they '
+    'changed -- a customer who subscribes in USD keeps paying USD even if they '
     'later browse from India, and vice versa.';
 
 COMMENT ON COLUMN tbl_subscriptions.upfront_amount IS
@@ -113,7 +94,7 @@ COMMENT ON COLUMN tbl_subscriptions.upfront_amount IS
     'so a future price change cannot make historical records lie.';
 
 COMMENT ON COLUMN tbl_subscriptions.promo_period_active IS
-    'True between subscription.authenticated and the first full-price charge — '
+    'True between subscription.authenticated and the first full-price charge -- '
     'i.e. while the customer is inside the discounted first period.';
 
 -- Existing rows all predate USD support.
@@ -135,71 +116,81 @@ ALTER TABLE tbl_payments ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NULL D
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 5. Seed the Pro USD prices
 -- ─────────────────────────────────────────────────────────────────────────────
--- $20.00/month, $200.00/year. Annual is 10x monthly — that *is* the "2 months
--- free", set permanently in the list price. Do not set annual to 12x monthly and
--- layer a 2-month promo on top: that discount would silently expire and hit the
--- customer's foreign card with a ~20% increase a year later with no human in
--- the loop.
+-- $20/month, $200/year, stored as whole dollars (see the comment on price_inr).
+-- Annual is 10x monthly -- that *is* the "2 months free", set permanently in the
+-- list price. Do not set annual to 12x monthly and layer a 2-month promo on top:
+-- that discount would silently expire and hit the customer's foreign card with a
+-- ~20% increase a year later with no human in the loop.
 --
 -- ai_credit_limit and total_count are copied from the matching INR row so the
 -- entitlement a USD customer receives is identical to an INR customer's.
--- razorpay_plan_id_usd stays NULL until the two USD plans exist in the Razorpay
--- dashboard; fill it in with a follow-up UPDATE.
+-- razorpay_plan_id stays NULL until the plans exist in the Razorpay dashboard.
+--
+-- These run last on purpose. Until they exist, the widened constraint and the
+-- new columns are inert, so this script is safe to run before the application
+-- that filters on currency has been deployed.
 
-INSERT INTO tbl_plan_prices_usd (plan_id, billing_interval, price_usd, ai_credit_limit, total_count, description)
-SELECT p.id, 'monthly', 2000, pp.ai_credit_limit, pp.total_count, 'Pro plan, billed monthly'
-FROM tbl_mstr_plans p
-JOIN tbl_plan_prices pp ON pp.plan_id = p.id AND pp.billing_interval = 'monthly'
-WHERE p.code = 'pro'
-ON CONFLICT (plan_id, billing_interval) DO NOTHING;
+INSERT INTO tbl_plan_prices
+    (plan_id, billing_interval, price_inr, currency, ai_credit_limit, total_count, description)
+SELECT pp.plan_id, 'monthly', 20, 'USD', pp.ai_credit_limit, pp.total_count, 'Pro plan, billed monthly'
+FROM tbl_plan_prices pp
+JOIN tbl_mstr_plans p ON p.id = pp.plan_id
+WHERE p.code = 'pro' AND pp.billing_interval = 'monthly' AND pp.currency = 'INR'
+ON CONFLICT (plan_id, billing_interval, currency) DO NOTHING;
 
-INSERT INTO tbl_plan_prices_usd (plan_id, billing_interval, price_usd, ai_credit_limit, total_count, description)
-SELECT p.id, 'yearly', 20000, pp.ai_credit_limit, pp.total_count, 'Pro plan, billed annually'
-FROM tbl_mstr_plans p
-JOIN tbl_plan_prices pp ON pp.plan_id = p.id AND pp.billing_interval = 'yearly'
-WHERE p.code = 'pro'
-ON CONFLICT (plan_id, billing_interval) DO NOTHING;
+INSERT INTO tbl_plan_prices
+    (plan_id, billing_interval, price_inr, currency, ai_credit_limit, total_count, description)
+SELECT pp.plan_id, 'yearly', 200, 'USD', pp.ai_credit_limit, pp.total_count, 'Pro plan, billed annually'
+FROM tbl_plan_prices pp
+JOIN tbl_mstr_plans p ON p.id = pp.plan_id
+WHERE p.code = 'pro' AND pp.billing_interval = 'yearly' AND pp.currency = 'INR'
+ON CONFLICT (plan_id, billing_interval, currency) DO NOTHING;
 
 -- Zero-priced tiers (Free) are mirrored across so they still render on the USD
--- pricing page. razorpay_plan_id_usd stays NULL for them, which is what marks
--- them as not purchasable through checkout — a free tier never goes through the
+-- pricing page. razorpay_plan_id stays NULL for them, which is what marks them
+-- as not purchasable through checkout -- a free tier never goes through the
 -- payment gateway.
 
-INSERT INTO tbl_plan_prices_usd (plan_id, billing_interval, price_usd, ai_credit_limit, total_count, description)
-SELECT pp.plan_id, pp.billing_interval, 0, pp.ai_credit_limit, pp.total_count, p.name || ' plan'
+INSERT INTO tbl_plan_prices
+    (plan_id, billing_interval, price_inr, currency, ai_credit_limit, total_count, description)
+SELECT pp.plan_id, pp.billing_interval, 0, 'USD', pp.ai_credit_limit, pp.total_count, p.name || ' plan'
 FROM tbl_plan_prices pp
 JOIN tbl_mstr_plans p ON p.id = pp.plan_id
 WHERE pp.price_inr = 0
+  AND pp.currency = 'INR'
   AND pp.isactive
   AND pp.billing_interval IN ('monthly', 'yearly')
-ON CONFLICT (plan_id, billing_interval) DO NOTHING;
+ON CONFLICT (plan_id, billing_interval, currency) DO NOTHING;
 
--- Any paid tier other than Pro is deliberately absent from this table. A tier
--- with no USD row is simply not offered in USD, which is correct until it has a
--- real USD price and a Razorpay USD plan of its own.
+-- Any paid tier other than Pro is deliberately absent in USD. A tier with no USD
+-- row is simply not offered in USD, which is correct until it has a real USD
+-- price and a Razorpay USD plan of its own.
 
 -- After creating the plans in the Razorpay dashboard, run:
 --
---   UPDATE tbl_plan_prices_usd SET razorpay_plan_id_usd = 'plan_XXXXXXXXXXXXXX'
---   WHERE billing_interval = 'monthly'
+--   UPDATE tbl_plan_prices SET razorpay_plan_id = 'plan_XXXXXXXXXXXXXX'
+--   WHERE currency = 'USD' AND billing_interval = 'monthly'
 --     AND plan_id = (SELECT id FROM tbl_mstr_plans WHERE code = 'pro');
 --
---   UPDATE tbl_plan_prices_usd SET razorpay_plan_id_usd = 'plan_YYYYYYYYYYYYYY'
---   WHERE billing_interval = 'yearly'
+--   UPDATE tbl_plan_prices SET razorpay_plan_id = 'plan_YYYYYYYYYYYYYY'
+--   WHERE currency = 'USD' AND billing_interval = 'yearly'
 --     AND plan_id = (SELECT id FROM tbl_mstr_plans WHERE code = 'pro');
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 6. Seed the advertised first-month promo
 -- ─────────────────────────────────────────────────────────────────────────────
--- 50% off the first month, monthly only. is_public = true, so the pricing page
--- advertises it and checkout auto-applies it when no code is submitted — the
--- displayed price and the charged price cannot drift apart.
+-- 50% off the first month, monthly only, USD only. is_public = true, so the
+-- pricing page advertises it and checkout auto-applies it when no code is
+-- submitted.
+--
+-- discount_type uses the existing vocabulary of tbl_promo_codes ('percentage' /
+-- 'fixed'), and max_usage is the existing redemption-cap column.
 
-INSERT INTO tbl_promo_codes_usd
-    (code, discount_type, discount_value, billing_interval, plan_code,
-     max_redemptions, valid_from, valid_to, is_active, is_public, description)
+INSERT INTO tbl_promo_codes
+    (id, code, discount_type, discount_value, billing_interval, plan_code,
+     max_usage, valid_from, valid_to, is_active, is_public, currency, description)
 VALUES
-    ('USDINTRO50', 'percentage', 50, 'monthly', 'pro',
-     NULL, now(), now() + INTERVAL '5 years', true, true,
+    (gen_random_uuid(), 'USDINTRO50', 'percentage', 50, 'monthly', 'pro',
+     NULL, now(), now() + INTERVAL '5 years', true, true, 'USD',
      '50% off the first month for new USD customers')
 ON CONFLICT (code) DO NOTHING;

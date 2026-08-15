@@ -95,6 +95,12 @@ async def _get_plan_with_features(
         select(PlanPrice).where(
             PlanPrice.plan_id == plan.id,
             PlanPrice.billing_interval == billing_interval,
+            # tbl_plan_prices holds one row per currency since USD support was
+            # added. Without this filter the query matches both rows and
+            # scalar_one_or_none() below raises MultipleResultsFound — which
+            # would break every rupee checkout for the plan, not just misprice
+            # it. This is the only line of the INR path the merge required.
+            PlanPrice.currency == "INR",
             PlanPrice.isactive == True,
         )
     )

@@ -78,12 +78,20 @@ carry no visibility field and no licence field at all.
 ## 3. Database
 
 - [ ] Run `sql/add_usd_pricing.sql` on dev.
-- [ ] Fill `razorpay_plan_id_usd` for both Pro rows once the plans exist.
+- [ ] Fill `razorpay_plan_id` for both USD Pro rows once the plans exist.
+      Dev plan IDs: monthly `plan_TQ2m22UBRutnZu`, annual `plan_TQ8SZe3nf6a0d3`.
+      Confirm which Razorpay mode these came from — a test-mode plan ID against
+      live keys fails every checkout.
 - [ ] Repeat both on production when the time comes.
 - [ ] New columns for the model licence work in section 1.
 
 `sql/rollback_usd_pricing.sql` reverses the migration; it refuses to run while
 live USD subscriptions exist.
+
+USD shares `tbl_plan_prices` and `tbl_promo_codes` with INR, separated by the
+`currency` column, so both tables now hold two rows per plan and interval. Every
+read must filter on currency — `tests/test_currency_isolation.py` fails if any
+of the four lookups stops doing so.
 
 ---
 

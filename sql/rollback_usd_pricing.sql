@@ -1,9 +1,9 @@
 -- Rollback for sql/add_usd_pricing.sql.
 --
 -- Run this only to undo the USD migration on a dev database. It is destructive:
--- dropping the columns discards the currency, promo and amount history of every
--- USD subscription that was created while they existed. There is no way to
--- recover that from the INR columns, because it was never stored there.
+-- it deletes the USD price rows and USD promos, and dropping the subscription
+-- columns discards the currency, promo and amount history of every USD
+-- subscription that existed.
 --
 -- Before running this against anything with real subscriptions, deploy the
 -- previous application image first. The current image reads these columns on
@@ -33,7 +33,7 @@ BEGIN
     IF live_usd > 0 THEN
         -- status is a non-native enum stored as text. Compared case-insensitively
         -- because SQLAlchemy persists the member name ('ACTIVE') while the enum's
-        -- value is lowercase ('active') — this must not depend on which one is in
+        -- value is lowercase ('active') -- this must not depend on which one is in
         -- the column.
         SELECT count(*) INTO live_usd
         FROM tbl_subscriptions
@@ -43,15 +43,41 @@ BEGIN
         IF live_usd > 0 THEN
             RAISE EXCEPTION
                 'Refusing to roll back: % USD subscription(s) are still live. '
-                'Cancel them in the Razorpay dashboard first — their webhooks '
+                'Cancel them in the Razorpay dashboard first -- their webhooks '
                 'would otherwise be processed as INR.', live_usd;
         END IF;
     END IF;
 END $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 2. Drop the currency-aware subscription columns
+-- 2. Remove the USD rows
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Deleted before the constraint is narrowed: two rows per (plan, interval)
+-- cannot coexist under the old uniqueness rule, so restoring it while USD rows
+-- are present would fail.
+
+DELETE FROM tbl_plan_prices WHERE currency = 'USD';
+DELETE FROM tbl_promo_codes WHERE currency = 'USD';
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 3. Restore the original uniqueness rule on tbl_plan_prices
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE tbl_plan_prices
+    DROP CONSTRAINT IF EXISTS tbl_plan_prices_plan_interval_currency_key;
+
+ALTER TABLE tbl_plan_prices
+    DROP CONSTRAINT IF EXISTS tbl_plan_prices_plan_interval_key;
+
+ALTER TABLE tbl_plan_prices
+    ADD CONSTRAINT tbl_plan_prices_plan_interval_key
+    UNIQUE (plan_id, billing_interval);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 4. Drop the columns this migration added
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE tbl_promo_codes DROP COLUMN IF EXISTS is_public;
 
 ALTER TABLE tbl_subscriptions DROP COLUMN IF EXISTS currency;
 ALTER TABLE tbl_subscriptions DROP COLUMN IF EXISTS billing_country;
@@ -61,15 +87,10 @@ ALTER TABLE tbl_subscriptions DROP COLUMN IF EXISTS full_amount;
 ALTER TABLE tbl_subscriptions DROP COLUMN IF EXISTS promo_period_active;
 ALTER TABLE tbl_subscriptions DROP COLUMN IF EXISTS start_at;
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 3. Drop the USD tables
--- ─────────────────────────────────────────────────────────────────────────────
-
-DROP TABLE IF EXISTS tbl_promo_codes_usd;
-DROP TABLE IF EXISTS tbl_plan_prices_usd;
-
--- tbl_payments.currency is deliberately NOT dropped. It predates this work —
--- the up-migration only adds it so an older snapshot converges, and the existing
--- INR payment path writes to it.
+-- Deliberately NOT dropped:
+--
+--   tbl_plan_prices.currency  -- predates this work, on the model already
+--   tbl_promo_codes.currency  -- harmless once every row reads 'INR' again
+--   tbl_payments.currency     -- predates this work; the INR path writes to it
 
 COMMIT;

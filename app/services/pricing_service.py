@@ -21,8 +21,7 @@ from app.core.geo import INR, USD, currency_for_country, resolve_display_country
 from app.database.subscription_repo import SubscriptionRepository
 from app.models.models import User
 from app.models.plan import Plan, PlanPrice
-from app.models.plan_price_usd import PlanPriceUsd
-from app.models.promo_usd import PromoCodeUsd
+from app.models.promo import PromoCode
 from app.schemas.pricing import (
     AnnualSaving,
     PricingFeature,
@@ -93,7 +92,7 @@ def _annual_saving(periods: list[PricingPeriod], currency: str) -> Optional[Annu
 
 
 def _promo_display(
-    promo: Optional[PromoCodeUsd],
+    promo: Optional[PromoCode],
     periods: list[PricingPeriod],
     currency: str,
 ) -> Optional[PricingPromo]:
@@ -138,9 +137,10 @@ def _promo_display(
 
 async def _usd_periods(db: AsyncSession, plan: Plan) -> list[PricingPeriod]:
     result = await db.execute(
-        select(PlanPriceUsd).where(
-            PlanPriceUsd.plan_id == plan.id,
-            PlanPriceUsd.isactive.is_(True),
+        select(PlanPrice).where(
+            PlanPrice.plan_id == plan.id,
+            PlanPrice.currency == USD,
+            PlanPrice.isactive.is_(True),
         )
     )
     rows = {row.billing_interval: row for row in result.scalars()}
@@ -153,11 +153,12 @@ async def _usd_periods(db: AsyncSession, plan: Plan) -> list[PricingPeriod]:
         periods.append(
             PricingPeriod(
                 interval=interval,
-                # Already cents — the USD table stores minor units directly.
-                amount_minor=row.price_usd,
-                formatted=format_money(row.price_usd, USD),
+                # price_inr holds whole units of the row's currency — whole
+                # dollars here, not cents.
+                amount_minor=to_minor_units(row.price_inr, USD),
+                formatted=format_money(to_minor_units(row.price_inr, USD), USD),
                 ai_credits=row.ai_credit_limit,
-                available=bool(row.razorpay_plan_id_usd),
+                available=bool(row.razorpay_plan_id),
             )
         )
     return periods

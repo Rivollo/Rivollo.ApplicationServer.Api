@@ -37,6 +37,11 @@ class PromoRepository:
         result = await db.execute(
             select(PromoCode).where(
                 PromoCode.code == code,
+                # tbl_promo_codes holds USD promos too since USD support was
+                # added. Without this filter an Indian customer could type a
+                # USD-only code and have it applied to a rupee checkout — the
+                # codes share one unique namespace, so nothing else stops it.
+                PromoCode.currency == "INR",
                 PromoCode.is_active.is_(True),
                 PromoCode.valid_from <= now,
                 PromoCode.valid_to >= now,
