@@ -42,14 +42,22 @@ def _price(plan_id, interval, currency, amount, credits, rz_plan_id):
     )
 
 
-# Exactly what sql/seed_usd_pricing.sql produces, alongside the existing INR rows.
+# Copied from the dev database, not invented. The INR rows are what
+# tbl_plan_prices actually holds; the USD rows are what sql/seed_usd_pricing.sql
+# adds beside them.
+#
+# Two details here are real and load-bearing. INR annual is 23999 -- 12x monthly
+# with the two months taken off separately by a Razorpay Offer -- so it produces
+# no annual saving of its own. And the Free tier has no INR price row at all,
+# which is why the USD seed inserts its rows explicitly rather than mirroring
+# zero-priced ones.
 ALL_PRICES = [
-    _price(PRO_ID, "monthly", "INR", 1999, 2000, "plan_inr_monthly"),
-    _price(PRO_ID, "yearly", "INR", 19990, 24000, "plan_inr_yearly"),
+    _price(PRO_ID, "monthly", "INR", 1999, 2000, "plan_SQbKKGjy3J4cac"),
+    _price(PRO_ID, "yearly", "INR", 23999, 24000, "plan_STQ5ouNx8Q9r4X"),
     _price(PRO_ID, "monthly", "USD", 20, 2000, "plan_TQ2m22UBRutnZu"),
     _price(PRO_ID, "yearly", "USD", 200, 24000, "plan_TQ8SZe3nf6a0d3"),
-    _price(FREE_ID, "monthly", "INR", 0, 100, None),
     _price(FREE_ID, "monthly", "USD", 0, 100, None),
+    _price(FREE_ID, "yearly", "USD", 0, 100, None),
 ]
 
 USDINTRO50 = SimpleNamespace(
@@ -209,7 +217,30 @@ def test_indian_visitor_still_sees_rupees(client):
     assert body["data"]["currency"] == "INR"
     assert _period(pro, "monthly")["formatted"] == "₹1,999"
     assert _period(pro, "monthly")["amountMinor"] == 199900
+    assert _period(pro, "yearly")["formatted"] == "₹23,999"
     assert pro.get("promo") is None, "the USD intro promo was advertised in INR"
+
+
+def test_inr_shows_no_annual_saving_because_there_is_none(client):
+    """23999 is more than 12 x 1999, so there is nothing to advertise.
+
+    The saving is computed from the two list prices rather than stored, which is
+    what stops a "save 17%" badge outliving the prices that made it true. INR
+    takes its two months off through a Razorpay Offer instead, which this
+    endpoint does not render.
+    """
+    pro = _pro(client.get("/pricing", headers={"cf-ipcountry": "IN"}).json())
+
+    assert pro.get("annualSaving") is None
+
+
+def test_the_free_tier_is_offered_in_usd(client):
+    """Without its seeded rows the frontend drops the tier and the USD pricing
+    page loses its free column entirely."""
+    tiers = {t["code"] for t in
+             client.get("/pricing", headers={"cf-ipcountry": "US"}).json()["data"]["tiers"]}
+
+    assert "free" in tiers, f"free tier missing from USD pricing: {tiers}"
 
 
 def test_unknown_country_falls_back_to_usd(client):

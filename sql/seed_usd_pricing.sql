@@ -49,20 +49,27 @@ JOIN tbl_mstr_plans p ON p.id = pp.plan_id
 WHERE p.code = 'pro' AND pp.billing_interval = 'yearly' AND pp.currency = 'INR'
 ON CONFLICT (plan_id, billing_interval, currency) DO NOTHING;
 
--- Zero-priced tiers (Free) are mirrored across so they still render on the USD
--- pricing page. razorpay_plan_id stays NULL for them, which is what marks them
--- as not purchasable through checkout -- a free tier never goes through the
--- payment gateway.
+-- The Free tier, so it still renders as a column on the USD pricing page.
+--
+-- This is an explicit insert rather than a "copy every zero-priced row" query,
+-- because there is no zero-priced row to copy: tbl_plan_prices contains only
+-- pro/monthly, pro/yearly and weekly/weekly. Free has never had a price row at
+-- all -- the marketing page renders it from hardcoded copy. A mirror keyed on
+-- price_inr = 0 therefore matched nothing, and a USD visitor would have seen a
+-- pricing page with Pro and no free option, because the frontend drops any tier
+-- the API does not return.
+--
+-- ai_credit_limit comes from the tier's own max_ai_credits_month feature limit
+-- (100), which is where the free allowance is actually configured.
+-- razorpay_plan_id stays NULL, which is what marks it as not purchasable -- a
+-- free tier never goes through the payment gateway.
 
 INSERT INTO tbl_plan_prices
     (plan_id, billing_interval, price_inr, currency, ai_credit_limit, total_count, description)
-SELECT pp.plan_id, pp.billing_interval, 0, 'USD', pp.ai_credit_limit, pp.total_count, p.name || ' plan'
-FROM tbl_plan_prices pp
-JOIN tbl_mstr_plans p ON p.id = pp.plan_id
-WHERE pp.price_inr = 0
-  AND pp.currency = 'INR'
-  AND pp.isactive
-  AND pp.billing_interval IN ('monthly', 'yearly')
+SELECT p.id, i.interval, 0, 'USD', 100, 0, 'Free plan'
+FROM   tbl_mstr_plans p
+CROSS  JOIN (VALUES ('monthly'), ('yearly')) AS i(interval)
+WHERE  p.code = 'free'
 ON CONFLICT (plan_id, billing_interval, currency) DO NOTHING;
 
 -- Any paid tier other than Pro is deliberately absent in USD. A tier with no USD
