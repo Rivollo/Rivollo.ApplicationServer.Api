@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Enum, ForeignKey, Index, Integer, String, text
+from sqlalchemy import BigInteger, Boolean, Enum, ForeignKey, Index, Integer, String, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, column_property, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -61,6 +61,31 @@ class Subscription(UUIDMixin, Base):
     razorpay_customer_id: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
     )
+
+    # ── Currency-aware billing (additive; INR rows read correctly via defaults) ──
+    # Locked at first subscription and never changed: a customer who subscribed
+    # in USD keeps paying USD even when browsing from India, and vice versa.
+    currency: Mapped[str] = mapped_column(
+        String(3), nullable=False, server_default=text("'INR'")
+    )
+    billing_country: Mapped[Optional[str]] = mapped_column(String(2), nullable=True)
+    promo_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    # Amount actually charged at the authentication transaction, and the list
+    # price it was discounted from, both in the smallest unit of `currency`.
+    # Stored rather than recomputed from the promo percentage so a later price
+    # change cannot make historical records lie.
+    upfront_amount: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    full_amount: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+    # True between subscription.authenticated and the first full-price charge.
+    promo_period_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
+    # When Razorpay begins the first billing cycle. Set only when the
+    # subscription was created with a future start date.
+    start_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
 
     # Audit fields that exist in the database
     created_by: Mapped[Optional[uuid.UUID]] = mapped_column(PGUUID(as_uuid=True))

@@ -33,6 +33,8 @@ from app.api.routes.product_links import router as product_links_router
 from app.api.routes.support import router as support_router
 from app.api.routes.link_share import router as link_share_router
 from app.api.routes.razorpay_subscriptions import router as razorpay_subscriptions_router
+from app.api.routes.usd_subscriptions import router as usd_subscriptions_router
+from app.api.routes.pricing import router as pricing_router
 from app.api.routes.payments import router as payments_router
 from app.api.routes.ai import router as ai_router
 from app.api.routes.notifications import router as notifications_router
@@ -236,6 +238,8 @@ app.include_router(product_links_router, prefix=_api_prefix)
 app.include_router(support_router, prefix=_api_prefix)
 app.include_router(link_share_router, prefix=_api_prefix)
 app.include_router(razorpay_subscriptions_router, prefix=_api_prefix)
+app.include_router(usd_subscriptions_router, prefix=_api_prefix)
+app.include_router(pricing_router, prefix=_api_prefix)
 app.include_router(payments_router, prefix=_api_prefix)
 app.include_router(ai_router, prefix=_api_prefix)
 app.include_router(notifications_router, prefix=_api_prefix)

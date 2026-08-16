@@ -95,6 +95,12 @@ async def _get_plan_with_features(
         select(PlanPrice).where(
             PlanPrice.plan_id == plan.id,
             PlanPrice.billing_interval == billing_interval,
+            # tbl_plan_prices holds one row per currency since USD support was
+            # added. Without this filter the query matches both rows and
+            # scalar_one_or_none() below raises MultipleResultsFound — which
+            # would break every rupee checkout for the plan, not just misprice
+            # it. This is the only line of the INR path the merge required.
+            PlanPrice.currency == "INR",
             PlanPrice.isactive == True,
         )
     )
@@ -170,8 +176,22 @@ async def _sync_subscription_license(
     license_obj.limit_max_ai_credits = plan_price.ai_credit_limit
     license_obj.limit_max_public_views = limits.get("max_public_views", 0)
     license_obj.limit_max_galleries = limits.get("max_galleries", 0)
-    license_obj.usage_ai_credits = 0
-    license_obj.usage_public_views = 0
+
+    # Usage counters are deliberately NOT reset here.
+    #
+    # This runs from verify_subscription, which is driven by the three
+    # checkout-callback values the customer's browser receives. Those values are
+    # static and the customer keeps them, and the signature over
+    # "{payment_id}|{subscription_id}" stays valid forever, so the endpoint can
+    # be replayed at will — it even documents itself as safe to call repeatedly.
+    # Resetting quotas here therefore let any customer refill their own AI
+    # credits on demand, mid-period, as often as they liked.
+    #
+    # Nothing is lost by removing it: a brand-new licence is created above with
+    # counters already at zero, and a genuine new billing period is reset by
+    # _upsert_license(reset_usage=True) from the subscription.activated and
+    # subscription.charged webhooks. That matches what this module's docstring
+    # already says — period concerns belong to the webhook, not to verify.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

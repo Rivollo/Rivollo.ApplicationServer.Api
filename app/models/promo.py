@@ -93,6 +93,26 @@ class PromoCode(Base):
         nullable=True,
     )
 
+    # INR promos are applied through a Razorpay Offer; USD promos are computed
+    # server-side and charged as a subscription addon, because Offers are
+    # INR-locked on this account and fail silently against a USD plan. Every
+    # lookup filters on this so a code for one currency cannot be redeemed
+    # against the other.
+    currency = Column(
+        String(3),
+        nullable=False,
+        server_default="INR",
+    )
+
+    # Marks the promo advertised on the pricing page. It is auto-applied at
+    # checkout when no code is submitted, so the displayed price and the charged
+    # price cannot drift apart.
+    is_public = Column(
+        Boolean,
+        nullable=False,
+        server_default="false",
+    )
+
     created_date = Column(
         DateTime(timezone=True),
         server_default=func.now(),
