@@ -10,12 +10,6 @@ env:
   IMAGE_NAME: rivollo-dev-portal-api
   AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
   CONTAINERAPP_NAME: ${{ vars.CONTAINERAPP_NAME }}
-  # The Google OAuth client whose tokens /auth/google will accept. A variable,
-  # not a secret: it is compiled into the Portal's JavaScript bundle and sent to
-  # Google on every sign-in, so it is public by construction — and keeping it
-  # readable is the point. It must equal the Portal's
-  # NEXT_PUBLIC_GOOGLE_CLIENT_ID exactly; see the deploy step for why.
-  GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
 
 permissions:
   id-token: write   # required for OIDC azure/login
@@ -129,37 +123,188 @@ jobs:
           echo "REV_BEFORE=${REV_BEFORE}" >> "$GITHUB_ENV"
           echo "Currently deployed revision: ${REV_BEFORE:-<none>}"
 
-      - name: Deploy new image to Container App
+      # Application configuration, sourced from GitHub rather than typed into the
+      # container app by hand.
+      #
+      # The point is reviewability and recovery. Configuration that exists only
+      # as live Azure state cannot be diffed, cannot appear in a pull request,
+      # and cannot be restored if the app is recreated. GOOGLE_CLIENT_ID pointed
+      # at the wrong Google project for weeks precisely because there was no
+      # artefact anyone could have compared against the Portal's value.
+      #
+      # Two properties make this safe to adopt gradually:
+      #
+      #   * A name absent from GitHub is SKIPPED, never set to empty. Blanking a
+      #     working DATABASE_URL because a secret had not been created yet would
+      #     be a far worse outcome than leaving it manual, and an empty value is
+      #     not inert -- GOOGLE_CLIENT_ID="" rejects every token rather than
+      #     disabling the check. Every skipped name is listed in the run log, so
+      #     the remaining manual surface is visible on every deploy.
+      #
+      #   * --set-env-vars merges. Names not mentioned here keep whatever the app
+      #     already has. (--replace-env-vars would delete them, DATABASE_URL
+      #     included -- do not substitute it.)
+      #
+      # Values arrive through `env:` instead of being interpolated into the
+      # script. A ${{ }} expression is textual substitution, so a value holding a
+      # quote or backtick would otherwise be executed as shell.
+      - name: Deploy image and configuration to Container App
+        env:
+          ACCESS_TOKEN_EXPIRES_MINUTES: ${{ vars.ACCESS_TOKEN_EXPIRES_MINUTES }}
+          AI_LINK_URL_MAX_CHARS: ${{ vars.AI_LINK_URL_MAX_CHARS }}
+          AI_USER_INPUT_DESC_MAX_CHARS: ${{ vars.AI_USER_INPUT_DESC_MAX_CHARS }}
+          AI_USER_INPUT_NAME_MAX_CHARS: ${{ vars.AI_USER_INPUT_NAME_MAX_CHARS }}
+          AI_USER_PROMPT_MAX_CHARS: ${{ vars.AI_USER_PROMPT_MAX_CHARS }}
+          APP_CLIENT_KEYS: ${{ secrets.APP_CLIENT_KEYS }}
+          APP_NAME: ${{ vars.APP_NAME }}
+          APP_TOKEN_EXPIRES_MINUTES: ${{ vars.APP_TOKEN_EXPIRES_MINUTES }}
+          AZURE_BLOB_BASE_URL: ${{ vars.AZURE_BLOB_BASE_URL }}
+          AZURE_JOB_IMAGE: ${{ vars.AZURE_JOB_IMAGE }}
+          AZURE_JOB_NAME: ${{ vars.AZURE_JOB_NAME }}
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_CONN_STRING: ${{ secrets.AZURE_STORAGE_CONN_STRING }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DEBUG: ${{ vars.DEBUG }}
+          FAL_KEY: ${{ secrets.FAL_KEY }}
+          FCM_DRY_RUN: ${{ vars.FCM_DRY_RUN }}
+          FIREBASE_JSON_PATH: ${{ vars.FIREBASE_JSON_PATH }}
+          FIREBASE_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON_B64 }}
+          FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+          GPU_COLD_START_SECONDS: ${{ vars.GPU_COLD_START_SECONDS }}
+          JWT_ALGORITHM: ${{ vars.JWT_ALGORITHM }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          MANAGED_IDENTITY_CLIENT_ID: ${{ vars.MANAGED_IDENTITY_CLIENT_ID }}
+          MODEL_3D_API_BASE_URL: ${{ vars.MODEL_3D_API_BASE_URL }}
+          MODEL_SERVICE_URL: ${{ vars.MODEL_SERVICE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_CHAT_URL: ${{ vars.OPENAI_CHAT_URL }}
+          OPENAI_MAX_TOKENS: ${{ vars.OPENAI_MAX_TOKENS }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          OPENAI_USE_AZURE: ${{ vars.OPENAI_USE_AZURE }}
+          PASSWORD_RESET_OTP_EXPIRES_MINUTES: ${{ vars.PASSWORD_RESET_OTP_EXPIRES_MINUTES }}
+          PASSWORD_RESET_TOKEN_EXPIRES_MINUTES: ${{ vars.PASSWORD_RESET_TOKEN_EXPIRES_MINUTES }}
+          QUOTA_NOTIFICATION_THRESHOLDS: ${{ vars.QUOTA_NOTIFICATION_THRESHOLDS }}
+          RAZORPAY_BASE_URL: ${{ vars.RAZORPAY_BASE_URL }}
+          RAZORPAY_KEY_ID: ${{ vars.RAZORPAY_KEY_ID }}
+          RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
+          RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL: ${{ vars.RESEND_FROM_EMAIL }}
+          RESEND_FROM_NAME: ${{ vars.RESEND_FROM_NAME }}
+          SAMPLING_RATIO: ${{ vars.SAMPLING_RATIO }}
+          SERVICEBUS_CONNECTION_STRING: ${{ secrets.SERVICEBUS_CONNECTION_STRING }}
+          SERVICEBUS_QUEUE_NAME: ${{ vars.SERVICEBUS_QUEUE_NAME }}
+          SIGNUP_OTP_EXPIRES_MINUTES: ${{ vars.SIGNUP_OTP_EXPIRES_MINUTES }}
+          SIGNUP_TOKEN_EXPIRES_MINUTES: ${{ vars.SIGNUP_TOKEN_EXPIRES_MINUTES }}
+          STORAGE_CONTAINER_UPLOADS: ${{ vars.STORAGE_CONTAINER_UPLOADS }}
+          SUBSCRIPTION_EXPIRY_REMINDER_DAYS: ${{ vars.SUBSCRIPTION_EXPIRY_REMINDER_DAYS }}
+          SUPPORT_EMAIL: ${{ vars.SUPPORT_EMAIL }}
+          TRIPO_API_KEY: ${{ secrets.TRIPO_API_KEY }}
+          USE_MANAGED_IDENTITY: ${{ vars.USE_MANAGED_IDENTITY }}
+          WHATSAPP_ACCESS_TOKEN: ${{ secrets.WHATSAPP_ACCESS_TOKEN }}
+          WHATSAPP_API_VERSION: ${{ vars.WHATSAPP_API_VERSION }}
+          WHATSAPP_PHONE_NUMBER_ID: ${{ vars.WHATSAPP_PHONE_NUMBER_ID }}
+          WHATSAPP_TEMPLATE_NAME: ${{ vars.WHATSAPP_TEMPLATE_NAME }}
+          WS_NOTIFY_CHANNEL: ${{ vars.WS_NOTIFY_CHANNEL }}
         run: |
           set -euo pipefail
 
-          # /auth/google compares the token's `aud` claim against
-          # settings.GOOGLE_CLIENT_ID with a plain !=, and the setting defaults
-          # to "". So an unset variable does not disable the check — it makes it
-          # reject every token, and the only symptom is a 401 reading "Google
-          # token was not issued for this application" on an otherwise healthy
-          # app. Skip rather than set an empty value, and say so loudly.
-          #
-          # --set-env-vars merges: it updates only what is named here and leaves
-          # every other variable on the app alone. --replace-env-vars would wipe
-          # them, which for this app would take out DATABASE_URL.
           ENV_ARGS=()
-          if [ -n "${GOOGLE_CLIENT_ID:-}" ]; then
-            echo "Setting GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}"
-            ENV_ARGS+=(--set-env-vars "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}")
-          else
-            echo "::warning::GOOGLE_CLIENT_ID is not set (repo/environment \
-          variable). Whatever value is on the container app is left untouched — \
-          if it does not match the Portal's NEXT_PUBLIC_GOOGLE_CLIENT_ID, every \
-          Google sign-in will fail with 401 'Google token was not issued for \
-          this application'."
+          MISSING=()
+
+          add() {
+            local name="$1" value="${2:-}"
+            if [ -n "$value" ]; then
+              ENV_ARGS+=("${name}=${value}")
+            else
+              MISSING+=("$name")
+            fi
+          }
+
+          add ACCESS_TOKEN_EXPIRES_MINUTES "${ACCESS_TOKEN_EXPIRES_MINUTES:-}"
+          add AI_LINK_URL_MAX_CHARS "${AI_LINK_URL_MAX_CHARS:-}"
+          add AI_USER_INPUT_DESC_MAX_CHARS "${AI_USER_INPUT_DESC_MAX_CHARS:-}"
+          add AI_USER_INPUT_NAME_MAX_CHARS "${AI_USER_INPUT_NAME_MAX_CHARS:-}"
+          add AI_USER_PROMPT_MAX_CHARS "${AI_USER_PROMPT_MAX_CHARS:-}"
+          add APP_CLIENT_KEYS "${APP_CLIENT_KEYS:-}"
+          add APP_NAME "${APP_NAME:-}"
+          add APP_TOKEN_EXPIRES_MINUTES "${APP_TOKEN_EXPIRES_MINUTES:-}"
+          add AZURE_BLOB_BASE_URL "${AZURE_BLOB_BASE_URL:-}"
+          add AZURE_JOB_IMAGE "${AZURE_JOB_IMAGE:-}"
+          add AZURE_JOB_NAME "${AZURE_JOB_NAME:-}"
+          add AZURE_RESOURCE_GROUP "${AZURE_RESOURCE_GROUP:-}"
+          add AZURE_STORAGE_ACCOUNT "${AZURE_STORAGE_ACCOUNT:-}"
+          add AZURE_STORAGE_CONN_STRING "${AZURE_STORAGE_CONN_STRING:-}"
+          add AZURE_STORAGE_KEY "${AZURE_STORAGE_KEY:-}"
+          add AZURE_SUBSCRIPTION_ID "${AZURE_SUBSCRIPTION_ID:-}"
+          add CDN_BASE_URL "${CDN_BASE_URL:-}"
+          add DATABASE_URL "${DATABASE_URL:-}"
+          add DEBUG "${DEBUG:-}"
+          add FAL_KEY "${FAL_KEY:-}"
+          add FCM_DRY_RUN "${FCM_DRY_RUN:-}"
+          add FIREBASE_JSON_PATH "${FIREBASE_JSON_PATH:-}"
+          add FIREBASE_SERVICE_ACCOUNT_JSON_B64 "${FIREBASE_SERVICE_ACCOUNT_JSON_B64:-}"
+          add FRONTEND_URL "${FRONTEND_URL:-}"
+          add GOOGLE_CLIENT_ID "${GOOGLE_CLIENT_ID:-}"
+          add GPU_COLD_START_SECONDS "${GPU_COLD_START_SECONDS:-}"
+          add JWT_ALGORITHM "${JWT_ALGORITHM:-}"
+          add JWT_SECRET "${JWT_SECRET:-}"
+          add MANAGED_IDENTITY_CLIENT_ID "${MANAGED_IDENTITY_CLIENT_ID:-}"
+          add MODEL_3D_API_BASE_URL "${MODEL_3D_API_BASE_URL:-}"
+          add MODEL_SERVICE_URL "${MODEL_SERVICE_URL:-}"
+          add OPENAI_API_KEY "${OPENAI_API_KEY:-}"
+          add OPENAI_CHAT_URL "${OPENAI_CHAT_URL:-}"
+          add OPENAI_MAX_TOKENS "${OPENAI_MAX_TOKENS:-}"
+          add OPENAI_MODEL "${OPENAI_MODEL:-}"
+          add OPENAI_USE_AZURE "${OPENAI_USE_AZURE:-}"
+          add PASSWORD_RESET_OTP_EXPIRES_MINUTES "${PASSWORD_RESET_OTP_EXPIRES_MINUTES:-}"
+          add PASSWORD_RESET_TOKEN_EXPIRES_MINUTES "${PASSWORD_RESET_TOKEN_EXPIRES_MINUTES:-}"
+          add QUOTA_NOTIFICATION_THRESHOLDS "${QUOTA_NOTIFICATION_THRESHOLDS:-}"
+          add RAZORPAY_BASE_URL "${RAZORPAY_BASE_URL:-}"
+          add RAZORPAY_KEY_ID "${RAZORPAY_KEY_ID:-}"
+          add RAZORPAY_KEY_SECRET "${RAZORPAY_KEY_SECRET:-}"
+          add RAZORPAY_WEBHOOK_SECRET "${RAZORPAY_WEBHOOK_SECRET:-}"
+          add RESEND_API_KEY "${RESEND_API_KEY:-}"
+          add RESEND_FROM_EMAIL "${RESEND_FROM_EMAIL:-}"
+          add RESEND_FROM_NAME "${RESEND_FROM_NAME:-}"
+          add SAMPLING_RATIO "${SAMPLING_RATIO:-}"
+          add SERVICEBUS_CONNECTION_STRING "${SERVICEBUS_CONNECTION_STRING:-}"
+          add SERVICEBUS_QUEUE_NAME "${SERVICEBUS_QUEUE_NAME:-}"
+          add SIGNUP_OTP_EXPIRES_MINUTES "${SIGNUP_OTP_EXPIRES_MINUTES:-}"
+          add SIGNUP_TOKEN_EXPIRES_MINUTES "${SIGNUP_TOKEN_EXPIRES_MINUTES:-}"
+          add STORAGE_CONTAINER_UPLOADS "${STORAGE_CONTAINER_UPLOADS:-}"
+          add SUBSCRIPTION_EXPIRY_REMINDER_DAYS "${SUBSCRIPTION_EXPIRY_REMINDER_DAYS:-}"
+          add SUPPORT_EMAIL "${SUPPORT_EMAIL:-}"
+          add TRIPO_API_KEY "${TRIPO_API_KEY:-}"
+          add USE_MANAGED_IDENTITY "${USE_MANAGED_IDENTITY:-}"
+          add WHATSAPP_ACCESS_TOKEN "${WHATSAPP_ACCESS_TOKEN:-}"
+          add WHATSAPP_API_VERSION "${WHATSAPP_API_VERSION:-}"
+          add WHATSAPP_PHONE_NUMBER_ID "${WHATSAPP_PHONE_NUMBER_ID:-}"
+          add WHATSAPP_TEMPLATE_NAME "${WHATSAPP_TEMPLATE_NAME:-}"
+          add WS_NOTIFY_CHANNEL "${WS_NOTIFY_CHANNEL:-}"
+
+          echo "Applying ${#ENV_ARGS[@]} variables from GitHub."
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "::warning::Still managed by hand on the container app -- not \
+          defined in GitHub, so their existing values are left untouched: ${MISSING[*]}"
+          fi
+
+          UPDATE_ARGS=(--image "$IMAGE")
+          # Passing --set-env-vars with no pairs is an error, and on a first run
+          # with nothing migrated yet the array is legitimately empty.
+          if [ ${#ENV_ARGS[@]} -gt 0 ]; then
+            UPDATE_ARGS+=(--set-env-vars "${ENV_ARGS[@]}")
           fi
 
           az containerapp update \
             --name "$CONTAINERAPP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "$IMAGE" \
-            "${ENV_ARGS[@]}"
+            "${UPDATE_ARGS[@]}"
 
       # Two assertions, and the second is the one that actually matters.
       #
