@@ -43,6 +43,18 @@ _logger = logging.getLogger("rivollo.razorpay_subscription_service")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Return `value` as tz-aware UTC.
+
+    asyncpg hands back tz-aware datetimes, but rows written before the column
+    was timezone-aware — and anything constructed in a test — may be naive.
+    Comparing a naive datetime against an aware one raises TypeError, and the
+    comparison here decides which cancellation flag Razorpay receives, so it
+    fails closed rather than crashing mid-cancellation.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
 def _check_credentials() -> None:
     """Raise 503 if Razorpay credentials are not configured."""
     if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
@@ -456,6 +468,31 @@ async def cancel_subscription(
 
     rz_subscription_id = subscription.razorpay_subscription_id
 
+    # ── 1a. Which flag can Razorpay actually honour? ─────────────────────────
+    # cancel_at_cycle_end=1 asks Razorpay to stop billing at the end of the
+    # current cycle. A subscription created with a future start_at has no cycle
+    # underway — it sits in `authenticated`, mandate registered, first charge
+    # still ahead — so there is no cycle end to schedule against and Razorpay
+    # refuses the whole request:
+    #
+    #     Subscription cannot be cancelled since no billing cycle is going on
+    #
+    # That is exactly the USD intro-price flow, where the customer paid an
+    # upfront addon and the first full charge is a month out. So the window in
+    # which someone is most likely to cancel — before the real price ever hits
+    # their card — was the one window where cancelling failed outright.
+    #
+    # The gateway flag and our access policy are separate decisions, and this is
+    # where they part company. Razorpay is told to cancel immediately, because
+    # killing the mandate now is the entire point and there is no cycle to run
+    # out. The customer's access is untouched: they paid for the period ending
+    # at start_at and keep it, which the DB update in step 3 preserves.
+    gateway_cycle_running = (
+        subscription.start_at is None
+        or _as_utc(subscription.start_at) <= datetime.now(timezone.utc)
+    )
+    gateway_cancel_at_cycle_end = cancel_at_cycle_end and gateway_cycle_running
+
     # ── 1b. Already scheduled? ───────────────────────────────────────────────
     # A cycle-end cancellation leaves the row ACTIVE for up to a month, so a
     # retried request, a double-click, or a second browser tab can land here
@@ -482,7 +519,7 @@ async def cancel_subscription(
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
                 f"{settings.RAZORPAY_BASE_URL}/subscriptions/{rz_subscription_id}/cancel",
-                json={"cancel_at_cycle_end": 1 if cancel_at_cycle_end else 0},
+                json={"cancel_at_cycle_end": 1 if gateway_cancel_at_cycle_end else 0},
                 auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),
             )
 
