@@ -198,3 +198,48 @@ def test_webhook_credit_limit_matches_the_subscription_currency():
     assert _resolve_ai_credit_limit(inr_sub, {"max_ai_credits_month": 0}) == 2000, (
         "an INR subscriber was granted the credit limit configured for USD"
     )
+
+
+# ── The free-plan row must not count as a payment ────────────────────────────
+#
+# licensing_service creates an ACTIVE subscription row for the free plan at
+# signup, with no currency set — so it takes the tbl_subscriptions default of
+# 'INR'. It is ACTIVE and it is not PENDING, so a status-only filter matches it.
+#
+# The effect was that the USD path did not work for a single signed-in user:
+# every account was locked to rupees the moment it was created, and USD checkout
+# answered "this account already bills in INR" to people who had never paid
+# anything. These read the emitted SQL rather than the source, so removing the
+# condition fails here.
+
+
+def _requires_gateway_id(sql: str) -> bool:
+    """True if the statement excludes rows with no razorpay_subscription_id."""
+    normalised = " ".join(sql.split()).lower()
+    return "razorpay_subscription_id is not null" in normalised
+
+
+@pytest.mark.asyncio
+async def test_currency_lock_ignores_rows_that_never_reached_a_gateway():
+    from app.services.billing_currency import get_locked_currency
+
+    db = _CapturingDB([_Result(one=None)])
+    await get_locked_currency(db, uuid.uuid4())
+
+    sql = _sql(db.statements[0])
+    assert _requires_gateway_id(sql), (
+        "get_locked_currency matches the free-plan row, so every account is "
+        f"locked to INR at signup:\n{sql}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_customer_check_ignores_rows_that_never_reached_a_gateway():
+    db = _CapturingDB([SimpleNamespace(scalar=lambda: 0)])
+    await usd_promo_service.has_prior_paid_subscription(db, uuid.uuid4())
+
+    sql = _sql(db.statements[0])
+    assert _requires_gateway_id(sql), (
+        "has_prior_paid_subscription counts the free-plan row, so every "
+        f"registered user is treated as a returning customer:\n{sql}"
+    )

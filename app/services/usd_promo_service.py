@@ -60,13 +60,22 @@ class PromoRejected(Exception):
 
 
 async def has_prior_paid_subscription(db: AsyncSession, user_id: uuid.UUID) -> bool:
-    """True when the user has ever held a subscription that was actually paid."""
+    """True when the user has ever held a subscription that was actually paid.
+
+    The gateway id is what makes "paid" true. Status is not enough: every
+    account gets an ACTIVE free-plan row at signup, so a status-only check
+    counts every registered user as a returning customer — the intro promo is
+    then advertised to nobody and rejected at checkout as "for new customers
+    only" for everyone. Free rows and abandoned checkouts both leave
+    razorpay_subscription_id NULL; every path that charges a card sets it.
+    """
     result = await db.execute(
         select(func.count())
         .select_from(Subscription)
         .where(
             Subscription.user_id == user_id,
             Subscription.status.in_(_PAID_STATUSES),
+            Subscription.razorpay_subscription_id.isnot(None),
         )
     )
     return (result.scalar() or 0) > 0
