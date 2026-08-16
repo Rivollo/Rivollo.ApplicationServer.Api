@@ -77,12 +77,21 @@ carry no visibility field and no licence field at all.
 
 ## 3. Database
 
-- [ ] Run `sql/add_usd_pricing.sql` on dev.
-- [ ] Fill `razorpay_plan_id` for both USD Pro rows once the plans exist.
-      Dev plan IDs: monthly `plan_TQ2m22UBRutnZu`, annual `plan_TQ8SZe3nf6a0d3`.
-      Confirm which Razorpay mode these came from — a test-mode plan ID against
-      live keys fails every checkout.
-- [ ] Repeat both on production when the time comes.
+The order below is not interchangeable. USD price rows share a table with INR
+ones, and the old image's price lookup has no currency filter — so inserting a
+USD row before the new image is serving makes every rupee checkout for that plan
+fail outright.
+
+- [ ] **1.** Run `sql/add_usd_pricing.sql` — schema only, safe against the
+      running old image.
+- [ ] **2.** Deploy the API (merge to `main`).
+- [ ] **3.** Confirm the new image is live: `GET /pricing` with
+      `cf-ipcountry: US` returns `"currency": "USD"`. The old image has no
+      `/pricing` route at all.
+- [ ] **4.** Run `sql/seed_usd_pricing.sql` — USD rows, plan IDs, promo.
+- [ ] Repeat all four on production, in the same order.
+- [ ] Confirm which Razorpay mode the plan IDs came from. A Test-mode plan ID
+      only resolves against Test-mode keys, and they look identical.
 - [ ] New columns for the model licence work in section 1.
 
 `sql/rollback_usd_pricing.sql` reverses the migration; it refuses to run while
