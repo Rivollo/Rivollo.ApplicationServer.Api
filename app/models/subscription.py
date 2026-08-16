@@ -87,6 +87,17 @@ class Subscription(UUIDMixin, Base):
     # subscription was created with a future start date.
     start_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
 
+    # True once the customer has cancelled but keeps access until
+    # current_period_end. Distinct from status: the row stays ACTIVE through
+    # this window because the period is paid for, and Razorpay only confirms
+    # the cancellation via webhook when the period actually ends. Without this
+    # flag that state is indistinguishable from a normally renewing
+    # subscription, and the UI would go on promising a renewal that will not
+    # happen.
+    cancel_at_period_end: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
     # Audit fields that exist in the database
     created_by: Mapped[Optional[uuid.UUID]] = mapped_column(PGUUID(as_uuid=True))
     created_date: Mapped[datetime] = mapped_column(
