@@ -35,7 +35,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.geo import INR, USD, is_india
 from app.models.plan import Plan, PlanPrice
-from app.models.promo import PromoCode
 from app.models.subscription import Subscription
 from app.models.subscription_enums import SubscriptionStatus
 from app.services import usd_promo_service
@@ -50,7 +49,6 @@ from app.services.usd_entitlement import (
     upsert_usd_license,
 )
 from app.services.usd_promo_service import PromoRejected
-from app.utils.billing_dates import next_period_start, to_razorpay_start_at
 # tbl_plan_prices.price_inr holds WHOLE units of the row's currency — rupees on
 # an INR row, dollars on a USD one. Razorpay is told amounts in minor units, so
 # every read of it converts here rather than storing cents in a column the INR
@@ -233,74 +231,34 @@ async def create_usd_subscription(
     plan, plan_price = await _load_usd_plan(db, plan_code, billing_interval)
     full_amount = to_minor_units(plan_price.price_inr, USD)
 
-    promo: Optional[PromoCode] = None
-    upfront_amount: Optional[int] = None
-    start_at_dt: Optional[datetime] = None
     now = datetime.now(timezone.utc)
 
-    if billing_interval == "yearly":
-        # Annual carries no promo mechanism at all: its discount is permanent
-        # and already in the list price. A code submitted against annual is
-        # rejected loudly rather than ignored — a customer who types a code,
-        # sees it accepted and is then charged full price has a real complaint.
-        if promo_code:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Promo codes do not apply to annual plans — the annual price "
-                "already includes two months free.",
-            )
-    else:
-        try:
-            promo = await usd_promo_service.resolve_promo_for_checkout(
-                db,
-                user_id=user_id,
-                plan_code=plan_code,
-                billing_interval=billing_interval,
-                submitted_code=promo_code,
-            )
-        except PromoRejected as exc:
-            if promo_code:
-                # The customer typed this code. Tell them why it failed.
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail=exc.reason
-                )
-            # We tried to auto-apply the advertised promo and could not. Charge
-            # full price, but never silently — this is a pricing-page/checkout
-            # mismatch and someone needs to see it.
-            _logger.error(
-                "Public USD promo could not be applied for user=%s plan=%s: %s",
-                user_id,
-                plan_code,
-                exc.reason,
-            )
-            promo = None
-
-        # compute_upfront_amount raises PromoRejected on a misconfigured
-        # discount_type, so it stays inside a handler — outside one it would
-        # surface as a 500 with no reason the customer can act on.
-        try:
-            upfront_amount = usd_promo_service.compute_upfront_amount(full_amount, promo)
-        except PromoRejected as exc:
-            _logger.error(
-                "USD promo %s is misconfigured: %s",
-                promo.code if promo else "<none>",
-                exc.reason,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=exc.reason
-            )
-
-        usd_promo_service.assert_within_guard_rails(
-            list_amount_minor=full_amount,
-            upfront_amount_minor=upfront_amount,
-            billing_interval=billing_interval,
+    # ── 2a. No introductory pricing, on any interval ─────────────────────────
+    # The USD promo mechanism is gone, and with it the architecture it required.
+    # Monthly used to be created with a future start_at and an upfront addon:
+    # Razorpay treats the gap before start_at as a trial, so the customer was
+    # charged a discounted amount immediately and the plan amount began a month
+    # later. That was built to deliver a first-month discount, and it was
+    # applied to promo and non-promo checkouts alike — every USD monthly
+    # subscription carried it, whether or not anything was actually discounted.
+    #
+    # The cost of that was not theoretical. A subscription with a future
+    # start_at sits in Razorpay's `authenticated` state with no billing cycle
+    # running, which meant it could not be cancelled at cycle end — Razorpay
+    # rejects the request outright — and it forced entitlement to be granted
+    # from the `authenticated` webhook rather than the ordinary `activated` /
+    # `charged` path, because the customer had paid but the subscription would
+    # not be active for a month.
+    #
+    # Monthly is now created exactly like annual: one price, charged
+    # immediately, plan active from the first payment. No start_at, no addon,
+    # no upfront amount, no trial gap, and no state where paid and active
+    # disagree.
+    if promo_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Promo codes are not available on this plan.",
         )
-
-        # Razorpay treats the gap before start_at as a trial: the customer is
-        # charged the upfront amount now, gets a full period, and the plan
-        # amount begins at start_at. Promo and non-promo monthly are created
-        # identically — only the upfront number differs.
-        start_at_dt = next_period_start(now, billing_interval)
 
     # ── 3. Create the subscription at Razorpay ───────────────────────────────
     payload: dict[str, Any] = {
@@ -311,24 +269,11 @@ async def create_usd_subscription(
             user_id=user_id,
             plan_code=plan_code,
             billing_interval=billing_interval,
-            promo_code=promo.code if promo else None,
+            promo_code=None,
             full_amount=full_amount,
-            upfront_amount=upfront_amount,
+            upfront_amount=None,
         ),
     }
-
-    if start_at_dt is not None:
-        payload["start_at"] = to_razorpay_start_at(start_at_dt)
-        payload["addons"] = [
-            {
-                "item": {
-                    "name": f"{plan.name} — first month",
-                    "amount": upfront_amount,
-                    # Inherits nothing from the plan: state it explicitly.
-                    "currency": USD,
-                }
-            }
-        ]
 
     rz_sub = await _call_razorpay(payload)
 
@@ -393,33 +338,25 @@ async def create_usd_subscription(
     subscription.currency = USD
     subscription.offer_id = None
     subscription.billing_country = checkout_country
-    subscription.promo_code = promo.code if promo else None
     subscription.full_amount = full_amount
-    # Stored, never recomputed from the percentage later: a future price change
-    # would otherwise make historical records lie about what was charged.
-    subscription.upfront_amount = upfront_amount
-    subscription.start_at = start_at_dt
+    # Explicitly cleared rather than left alone. This row may be a recycled
+    # abandoned attempt from before the intro was removed, and a stale promo
+    # code or upfront amount carried forward would misreport what was charged.
+    subscription.promo_code = None
+    subscription.upfront_amount = None
+    subscription.start_at = None
     subscription.promo_period_active = False
-
-    # The redemption is NOT counted here. A subscription row at this point only
-    # means checkout was opened, and counting it now would let abandoned
-    # checkouts burn a promo's max_usage without anyone ever paying. It is
-    # counted when the upfront payment is actually captured, in the webhook's
-    # subscription.authenticated handler.
 
     await db.commit()
 
     _logger.info(
         "USD subscription created: rz_sub_id=%s user=%s plan=%s interval=%s "
-        "full=%s upfront=%s promo=%s start_at=%s",
+        "amount=%s",
         rz_subscription_id,
         user_id,
         plan_code,
         billing_interval,
         full_amount,
-        upfront_amount,
-        promo.code if promo else None,
-        start_at_dt,
     )
 
     return {
@@ -431,9 +368,6 @@ async def create_usd_subscription(
         "currency": USD,
         "billingInterval": billing_interval,
         "fullAmount": full_amount,
-        "upfrontAmount": upfront_amount,
-        "promoCode": promo.code if promo else None,
-        "firstChargeAt": start_at_dt,
     }
 
 
