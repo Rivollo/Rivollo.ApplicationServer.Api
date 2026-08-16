@@ -9,7 +9,11 @@ This module is display-only. It never returns a Razorpay plan ID — those stay
 server-side so a client can never name the plan it wants to be charged for.
 """
 
+import asyncio
 import logging
+import os
+import time
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -46,6 +50,41 @@ USD_TAX_NOTE = "Prices exclusive of applicable local taxes."
 INR_TAX_NOTE = ""
 
 _INTERVALS = ("monthly", "yearly")
+
+# ── Tier cache ───────────────────────────────────────────────────────────────
+#
+# The tier list is a pure function of the currency and whether the intro promo
+# is shown. Plans, prices and promos are configuration — they change when
+# someone edits the database, not per request — so rebuilding them on every page
+# view spent a database round trip per plan to produce an identical answer.
+#
+# Not cached, and resolved on every request: the visitor's country, whether
+# their currency is locked, and whether they are still eligible for the intro
+# promo. Those are per-visitor. They only decide *which* cached list is
+# returned, never what is in it.
+#
+# There is no explicit invalidation because nothing in this application writes a
+# price — they are edited directly against the database. A change therefore
+# appears within PRICING_CACHE_TTL_SECONDS rather than immediately. Set the
+# variable to 0 to disable caching entirely.
+PRICING_CACHE_TTL_SECONDS = int(os.getenv("PRICING_CACHE_TTL_SECONDS", "60"))
+
+# (currency, show_promo) -> (expires_at_monotonic, tiers). At most three live
+# keys: INR never shows the promo, USD appears with and without it.
+_tier_cache: dict[tuple[str, bool], tuple[float, list[PricingTier]]] = {}
+
+# Serialises misses so a cold cache under concurrent load rebuilds once rather
+# than once per in-flight request. Cache *hits* never touch it.
+_tier_cache_lock = asyncio.Lock()
+
+
+def clear_pricing_cache() -> None:
+    """Drop every cached tier list.
+
+    Nothing in the request path calls this — it exists so tests do not leak
+    state between cases, and so a future admin write path has an obvious hook.
+    """
+    _tier_cache.clear()
 
 
 async def _locked_currency(db: AsyncSession, user: Optional[User]) -> Optional[str]:
@@ -135,16 +174,33 @@ def _promo_display(
     )
 
 
-async def _usd_periods(db: AsyncSession, plan: Plan) -> list[PricingPeriod]:
+async def _usd_prices_by_plan(
+    db: AsyncSession,
+) -> dict[uuid.UUID, dict[str, PlanPrice]]:
+    """Every active USD price row, grouped by plan and then by interval.
+
+    One query for the whole page. The per-plan form this replaces issued a
+    round trip per tier, which is what made the USD path measurably slower than
+    the INR one — INR reads its rows off the already-loaded relationship.
+
+    The currency filter is not optional: tbl_plan_prices holds INR and USD rows
+    for the same (plan, interval), so dropping it would collapse two rows into
+    one dictionary slot and quote rupee amounts as dollars.
+    """
     result = await db.execute(
         select(PlanPrice).where(
-            PlanPrice.plan_id == plan.id,
             PlanPrice.currency == USD,
             PlanPrice.isactive.is_(True),
         )
     )
-    rows = {row.billing_interval: row for row in result.scalars()}
 
+    by_plan: dict[uuid.UUID, dict[str, PlanPrice]] = {}
+    for row in result.scalars():
+        by_plan.setdefault(row.plan_id, {})[row.billing_interval] = row
+    return by_plan
+
+
+def _usd_periods(rows: dict[str, PlanPrice]) -> list[PricingPeriod]:
     periods: list[PricingPeriod] = []
     for interval in _INTERVALS:
         row = rows.get(interval)
@@ -192,43 +248,35 @@ def _inr_periods(plan: Plan) -> list[PricingPeriod]:
     return periods
 
 
-async def get_pricing(
-    db: AsyncSession,
-    *,
-    request: Request,
-    current_user: Optional[User] = None,
-) -> PricingResponse:
-    """Resolve the visitor's currency and return everything needed to render it."""
-    country = resolve_display_country(request)
+async def _build_tiers(
+    db: AsyncSession, *, currency: str, show_promo: bool
+) -> list[PricingTier]:
+    """Assemble the tier list for one currency.
 
-    locked = await _locked_currency(db, current_user)
-    currency = locked if locked in (INR, USD) else currency_for_country(country)
-    currency_locked = currency == locked
-
-    # A customer who has already paid for a subscription cannot redeem the
-    # new-customer intro promo, so it must not be advertised to them.
-    promo_ineligible = currency != USD or (
-        current_user is not None
-        and await usd_promo_service.has_prior_paid_subscription(db, current_user.id)
-    )
-
+    Two queries for the whole page rather than two per plan: the prices and the
+    advertised promos are each fetched once and matched up in memory.
+    """
     plans = await SubscriptionRepository.get_all_plans(db)
+
+    prices_by_plan: dict[uuid.UUID, dict[str, PlanPrice]] = {}
+    promos: dict[Optional[str], PromoCode] = {}
+    if currency == USD:
+        prices_by_plan = await _usd_prices_by_plan(db)
+        # Returning customers are not eligible for the intro promo, so it must
+        # not be built into the list they are served. Quoting "$10.00 today" to
+        # someone checkout will charge $20.00 is exactly the displayed-price /
+        # charged-price gap this module exists to prevent.
+        if show_promo:
+            promos = await usd_promo_service.get_public_promos(
+                db, billing_interval="monthly"
+            )
 
     tiers: list[PricingTier] = []
     for plan in plans:
         if currency == USD:
-            periods = await _usd_periods(db, plan)
-            # Returning customers are not eligible for the intro promo, so they
-            # must not be shown it. Quoting "$10.00 today" to someone checkout
-            # will charge $20.00 is exactly the displayed-price/charged-price gap
-            # this module exists to prevent.
-            promo = (
-                None
-                if promo_ineligible
-                else await usd_promo_service.get_public_promo(
-                    db, plan_code=plan.code, billing_interval="monthly"
-                )
-            )
+            periods = _usd_periods(prices_by_plan.get(plan.id, {}))
+            # A promo naming this plan beats one that applies to every plan.
+            promo = promos.get(plan.code) or promos.get(None)
             promo_display = _promo_display(promo, periods, currency)
         else:
             periods = _inr_periods(plan)
@@ -253,6 +301,70 @@ async def get_pricing(
                 promo=promo_display,
             )
         )
+    return tiers
+
+
+async def _cached_tiers(
+    db: AsyncSession, *, currency: str, show_promo: bool
+) -> list[PricingTier]:
+    """_build_tiers with a short TTL in front of it.
+
+    One caveat worth knowing: the promo copy contains the date of the first
+    full-price charge, formatted when the list is built. Within one TTL of a
+    month boundary a visitor can therefore be shown the previous month's date.
+    At a 60-second TTL that is a 60-second window, which is why the date is
+    allowed to be cached at all — lengthen the TTL substantially and it stops
+    being acceptable.
+    """
+    if PRICING_CACHE_TTL_SECONDS <= 0:
+        return await _build_tiers(db, currency=currency, show_promo=show_promo)
+
+    key = (currency, show_promo)
+
+    cached = _tier_cache.get(key)
+    if cached and time.monotonic() < cached[0]:
+        return cached[1]
+
+    async with _tier_cache_lock:
+        # Re-check under the lock. A request that queued here while another
+        # rebuilt the same key should use that result, not immediately rebuild.
+        cached = _tier_cache.get(key)
+        if cached and time.monotonic() < cached[0]:
+            return cached[1]
+
+        tiers = await _build_tiers(db, currency=currency, show_promo=show_promo)
+
+        # An empty list means the query matched nothing — an unmigrated or
+        # unreachable database, not a real answer. Caching it would keep the
+        # pricing page blank for a full TTL after the cause was fixed.
+        if tiers:
+            _tier_cache[key] = (time.monotonic() + PRICING_CACHE_TTL_SECONDS, tiers)
+        return tiers
+
+
+async def get_pricing(
+    db: AsyncSession,
+    *,
+    request: Request,
+    current_user: Optional[User] = None,
+) -> PricingResponse:
+    """Resolve the visitor's currency and return everything needed to render it."""
+    country = resolve_display_country(request)
+
+    locked = await _locked_currency(db, current_user)
+    currency = locked if locked in (INR, USD) else currency_for_country(country)
+    currency_locked = currency == locked
+
+    # A customer who has already paid for a subscription cannot redeem the
+    # new-customer intro promo, so it must not be advertised to them.
+    promo_ineligible = currency != USD or (
+        current_user is not None
+        and await usd_promo_service.has_prior_paid_subscription(db, current_user.id)
+    )
+
+    tiers = await _cached_tiers(
+        db, currency=currency, show_promo=not promo_ineligible
+    )
 
     return PricingResponse(
         currency=currency,

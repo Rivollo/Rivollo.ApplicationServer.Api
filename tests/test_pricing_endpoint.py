@@ -13,6 +13,7 @@ is the check to run after deploying and before seeding, and it is one curl:
 Everything between the HTTP request and that SQL is covered here.
 """
 
+import asyncio
 import uuid
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_db
 from app.database.subscription_repo import SubscriptionRepository
 from app.main import app
+from app.services import pricing_service
 
 PRO_ID = uuid.uuid4()
 FREE_ID = uuid.uuid4()
@@ -124,14 +126,29 @@ class _FakeDB:
     exactly as Postgres would hand it, and the assertions below would fail.
     """
 
+    def __init__(self):
+        self.executed: list[str] = []
+
     async def execute(self, statement, *_a, **_k):
         sql = str(statement)
+        self.executed.append(sql)
         if "tbl_plan_prices" in sql:
             where = str(statement.compile(compile_kwargs={"literal_binds": True}))
+            # The pricing page fetches every USD row in one query, so no plan id
+            # appears in that statement. Other callers still ask for a single
+            # plan. Detecting which shape this is keeps both honest: a query
+            # naming a plan must not receive another plan's rows.
+            # UUIDs render without dashes in compiled SQL, hence .hex.
+            names_a_plan = any(
+                p.plan_id.hex in where or str(p.plan_id) in where for p in ALL_PRICES
+            )
             return _Result([
                 p for p in ALL_PRICES
-                # UUIDs render without dashes in compiled SQL, hence .hex.
-                if (p.plan_id.hex in where or str(p.plan_id) in where)
+                if (
+                    not names_a_plan
+                    or p.plan_id.hex in where
+                    or str(p.plan_id) in where
+                )
                 and f"'{p.currency}'" in where
             ])
         if "tbl_promo_codes" in sql:
@@ -140,19 +157,30 @@ class _FakeDB:
 
 
 @pytest.fixture
-def client(monkeypatch):
+def db():
+    """One fake session for the whole test, so its query log can be inspected."""
+    return _FakeDB()
+
+
+@pytest.fixture
+def client(monkeypatch, db):
     async def fake_get_all_plans(_db):
         return _plans()
 
     monkeypatch.setattr(SubscriptionRepository, "get_all_plans", fake_get_all_plans)
 
     async def _db_override():
-        yield _FakeDB()
+        yield db
+
+    # The tier cache is module state and outlives a single test. Without this,
+    # the first test to run decides what every later one sees.
+    pricing_service.clear_pricing_cache()
 
     app.dependency_overrides[get_db] = _db_override
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+    pricing_service.clear_pricing_cache()
 
 
 def _pro(payload):
@@ -249,6 +277,159 @@ def test_unknown_country_falls_back_to_usd(client):
     for header in ({}, {"cf-ipcountry": "XX"}, {"cf-ipcountry": "T1"}):
         body = client.get("/pricing", headers=header).json()
         assert body["data"]["currency"] == "USD", header
+
+
+# ── The tier cache ──────────────────────────────────────────────────────────
+
+
+def _price_queries(db):
+    return [s for s in db.executed if "tbl_plan_prices" in s]
+
+
+def test_the_page_costs_one_price_query_not_one_per_plan(client, db):
+    """The N+1 this cache was added to remove.
+
+    Asserting on the query count rather than on elapsed time: a timing
+    assertion passes on a fast machine no matter how many round trips it makes,
+    which is exactly the regression that would go unnoticed.
+    """
+    client.get("/pricing", headers={"cf-ipcountry": "US"})
+
+    assert len(_price_queries(db)) == 1, (
+        f"expected one price query for the whole page, got {len(_price_queries(db))}"
+    )
+
+
+def test_a_second_visitor_hits_the_cache(client, db):
+    client.get("/pricing", headers={"cf-ipcountry": "US"})
+    after_first = len(db.executed)
+
+    for _ in range(5):
+        client.get("/pricing", headers={"cf-ipcountry": "US"})
+
+    assert len(db.executed) == after_first, (
+        "the cache is not being used — every request re-queried"
+    )
+
+
+def test_currencies_are_cached_separately(client, db):
+    """The bug a single-slot cache would introduce: rupees served to Americans."""
+    client.get("/pricing", headers={"cf-ipcountry": "US"})
+    body = client.get("/pricing", headers={"cf-ipcountry": "IN"}).json()
+
+    assert body["data"]["currency"] == "INR"
+    assert _period(_pro(body), "monthly")["formatted"] == "₹1,999"
+
+    usd = client.get("/pricing", headers={"cf-ipcountry": "US"}).json()
+    assert _period(_pro(usd), "monthly")["formatted"] == "$20.00"
+
+
+def test_currency_is_part_of_the_cache_key_in_its_own_right(client, db):
+    """Two currencies sharing one promo state must not share one cache entry.
+
+    test_currencies_are_cached_separately above does not actually prove this.
+    Every INR visitor is promo-ineligible, so INR and USD differ in the promo
+    half of the key as well — and a key built from the promo state alone still
+    separates them, which lets a missing currency term pass unnoticed.
+
+    The case that breaks is a *returning* USD customer: promo-ineligible, like
+    every INR visitor. Drop currency from the key and those two collide, and one
+    of them is served the other's prices. This drives the layer directly so the
+    promo state is held equal and only the currency varies.
+    """
+    async def both():
+        usd = await pricing_service._cached_tiers(db, currency="USD", show_promo=False)
+        inr = await pricing_service._cached_tiers(db, currency="INR", show_promo=False)
+        return usd, inr
+
+    usd, inr = asyncio.run(both())
+
+    def monthly(tiers):
+        pro = next(t for t in tiers if t.code == "pro")
+        return next(p.formatted for p in pro.periods if p.interval == "monthly")
+
+    assert monthly(usd) == "$20.00"
+    assert monthly(inr) == "₹1,999", (
+        "an INR visitor was served the cached USD tiers — currency is not in the key"
+    )
+
+
+def test_promo_eligibility_is_part_of_the_cache_key(client, db):
+    """A returning customer must not be served the new-customer tiers.
+
+    Both calls are USD, so only the promo half of the key differs. If it were
+    dropped, the second call would return the first call's cached list and quote
+    "$10.00 today" to someone checkout will charge $20.00 — the displayed-price
+    versus charged-price gap this module exists to close.
+    """
+    async def both():
+        eligible = await pricing_service._cached_tiers(
+            db, currency="USD", show_promo=True
+        )
+        returning = await pricing_service._cached_tiers(
+            db, currency="USD", show_promo=False
+        )
+        return eligible, returning
+
+    eligible, returning = asyncio.run(both())
+
+    def pro(tiers):
+        return next(t for t in tiers if t.code == "pro")
+
+    assert pro(eligible).promo is not None, "the intro promo was not advertised at all"
+    assert pro(returning).promo is None, (
+        "a returning customer was shown the new-customer intro promo"
+    )
+
+
+def test_the_cache_expires(client, db):
+    """A price edited in the database must appear, not be pinned forever."""
+    client.get("/pricing", headers={"cf-ipcountry": "US"})
+    after_first = len(db.executed)
+
+    client.get("/pricing", headers={"cf-ipcountry": "US"})
+    assert len(db.executed) == after_first, "precondition: the second call should hit"
+
+    # Age the entry past its deadline rather than patching the clock, which
+    # TestClient's own event loop also reads.
+    key = ("USD", True)
+    expires_at, tiers = pricing_service._tier_cache[key]
+    pricing_service._tier_cache[key] = (
+        expires_at - pricing_service.PRICING_CACHE_TTL_SECONDS - 1,
+        tiers,
+    )
+
+    client.get("/pricing", headers={"cf-ipcountry": "US"})
+    assert len(db.executed) > after_first, "an expired entry was still served"
+
+
+def test_clearing_the_cache_forces_a_rebuild(client, db):
+    client.get("/pricing", headers={"cf-ipcountry": "US"})
+    before = len(db.executed)
+
+    pricing_service.clear_pricing_cache()
+    client.get("/pricing", headers={"cf-ipcountry": "US"})
+
+    assert len(db.executed) > before, "clear_pricing_cache() did not evict anything"
+
+
+def test_an_empty_result_is_never_cached(client, db, monkeypatch):
+    """A database that answers nothing must not blank the page for a full TTL."""
+    async def no_plans(_db):
+        return []
+
+    monkeypatch.setattr(SubscriptionRepository, "get_all_plans", no_plans)
+    assert client.get("/pricing", headers={"cf-ipcountry": "US"}).json()["data"]["tiers"] == []
+
+    monkeypatch.setattr(SubscriptionRepository, "get_all_plans", lambda _db=None: None)
+
+    async def plans_again(_db):
+        return _plans()
+
+    monkeypatch.setattr(SubscriptionRepository, "get_all_plans", plans_again)
+    tiers = client.get("/pricing", headers={"cf-ipcountry": "US"}).json()["data"]["tiers"]
+
+    assert tiers, "an empty answer was cached and survived the database recovering"
 
 
 # ── Invariants ──────────────────────────────────────────────────────────────

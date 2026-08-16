@@ -181,6 +181,49 @@ async def get_public_promo(
     return None
 
 
+async def get_public_promos(
+    db: AsyncSession, *, billing_interval: str
+) -> dict[Optional[str], PromoCode]:
+    """Every advertised promo for this interval, keyed by the plan it targets.
+
+    The same answer as calling get_public_promo() once per plan, in one query
+    instead of one per plan. The pricing page renders every tier at once, so the
+    per-plan form was a round trip per tier for a table that holds a handful of
+    rows.
+
+    The key is the promo's own plan_code, so a promo that applies to every plan
+    is stored under None. Callers resolve precedence explicitly:
+
+        promos.get(plan.code) or promos.get(None)
+
+    which prefers a promo naming this plan over a catch-all. The per-plan
+    version left that choice to whatever order the database happened to return.
+    """
+    if billing_interval not in PROMO_ELIGIBLE_INTERVALS:
+        return {}
+
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        select(PromoCode).where(
+            PromoCode.currency == USD,
+            PromoCode.is_public.is_(True),
+            PromoCode.is_active.is_(True),
+            PromoCode.billing_interval == billing_interval,
+            PromoCode.valid_from <= now,
+            PromoCode.valid_to >= now,
+        )
+    )
+
+    promos: dict[Optional[str], PromoCode] = {}
+    for promo in result.scalars():
+        if _is_live(promo, now) is not None:
+            continue
+        # First writer wins, matching the single-plan lookup's "return the first
+        # live row" behaviour for the case where two promos target one plan.
+        promos.setdefault(promo.plan_code, promo)
+    return promos
+
+
 async def resolve_promo_for_checkout(
     db: AsyncSession,
     *,
