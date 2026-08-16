@@ -82,27 +82,94 @@ ones, and the old image's price lookup has no currency filter — so inserting a
 USD row before the new image is serving makes every rupee checkout for that plan
 fail outright.
 
-- [ ] **1.** Run `sql/add_usd_pricing.sql` — schema only, safe against the
-      running old image.
+`sql/add_usd_pricing.sql` is **schema only** — it adds columns and widens one
+constraint, and writes no data at all. Every row below is yours to insert from
+your own client, so nothing changes the data without you running it.
+
+- [ ] **1.** Run `sql/add_usd_pricing.sql`. Safe against the running old image.
 - [ ] **2.** Deploy the API (merge to `main`).
 - [ ] **3.** Confirm the new image is live: `GET /pricing` with
       `cf-ipcountry: US` returns `"currency": "USD"`. The old image has no
       `/pricing` route at all.
-- [ ] **4.** Run `sql/seed_usd_pricing.sql` — USD rows, plan IDs, promo,
-      and the Free tier's price rows in both currencies. Free has never had
-      a row, so without this it is absent from `/pricing` entirely.
+- [ ] **4.** Insert the rows in the next section.
 - [ ] Repeat all four on production, in the same order.
-- [ ] Confirm which Razorpay mode the plan IDs came from. A Test-mode plan ID
-      only resolves against Test-mode keys, and they look identical.
 - [ ] New columns for the model licence work in section 1.
 
-`sql/rollback_usd_pricing.sql` reverses the migration; it refuses to run while
-live USD subscriptions exist.
+### The rows that must exist
+
+Written as a specification rather than a script. Values in `price_inr` are
+**whole units of the row's currency** — so `20` means twenty dollars.
+
+**`tbl_plan_prices`** — four new rows.
+
+| plan | interval | currency | price_inr | ai_credit_limit | total_count | razorpay_plan_id |
+|---|---|---|---|---|---|---|
+| pro | monthly | USD | 20 | 2000 | 1200 | `plan_TQ2m22UBRutnZu` |
+| pro | yearly | USD | 200 | 24000 | 100 | `plan_TQ8SZe3nf6a0d3` |
+| free | monthly | USD | 0 | 100 | 0 | NULL |
+| free | yearly | USD | 0 | 100 | 0 | NULL |
+
+Notes on the numbers, because several of them are load-bearing:
+
+- **`price_inr = 200` for annual is ten times monthly, not twelve.** The two
+  months free live permanently in the list price. Do not set 240 and add a
+  two-month promo: that discount expires, and a foreign card gets a ~20%
+  increase a year later with nobody in the loop. (This is what INR currently
+  does through the `FIRST2MONTHS` offer.)
+- **`ai_credit_limit` decides what a USD customer receives.** Copy it from the
+  matching INR row so entitlements are identical — 2000 monthly, 24000 yearly.
+- **`total_count`** is billing cycles before the subscription ends. 1200 months
+  is a century; for annual keep it near 100, never 1200, which Razorpay can
+  reject outright at checkout.
+- **`razorpay_plan_id` NULL is what marks a tier as not purchasable.** That is
+  why the free rows are safe: checkout rejects a NULL gateway plan with a 400
+  before reaching Razorpay.
+- Plan IDs are **per Razorpay mode.** A Test-mode ID only resolves against
+  Test-mode keys, and they look identical.
+
+Optionally, the same two free rows in `currency = 'INR'` (price 0,
+`razorpay_plan_id` NULL). Without them `/pricing` omits the Free tier for
+Indian visitors while showing it for everyone else. The only other visible
+change is that `/subscriptions/plans` starts reporting Free at zero and
+unpurchasable rather than reporting no pricing for it.
+
+**`tbl_promo_codes`** — one new row, the advertised first-month discount.
+
+| column | value | why |
+|---|---|---|
+| code | `USDINTRO50` | confirmed not to collide |
+| discount_type | `percentage` | matches the existing CHECK constraint |
+| discount_value | `50` | |
+| billing_interval | `monthly` | annual is never eligible |
+| plan_code | `pro` | |
+| currency | `USD` | without it the INR lookup could match this code |
+| is_public | `true` | advertised on the pricing page and auto-applied |
+| max_usage | NULL | uncapped |
+| valid_from / valid_to | now / +5 years | |
+| razorpay_offer_id | NULL | USD discounts are computed server-side |
+
+**`tbl_subscriptions`** — one backfill, whenever convenient:
+`billing_country = 'IN'` where it is NULL. All 117 existing rows predate USD.
+Nothing breaks while they are NULL; the column is only read for reporting,
+never for currency resolution.
+
+### Verifying
+
+```sql
+SELECT p.code, u.billing_interval, u.currency, u.price_inr,
+       u.ai_credit_limit, u.total_count, u.razorpay_plan_id
+FROM   tbl_plan_prices u
+JOIN   tbl_mstr_plans p ON p.id = u.plan_id
+ORDER  BY p.code, u.currency, u.billing_interval;
+```
+
+`sql/rollback_usd_pricing.sql` reverses the schema change; it refuses to run
+while live USD subscriptions exist.
 
 USD shares `tbl_plan_prices` and `tbl_promo_codes` with INR, separated by the
-`currency` column, so both tables now hold two rows per plan and interval. Every
+`currency` column, so both tables hold two rows per plan and interval. Every
 read must filter on currency — `tests/test_currency_isolation.py` fails if any
-of the four lookups stops doing so.
+of the lookups stops doing so.
 
 ---
 

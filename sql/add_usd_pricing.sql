@@ -1,23 +1,27 @@
--- USD billing for customers outside India -- STEP 1 of 2: schema only.
+-- USD billing for customers outside India -- SCHEMA ONLY.
 --
---     1. sql/add_usd_pricing.sql   (this file)  -- run FIRST, before deploying
---     2. sql/seed_usd_pricing.sql               -- run LAST, after deploying
+-- This script contains no data. It adds columns and widens a constraint;
+-- nothing is inserted, and no price or promo is created. The USD rows are
+-- yours to write -- USD_ROLLOUT_TODO.md specifies exactly which rows must exist
+-- and what each value means, so you can run them from your own client.
 --
--- The split is not tidiness. USD prices live in the existing tbl_plan_prices
--- alongside INR, separated by the `currency` column, and the INR lookup in
+-- ORDER MATTERS, and this is the reason the data is not in here.
+--
+-- USD prices live in the existing tbl_plan_prices alongside INR, separated by
+-- the `currency` column. The INR lookup in
 -- razorpay_subscription_service._get_plan_with_features calls
--- scalar_one_or_none() after filtering on (plan_id, billing_interval). A second
--- row for the same plan and interval makes that raise MultipleResultsFound.
+-- scalar_one_or_none() after filtering on (plan_id, billing_interval), so a
+-- second row for the same plan and interval makes it raise
+-- MultipleResultsFound. On the image running today that means every rupee
+-- checkout for that plan fails outright -- an outage, not a mispricing.
 --
--- So a USD price row is safe only once the deployed code filters on currency.
--- Insert one while the old image is still serving and every rupee checkout for
--- that plan fails -- an outage, not a mispricing. Seeding is therefore its own
--- file, to be run after the deploy rather than before it.
+-- So: run this, deploy, confirm the new image is serving, and only then insert
+-- USD rows. Inserting them first is the one sequence that breaks INR.
 --
--- This file is safe to run at any time, against a running old or new image.
--- Everything in it is additive and idempotent: no existing column is altered or
--- dropped, every new column is nullable or defaulted so existing INR rows and
--- existing INR code read correctly, and the widened constraint is strictly
+-- This file itself is safe to run at any time, against a running old or new
+-- image. Everything is additive and idempotent: no existing column is altered
+-- or dropped, every new column is nullable or defaulted so existing INR rows
+-- and existing INR code read correctly, and the widened constraint is strictly
 -- more permissive than the one it replaces.
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -26,8 +30,6 @@
 
 -- Already present on the model; here so an older snapshot converges.
 ALTER TABLE tbl_plan_prices ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NULL DEFAULT 'INR';
-
-UPDATE tbl_plan_prices SET currency = 'INR' WHERE currency IS NULL OR currency = '';
 
 -- The old constraint permits only one row per (plan, interval), which is
 -- exactly one currency. Widen it rather than drop it: without a uniqueness rule
@@ -64,8 +66,6 @@ ALTER TABLE tbl_promo_codes ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NUL
 -- charged cannot drift apart.
 ALTER TABLE tbl_promo_codes ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT false;
 
-UPDATE tbl_promo_codes SET currency = 'INR' WHERE currency IS NULL OR currency = '';
-
 COMMENT ON COLUMN tbl_promo_codes.currency IS
     'ISO currency this promo applies to. INR promos are applied through a '
     'Razorpay Offer (razorpay_offer_id); USD promos are computed server-side '
@@ -98,8 +98,10 @@ COMMENT ON COLUMN tbl_subscriptions.promo_period_active IS
     'True between subscription.authenticated and the first full-price charge -- '
     'i.e. while the customer is inside the discounted first period.';
 
--- Existing rows all predate USD support.
-UPDATE tbl_subscriptions SET billing_country = 'IN' WHERE billing_country IS NULL;
+-- billing_country is nullable with no default, so existing rows are left NULL
+-- by the ALTER above. Backfilling them to 'IN' is a data change and therefore
+-- yours to run -- see USD_ROLLOUT_TODO.md. Nothing breaks while they are NULL:
+-- the column is only read for reporting, never for currency resolution.
 
 -- The webhook resolves a subscription's currency by looking it up on
 -- razorpay_subscription_id. No index is added for it here: the existing

@@ -43,8 +43,8 @@ def _price(plan_id, interval, currency, amount, credits, rz_plan_id):
 
 
 # Copied from the dev database, not invented. The INR rows are what
-# tbl_plan_prices actually holds; the USD rows are what sql/seed_usd_pricing.sql
-# adds beside them.
+# tbl_plan_prices actually holds; the USD rows are the ones specified in
+# USD_ROLLOUT_TODO.md, sitting beside them.
 #
 # Two details here are real and load-bearing. INR annual is 23999 -- 12x monthly
 # with the two months taken off separately by a Razorpay Offer -- so it produces
