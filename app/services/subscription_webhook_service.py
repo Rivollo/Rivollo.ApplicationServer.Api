@@ -146,10 +146,15 @@ async def _revoke_license(
 def _resolve_ai_credit_limit(subscription: Subscription, limits: dict) -> int:
     """Resolve AI credits from the interval-specific plan price when available."""
     if subscription.plan:
+        # Interval AND currency: the relationship carries both currencies' rows,
+        # and matching on interval alone could hand an INR subscriber the credit
+        # limit configured for USD.
+        wanted_currency = getattr(subscription, "currency", None) or "INR"
         for plan_price in getattr(subscription.plan, "plan_prices", []):
             if (
                 plan_price.isactive
                 and plan_price.billing_interval == subscription.billing_interval
+                and plan_price.currency == wanted_currency
             ):
                 return plan_price.ai_credit_limit
 

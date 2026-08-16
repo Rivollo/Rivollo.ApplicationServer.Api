@@ -132,3 +132,69 @@ async def test_public_promo_lookup_filters_to_usd():
         "the advertised-promo lookup could pick up an INR promo and discount a "
         f"dollar checkout by a rupee amount:\n{sql}"
     )
+
+
+# ── The relationship traversals ─────────────────────────────────────────────
+#
+# Plan.plan_prices loads every currency's row. The query tests above cannot see
+# these: nothing is SELECTed here, the rows are already in memory and the bug is
+# in how they are picked. Both consumers below matched on billing_interval
+# alone, which silently prefers whichever row the relationship happened to
+# yield last.
+
+
+def _priced(interval, currency, amount, credits, plan_id="plan_x"):
+    return SimpleNamespace(
+        billing_interval=interval,
+        currency=currency,
+        price_inr=amount,
+        ai_credit_limit=credits,
+        razorpay_plan_id=plan_id,
+        isactive=True,
+    )
+
+
+def _plan_with_both_currencies():
+    """USD rows last, so an unfiltered dict comprehension keeps them."""
+    return SimpleNamespace(
+        code="pro",
+        name="Pro",
+        plan_prices=[
+            _priced("monthly", "INR", 1999, 2000),
+            _priced("yearly", "INR", 19990, 24000),
+            _priced("monthly", "USD", 20, 2000),
+            _priced("yearly", "USD", 200, 24000),
+        ],
+    )
+
+
+def test_inr_pricing_page_ignores_usd_rows():
+    from app.services.pricing_service import _inr_periods
+
+    monthly = next(p for p in _inr_periods(_plan_with_both_currencies())
+                   if p.interval == "monthly")
+
+    # 1999 rupees in paise. Picking the USD row would render Rs 20.
+    assert monthly.amount_minor == 199900, (
+        f"INR pricing picked up a USD row — showing {monthly.formatted}"
+    )
+
+
+def test_webhook_credit_limit_matches_the_subscription_currency():
+    from app.services.subscription_webhook_service import _resolve_ai_credit_limit
+
+    inr_sub = SimpleNamespace(
+        # USD first: the loop returns the first match, so with the currency
+        # check removed this order is what exposes it. Ordered the other way the
+        # test passes either way and pins nothing.
+        plan=SimpleNamespace(plan_prices=[
+            _priced("monthly", "USD", 20, 9999),
+            _priced("monthly", "INR", 1999, 2000),
+        ]),
+        billing_interval="monthly",
+        currency="INR",
+    )
+
+    assert _resolve_ai_credit_limit(inr_sub, {"max_ai_credits_month": 0}) == 2000, (
+        "an INR subscriber was granted the credit limit configured for USD"
+    )

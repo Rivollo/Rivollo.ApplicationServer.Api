@@ -1,8 +1,8 @@
 """Money formatting for pricing display.
 
 Every amount crossing the pricing API is in **minor units** — paise for INR,
-cents for USD. Mixing whole rupees (as tbl_plan_prices stores them) with cents
-(as tbl_plan_prices_usd stores them) in one response would be a rounding bug
+cents for USD. Mixing whole units (as tbl_plan_prices stores them) with minor units
+(as Razorpay expects) in one response would be a rounding bug
 waiting to happen, so the pricing service converts both to minor units and the
 frontends never have to know which is which.
 """

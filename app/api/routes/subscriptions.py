@@ -76,6 +76,11 @@ async def list_plans(
                     )
                 )
 
+        # This endpoint is the INR plans list. tbl_plan_prices holds a row per
+        # currency, so without this filter `next(...)` could return the USD row
+        # and quote a rupee price of 20 instead of 1999.
+        inr_prices = [pp for pp in p.plan_prices if pp.currency == "INR"]
+
         # Build pricing options based on configured Razorpay plan IDs
         pricing = [
             PlanPricing(
@@ -84,11 +89,11 @@ async def list_plans(
                 aiCredits=pp.ai_credit_limit,
                 available=bool(pp.razorpay_plan_id),
             )
-            for pp in sorted(p.plan_prices, key=lambda x: x.billing_interval)
+            for pp in sorted(inr_prices, key=lambda x: x.billing_interval)
             if pp.isactive
         ]
-        monthly_price = next((pp.price_inr for pp in p.plan_prices if pp.billing_interval == "monthly"), 0)
-        yearly_price = next((pp.price_inr for pp in p.plan_prices if pp.billing_interval == "yearly"), 0)
+        monthly_price = next((pp.price_inr for pp in inr_prices if pp.billing_interval == "monthly"), 0)
+        yearly_price = next((pp.price_inr for pp in inr_prices if pp.billing_interval == "yearly"), 0)
 
         # Append to response list using pure database values
         plans_data.append(

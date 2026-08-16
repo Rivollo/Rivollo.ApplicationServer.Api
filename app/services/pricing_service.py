@@ -165,10 +165,12 @@ async def _usd_periods(db: AsyncSession, plan: Plan) -> list[PricingPeriod]:
 
 
 def _inr_periods(plan: Plan) -> list[PricingPeriod]:
+    # The relationship loads every currency's row. Keyed by interval alone, a
+    # USD row would overwrite the INR one and this would render $20 as Rs 20.
     rows = {
         pp.billing_interval: pp
         for pp in getattr(plan, "plan_prices", [])
-        if pp.isactive
+        if pp.isactive and pp.currency == INR
     }
 
     periods: list[PricingPeriod] = []
