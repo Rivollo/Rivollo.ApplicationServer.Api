@@ -10,6 +10,12 @@ env:
   IMAGE_NAME: rivollo-dev-portal-api
   AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
   CONTAINERAPP_NAME: ${{ vars.CONTAINERAPP_NAME }}
+  # The Google OAuth client whose tokens /auth/google will accept. A variable,
+  # not a secret: it is compiled into the Portal's JavaScript bundle and sent to
+  # Google on every sign-in, so it is public by construction — and keeping it
+  # readable is the point. It must equal the Portal's
+  # NEXT_PUBLIC_GOOGLE_CLIENT_ID exactly; see the deploy step for why.
+  GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
 
 permissions:
   id-token: write   # required for OIDC azure/login
@@ -126,10 +132,34 @@ jobs:
       - name: Deploy new image to Container App
         run: |
           set -euo pipefail
+
+          # /auth/google compares the token's `aud` claim against
+          # settings.GOOGLE_CLIENT_ID with a plain !=, and the setting defaults
+          # to "". So an unset variable does not disable the check — it makes it
+          # reject every token, and the only symptom is a 401 reading "Google
+          # token was not issued for this application" on an otherwise healthy
+          # app. Skip rather than set an empty value, and say so loudly.
+          #
+          # --set-env-vars merges: it updates only what is named here and leaves
+          # every other variable on the app alone. --replace-env-vars would wipe
+          # them, which for this app would take out DATABASE_URL.
+          ENV_ARGS=()
+          if [ -n "${GOOGLE_CLIENT_ID:-}" ]; then
+            echo "Setting GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}"
+            ENV_ARGS+=(--set-env-vars "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}")
+          else
+            echo "::warning::GOOGLE_CLIENT_ID is not set (repo/environment \
+          variable). Whatever value is on the container app is left untouched — \
+          if it does not match the Portal's NEXT_PUBLIC_GOOGLE_CLIENT_ID, every \
+          Google sign-in will fail with 401 'Google token was not issued for \
+          this application'."
+          fi
+
           az containerapp update \
             --name "$CONTAINERAPP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "$IMAGE"
+            --image "$IMAGE" \
+            "${ENV_ARGS[@]}"
 
       # Two assertions, and the second is the one that actually matters.
       #
