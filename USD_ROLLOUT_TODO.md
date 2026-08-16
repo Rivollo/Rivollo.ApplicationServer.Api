@@ -88,7 +88,9 @@ fail outright.
 - [ ] **3.** Confirm the new image is live: `GET /pricing` with
       `cf-ipcountry: US` returns `"currency": "USD"`. The old image has no
       `/pricing` route at all.
-- [ ] **4.** Run `sql/seed_usd_pricing.sql` — USD rows, plan IDs, promo.
+- [ ] **4.** Run `sql/seed_usd_pricing.sql` — USD rows, plan IDs, promo,
+      and the Free tier's price rows in both currencies. Free has never had
+      a row, so without this it is absent from `/pricing` entirely.
 - [ ] Repeat all four on production, in the same order.
 - [ ] Confirm which Razorpay mode the plan IDs came from. A Test-mode plan ID
       only resolves against Test-mode keys, and they look identical.

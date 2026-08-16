@@ -72,6 +72,25 @@ CROSS  JOIN (VALUES ('monthly'), ('yearly')) AS i(interval)
 WHERE  p.code = 'free'
 ON CONFLICT (plan_id, billing_interval, currency) DO NOTHING;
 
+-- The same rows in INR, so /pricing describes the same set of tiers in both
+-- currencies. Free has never had a price row, which is why it is absent from
+-- that endpoint for Indian visitors today while the marketing page shows it
+-- from hardcoded copy.
+--
+-- Safe on the INR path: razorpay_plan_id stays NULL, and both the checkout
+-- route and the plans list already treat a NULL gateway plan as "not
+-- purchasable" rather than attempting to charge for it. The only visible change
+-- is that /subscriptions/plans now reports a Free tier priced at zero and
+-- marked unavailable, instead of reporting no pricing for it at all.
+
+INSERT INTO tbl_plan_prices
+    (plan_id, billing_interval, price_inr, currency, ai_credit_limit, total_count, description)
+SELECT p.id, i.interval, 0, 'INR', 100, 0, 'Free plan'
+FROM   tbl_mstr_plans p
+CROSS  JOIN (VALUES ('monthly'), ('yearly')) AS i(interval)
+WHERE  p.code = 'free'
+ON CONFLICT (plan_id, billing_interval, currency) DO NOTHING;
+
 -- Any paid tier other than Pro is deliberately absent in USD. A tier with no USD
 -- row is simply not offered in USD, which is correct until it has a real USD
 -- price and a Razorpay USD plan of its own.

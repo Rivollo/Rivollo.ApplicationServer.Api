@@ -58,6 +58,8 @@ ALL_PRICES = [
     _price(PRO_ID, "yearly", "USD", 200, 24000, "plan_TQ8SZe3nf6a0d3"),
     _price(FREE_ID, "monthly", "USD", 0, 100, None),
     _price(FREE_ID, "yearly", "USD", 0, 100, None),
+    _price(FREE_ID, "monthly", "INR", 0, 100, None),
+    _price(FREE_ID, "yearly", "INR", 0, 100, None),
 ]
 
 USDINTRO50 = SimpleNamespace(
@@ -263,3 +265,42 @@ def test_response_is_never_shared_cache_eligible(client):
 
     assert "no-store" in resp.headers["cache-control"]
     assert "CF-IPCountry" in resp.headers["vary"]
+
+
+# ── /subscriptions/plans — the Portal's INR list ────────────────────────────
+#
+# Seeding Free's INR rows changes what this endpoint returns, so it is pinned
+# here. It is an INR path: the point of these two tests is that adding a free
+# price row gives Free a zero price marked unavailable, and leaves Pro alone.
+
+
+def _plan(payload, code):
+    return next(p for p in payload["data"] if p["code"] == code)
+
+
+def test_plans_list_offers_free_at_zero_and_not_purchasable(client):
+    body = client.get("/subscriptions/plans").json()
+
+    free = _plan(body, "free")
+    assert free["priceINR"] == 0
+    assert free["priceINRYearly"] == 0
+    assert all(p["available"] is False for p in free["pricing"]), (
+        "the free tier is being offered as purchasable — it has no gateway plan"
+    )
+    assert len(free["pricing"]) == 2, f"duplicate currency rows: {free['pricing']}"
+
+
+def test_plans_list_still_prices_pro_in_rupees(client):
+    """The regression that matters: Pro must not pick up a USD row."""
+    pro = _plan(client.get("/subscriptions/plans").json(), "pro")
+
+    assert pro["priceINR"] == 1999
+    assert pro["priceINRYearly"] == 23999
+    assert all(p["available"] for p in pro["pricing"])
+
+    # Count, not a set of intervals: without the currency filter this returns
+    # four rows — monthly and yearly in both currencies — and a set of intervals
+    # collapses the duplicates back to two, hiding exactly the bug being tested.
+    assert len(pro["pricing"]) == 2, (
+        f"expected one row per interval, got {pro['pricing']}"
+    )
