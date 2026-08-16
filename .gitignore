@@ -240,3 +240,10 @@ firebase-service-account.json
 # node_modules is vendored via `npm install` at Docker build time; never commit it.
 node_modules/
 npm-debug.log*
+
+# Deployment runbooks kept out of the repo on purpose. They name production
+# hostnames, container app names and the order in which to touch live systems —
+# operational detail that is useful to whoever is running a release and of no
+# use in source control, where it would go stale between releases and be read
+# as current. Keep the working copy locally; share it directly.
+PROD_DEPLOYMENT.md
