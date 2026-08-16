@@ -24,6 +24,12 @@ DATABASE_URL=
 JWT_SECRET=dev-change-me
 JWT_ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRES_MINUTES=60
+# Google OAuth client whose tokens POST /auth/google will accept. Must match the
+# Portal's NEXT_PUBLIC_GOOGLE_CLIENT_ID *exactly* — the check is a plain string
+# comparison with no trimming, so a trailing space fails it. It defaults to an
+# empty string, which rejects every token rather than disabling the check, so
+# leaving it unset breaks Google sign-in with a 401 and no startup warning.
+GOOGLE_CLIENT_ID=
 # CDN base used for returned file URLs (no trailing slash)
 CDN_BASE_URL=https://cdn.example
 # Storage placeholders (implement real Azure wiring later)
