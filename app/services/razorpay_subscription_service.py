@@ -456,6 +456,27 @@ async def cancel_subscription(
 
     rz_subscription_id = subscription.razorpay_subscription_id
 
+    # ── 1b. Already scheduled? ───────────────────────────────────────────────
+    # A cycle-end cancellation leaves the row ACTIVE for up to a month, so a
+    # retried request, a double-click, or a second browser tab can land here
+    # with the work already done. Calling Razorpay again would be a second
+    # cancel on an already-cancelled subscription -- a 400 from them, surfaced
+    # to a customer whose cancellation actually succeeded. Report the existing
+    # state instead.
+    #
+    # Only the matching request short-circuits: cancel_at_cycle_end=False on an
+    # already-scheduled subscription is a real escalation from "cancel later"
+    # to "cancel now", and must still reach Razorpay.
+    if subscription.cancel_at_period_end and cancel_at_cycle_end:
+        return {
+            "cancelled": True,
+            "message": (
+                "Subscription is already scheduled to cancel at the end of the "
+                "current billing period."
+            ),
+            "accessUntil": subscription.current_period_end,
+        }
+
     # ── 2. Call Razorpay cancel API ──────────────────────────────────────────
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -500,6 +521,12 @@ async def cancel_subscription(
         subscription.status = SubscriptionStatus.CANCELED
         subscription.current_period_end = now
     # If cancel_at_cycle_end=True, keep status as ACTIVE until webhook confirms
+
+    # Set on both paths. On the immediate path the status already tells the
+    # story, but leaving the flag false there would make it mean "cancelled at
+    # cycle end" rather than "cancelled", and any later query for cancelled
+    # subscriptions would have to know the difference.
+    subscription.cancel_at_period_end = True
 
     subscription.updated_date = now
 

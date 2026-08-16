@@ -44,6 +44,13 @@ class SubscriptionMe(BaseModel):
         period_end:  UTC ISO timestamp of when the current billing period ends.
                      Null for free-plan users. Frontend uses this to show
                      time remaining / countdown.
+        cancel_at_period_end:
+                     True when the customer has cancelled but paid access runs
+                     to period_end. The plan and quotas above are unaffected --
+                     they still describe full paid access, because that is what
+                     the customer has until the period ends. Only the renewal
+                     is gone, so the frontend must say "Cancels on <period_end>"
+                     rather than "Renews on <period_end>".
     """
 
     plan: str = Field(..., description="Plan code: free, pro, enterprise")
@@ -58,6 +65,14 @@ class SubscriptionMe(BaseModel):
         None,
         alias="periodEnd",
         description="Billing period end (UTC ISO). Frontend uses this for countdown.",
+    )
+    cancel_at_period_end: bool = Field(
+        False,
+        alias="cancelAtPeriodEnd",
+        description=(
+            "True when the subscription is cancelled but paid access continues "
+            "to periodEnd. Show 'Cancels on <periodEnd>', not 'Renews on'."
+        ),
     )
 
     class Config:
