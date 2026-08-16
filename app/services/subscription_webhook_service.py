@@ -421,6 +421,43 @@ async def _handle_subscription_cancelled(
         return
 
     now = datetime.now(timezone.utc)
+
+    # ── Paid access outlives the gateway subscription ────────────────────────
+    # This event does not always mean "access ends now". A subscription with no
+    # billing cycle underway cannot be cancelled at cycle end — Razorpay refuses
+    # the request — so cancel_subscription() cancels it immediately at the
+    # gateway instead, and Razorpay fires this webhook within seconds. That is
+    # the USD intro-price flow: the customer paid an upfront charge covering the
+    # period up to start_at, and was told in as many words that their access
+    # runs until that date.
+    #
+    # Revoking here would take it away seconds after the promise was made, for
+    # a period they have already paid for — the single worst way this feature
+    # could fail, and a chargeback rather than a support ticket.
+    #
+    # Nothing is lost by waiting. The deactivation loop cancels and revokes
+    # every subscription whose current_period_end has passed, and
+    # /subscriptions/me re-checks expiry on every read, so access still stops on
+    # the exact date the customer was given.
+    #
+    # Only a customer-initiated cancellation defers: cancel_at_period_end is set
+    # solely by cancel_subscription(). A cancellation originating at Razorpay —
+    # exhausted retries, a system cancellation, an action taken in their
+    # dashboard — leaves it false and revokes immediately, as before.
+    period_end = subscription.current_period_end
+    if period_end is not None and period_end.tzinfo is None:
+        period_end = period_end.replace(tzinfo=timezone.utc)
+
+    if subscription.cancel_at_period_end and period_end is not None and period_end > now:
+        subscription.updated_date = now
+        _logger.info(
+            "Webhook cancelled: rz_sub_id=%s keeping paid access until %s "
+            "(customer cancelled; deactivation loop will revoke)",
+            rz_subscription_id,
+            period_end.isoformat(),
+        )
+        return
+
     subscription.status = SubscriptionStatus.CANCELED
     subscription.updated_date = now
 
