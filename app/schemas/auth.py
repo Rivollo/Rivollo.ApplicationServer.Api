@@ -74,6 +74,7 @@ class SignupRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     remember_me: bool = False
     signup_token: str = Field(..., min_length=1, description="Token returned by /auth/verify-signup-otp")
+    utm_source: Optional[str] = Field(None, max_length=100, description="Marketing channel that drove the signup")
 
     _check_email = field_validator("email", mode="after")(_reject_disposable)
 
@@ -83,6 +84,7 @@ class GoogleAuthRequest(BaseModel):
 
     credential: str = Field(..., min_length=1, description="Google OAuth credential token")
     remember_me: bool = False
+    utm_source: Optional[str] = Field(None, max_length=100, description="Marketing channel that drove the signup; ignored on login")
 
 
 class UserResponse(BaseModel):

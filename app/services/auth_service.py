@@ -26,6 +26,7 @@ class AuthService:
         name: Optional[str] = None,
         provider: AuthProvider = AuthProvider.EMAIL,
         provider_user_id: Optional[str] = None,
+        utm_source: Optional[str] = None,
     ) -> User:
         """Create a new user with email/password or OAuth."""
         # Create user
@@ -33,6 +34,7 @@ class AuthService:
             email=email.lower(),
             password_hash=hash_password(password) if password else None,
             name=name or email.split("@")[0],
+            utm_source=utm_source,
         )
         db.add(user)
         await db.flush()
@@ -94,6 +96,7 @@ class AuthService:
         google_id: str,
         email: str,
         name: Optional[str] = None,
+        utm_source: Optional[str] = None,
     ) -> Tuple[User, bool]:
         """Get or create user from Google OAuth. Returns (user, is_new)."""
         # Check if identity exists
@@ -135,6 +138,7 @@ class AuthService:
             name=name,
             provider=AuthProvider.GOOGLE,
             provider_user_id=google_id,
+            utm_source=utm_source,
         )
         return user, True
 
