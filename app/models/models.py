@@ -151,6 +151,8 @@ class User(UUIDMixin, CreatedAtMixin, AuditMixin, SoftDeleteMixin, Base):
     name: Mapped[Optional[str]] = mapped_column(Text)
     avatar_url: Mapped[Optional[str]] = mapped_column(Text)
     bio: Mapped[Optional[str]] = mapped_column(Text)
+    # First-touch marketing channel at signup (e.g. "linkedin", "google"); set once, never overwritten on login
+    utm_source: Mapped[Optional[str]] = mapped_column(String(100))
     # False = account deactivated: login is refused and existing tokens stop working
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"), default=True

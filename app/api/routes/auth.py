@@ -113,6 +113,7 @@ async def signup(
             email=payload.email,
             password=payload.password,
             name=payload.name,
+            utm_source=payload.utm_source,
         )
 
         # Generate token
@@ -348,6 +349,7 @@ async def google_auth(
         google_id=str(google_user_id),
         email=email,
         name=display_name,
+        utm_source=payload.utm_source,
     )
 
     if not user.is_active:
