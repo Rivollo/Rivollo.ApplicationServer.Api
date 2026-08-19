@@ -114,7 +114,7 @@ INSERT INTO tbl_mstr_3d_models (
 ) VALUES
 (
     'sam3', 'fal_queue', 'SAM 3D', 'Whole-image reconstruction',
-    'fal-ai/sam-3/3d-objects', 20, 180, 600, true, true, 0, true,
+    'fal-ai/sam-3/3d-objects', 20, 180, 600, true, false, 1, true,
     '{
         "image_url_field": "image_url",
         "request_body_template": {
@@ -124,12 +124,12 @@ INSERT INTO tbl_mstr_3d_models (
         "glb_url_paths": ["model_glb.url", "individual_glbs[].url"],
         "usdz_url_paths": []
     }'::jsonb,
-    'The one direct-image model Free-plan sellers may use, and the '
-    'registry default — listed first for both reasons. Priced the same '
-    'on this direct path and the segmented /createProduct path (both hit '
-    'fal-ai/sam-3/3d-objects) — see SAM3_PRODUCT_CREATION_AI_CREDIT_COST '
-    'usage in app/api/routes/products.py, which now reads this same row '
-    'instead of its own constant. '
+    'One of two direct-image models Free-plan sellers may use (the other '
+    'is Tripo, the registry default) — free_plan_eligible=true on both, '
+    'not exclusive to this row. Priced the same on this direct path and '
+    'the segmented /createProduct path (both hit '
+    'fal-ai/sam-3/3d-objects) — see app/api/routes/products.py, which '
+    'reads this same row rather than a hardcoded constant. '
     '"prompt" defaults to "car" upstream and drives auto-segmentation — '
     'wrong for an arbitrary product photo, so it is nulled explicitly '
     '(not omitted) so it cannot compete with the direct-image path''s '
@@ -138,7 +138,7 @@ INSERT INTO tbl_mstr_3d_models (
 ),
 (
     'tripo', 'fal_queue', 'Tripo', 'Fast and reliable',
-    'tripo3d/h3.1/image-to-3d', 100, 180, 600, false, false, 1, true,
+    'tripo3d/h3.1/image-to-3d', 100, 180, 600, true, true, 0, true,
     '{
         "image_url_field": "image_url",
         "request_body_template": {
@@ -153,6 +153,11 @@ INSERT INTO tbl_mstr_3d_models (
         "glb_url_paths": ["model_urls.glb.url", "model_mesh.url"],
         "usdz_url_paths": []
     }'::jsonb,
+    'The registry default (is_default) and, alongside SAM 3D, one of two '
+    'direct-image models Free-plan sellers may use — free_plan_eligible '
+    'was extended to this row so the default model is never locked '
+    'behind a paid plan. Still 100 credits regardless of plan; being '
+    'free-eligible only affects who may pick it, not its price. '
     '"quad" topology is deliberately never set: Tripo''s docs warn quad '
     'topology makes it return FBX bytes instead of GLB, breaking every '
     'downstream step (viewer, colour configurator, USDZ conversion). '
