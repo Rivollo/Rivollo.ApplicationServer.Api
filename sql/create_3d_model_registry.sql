@@ -105,6 +105,16 @@ CREATE INDEX IF NOT EXISTS ix_3d_models_active_order
 --  extract_glb_url functions and their FalModelSpec entries) and verified
 --  against it before this file was finalized. ON CONFLICT DO NOTHING so
 --  re-running this file is always safe.
+--
+--  free_plan_eligible=true on every row: Direct image has no Pro/Enterprise
+--  gate on any model right now — this is what makes that true, not any
+--  frontend or route code. Tripo is is_default=true and order_index=0, so
+--  it's both the paid-plan default and the first free_plan_eligible model a
+--  Free seller lands on (see the free-plan fallback in the portal's
+--  DirectImageEditor.tsx, which picks the first free-eligible model in
+--  registry order). Restricting any model back to paid plans, or changing
+--  which one Free sellers default into, is an UPDATE on this table, not a
+--  code change — see sql/set_tripo_default_free_model.sql for the pattern.
 -- =====================================================================
 
 INSERT INTO tbl_mstr_3d_models (
@@ -124,12 +134,10 @@ INSERT INTO tbl_mstr_3d_models (
         "glb_url_paths": ["model_glb.url", "individual_glbs[].url"],
         "usdz_url_paths": []
     }'::jsonb,
-    'One of two direct-image models Free-plan sellers may use (the other '
-    'is Tripo, the registry default) — free_plan_eligible=true on both, '
-    'not exclusive to this row. Priced the same on this direct path and '
-    'the segmented /createProduct path (both hit '
-    'fal-ai/sam-3/3d-objects) — see app/api/routes/products.py, which '
-    'reads this same row rather than a hardcoded constant. '
+    'Priced the same on this direct path and the segmented /createProduct '
+    'path (both hit fal-ai/sam-3/3d-objects) — see '
+    'app/api/routes/products.py, which reads this same row rather than a '
+    'hardcoded constant. '
     '"prompt" defaults to "car" upstream and drives auto-segmentation — '
     'wrong for an arbitrary product photo, so it is nulled explicitly '
     '(not omitted) so it cannot compete with the direct-image path''s '
@@ -153,11 +161,12 @@ INSERT INTO tbl_mstr_3d_models (
         "glb_url_paths": ["model_urls.glb.url", "model_mesh.url"],
         "usdz_url_paths": []
     }'::jsonb,
-    'The registry default (is_default) and, alongside SAM 3D, one of two '
-    'direct-image models Free-plan sellers may use — free_plan_eligible '
-    'was extended to this row so the default model is never locked '
-    'behind a paid plan. Still 100 credits regardless of plan; being '
-    'free-eligible only affects who may pick it, not its price. '
+    'The registry default (is_default) and first in order_index, so it is '
+    'also what a Free-plan seller lands on — every model here is '
+    'free_plan_eligible=true (see the seed-block comment above), but order '
+    'is what decides which one a Free seller is pre-selected into. Still '
+    '100 credits regardless of plan; free_plan_eligible only affects who '
+    'may pick a model, never its price. '
     '"quad" topology is deliberately never set: Tripo''s docs warn quad '
     'topology makes it return FBX bytes instead of GLB, breaking every '
     'downstream step (viewer, colour configurator, USDZ conversion). '
@@ -172,7 +181,7 @@ INSERT INTO tbl_mstr_3d_models (
 ),
 (
     'hunyuan', 'fal_queue', 'Hunyuan', 'Full PBR textures',
-    'fal-ai/hunyuan-3d/v3.1/pro/image-to-3d', 100, 240, 600, false, false, 2, true,
+    'fal-ai/hunyuan-3d/v3.1/pro/image-to-3d', 100, 240, 600, true, false, 2, true,
     '{
         "image_url_field": "input_image_url",
         "request_body_template": {
@@ -196,7 +205,7 @@ INSERT INTO tbl_mstr_3d_models (
 ),
 (
     'trellis', 'fal_queue', 'Trellis', 'Sharpest detail',
-    'fal-ai/trellis-2', 100, 180, 600, false, false, 3, true,
+    'fal-ai/trellis-2', 100, 180, 600, true, false, 3, true,
     '{
         "image_url_field": "image_url",
         "request_body_template": {
@@ -252,7 +261,7 @@ INSERT INTO tbl_mstr_3d_models (
 ),
 (
     'meshy', 'fal_queue', 'Meshy', 'Best overall quality',
-    'fal-ai/meshy/v6/image-to-3d', 200, 360, 1200, false, false, 4, true,
+    'fal-ai/meshy/v6/image-to-3d', 200, 360, 1200, true, false, 4, true,
     '{
         "image_url_field": "image_url",
         "request_body_template": {
