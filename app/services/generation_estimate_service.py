@@ -117,17 +117,24 @@ class GenerationEstimateService:
                 pass
 
     @staticmethod
-    def _baseline_for(model_key: str) -> int:
+    async def _baseline_for(db: AsyncSession, model_key: str) -> int:
         """Seed estimate for a model with too little history.
 
-        Resolved lazily and defensively: the fal registry is one provider among
-        several now, so a key it does not know (the Tripo parts pipeline, say)
-        must fall back rather than raise.
+        Resolved lazily and defensively: the model registry is one provider
+        among several now, so a key it does not know (the Tripo parts
+        pipeline, say) must fall back rather than raise — and now that the
+        registry is database-backed, the model could also have been
+        deactivated since its last run, which must fall back the same way.
+        Uses ``get_model_spec_any`` (not ``get_model_spec``): this is a
+        historical/ETA lookup, not a new-generation-request one, so an
+        inactive model must still resolve — see the two-lookup-mode note in
+        ``app/integrations/fal/registry.py``.
         """
         try:
-            from app.integrations.fal import get_model_spec
+            from app.integrations.fal import get_model_spec_any
 
-            return get_model_spec(model_key).baseline_estimate_seconds
+            spec = await get_model_spec_any(db, model_key)
+            return spec.baseline_estimate_seconds if spec else DEFAULT_BASELINE_SECONDS
         except Exception:
             return DEFAULT_BASELINE_SECONDS
 
@@ -145,7 +152,7 @@ class GenerationEstimateService:
         baseline = (
             baseline_seconds
             if baseline_seconds is not None
-            else GenerationEstimateService._baseline_for(model_key)
+            else await GenerationEstimateService._baseline_for(db, model_key)
         )
 
         try:
