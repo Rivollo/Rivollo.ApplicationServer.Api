@@ -20,7 +20,7 @@ from app.services.glb_compression_service import CompressedMeshPackage, glb_comp
 from app.services.gpu_status_service import gpu_status_service
 from app.integrations.threed_model_client import threed_model_client
 from app.integrations.fal_sam3_client import fal_sam3_client
-from app.integrations.fal import DEFAULT_MODEL_KEY, fal_queue_client, get_model_spec
+from app.integrations.fal import FalModelSpec, fal_queue_client
 from app.integrations.service_bus_publisher import ServiceBusPublisher
 from app.database.products_repo import ProductRepository
 from app.database.subscription_repo import SubscriptionRepository
@@ -720,7 +720,7 @@ class ProductService:
         asset_id: int,
         mesh_asset_id: int,
         image_url: str,
-        model_key: str = DEFAULT_MODEL_KEY,
+        spec: FalModelSpec,
     ) -> tuple[Product, str, Optional[str]]:
         """Create a product from an uploaded image URL, generating 3D via fal.ai.
 
@@ -728,6 +728,12 @@ class ProductService:
         (product record, original image asset, background 3D generation) but fal
         needs only the image — there is no mask to download/store and none of the
         SAM tuning options or GPU-warmth probe apply.
+
+        ``spec`` is the already-resolved model (the route resolves it once,
+        against the quota it just checked and charged) — passed through as an
+        object, not re-looked-up by key, so a database edit to the model
+        registry between now and when the background task actually runs
+        cannot change what a seller was just charged for.
 
         Returns ``(product, image_url, glb_url)``; ``glb_url`` is None because
         generation runs in a background task.
@@ -782,7 +788,7 @@ class ProductService:
 
         logger.info(
             "Scheduling background fal 3D generation for product %s (model=%s)",
-            product.id, model_key,
+            product.id, spec.key,
         )
         background_tasks.add_task(
             ProductService._run_fal_3d_generation_background,
@@ -791,7 +797,7 @@ class ProductService:
             mesh_asset_id=mesh_asset_id,
             name=name,
             blob_url=image_url,
-            model_key=model_key,
+            spec=spec,
         )
 
         return product, image_url, None
@@ -1057,7 +1063,7 @@ class ProductService:
         mesh_asset_id: int,
         name: str,
         blob_url: str,
-        model_key: str = DEFAULT_MODEL_KEY,
+        spec: FalModelSpec,
     ) -> str:
         """
         Generate a GLB via a fal.ai image-to-3D model and persist it.
@@ -1068,16 +1074,19 @@ class ProductService:
         GLB it returns is downloaded and re-uploaded to Azure so it lands in our
         internal DB format identically to the SAM path.
 
-        ``model_key`` selects which fal model runs (see
-        :mod:`app.integrations.fal.registry`). Everything after generation —
-        Draco compression, upload, asset mapping, USDZ trigger — is identical
-        regardless of which model produced the mesh.
+        ``spec`` is the model resolved once at the route and threaded through
+        unchanged (see :meth:`create_product_with_fal_image_urls`) — this
+        function deliberately does NOT re-resolve it from a key, so a model
+        registry edit landing while this background task is queued can't
+        change what a generation this seller already paid for actually runs.
+        Everything after generation — Draco compression, upload, asset
+        mapping, USDZ trigger — is identical regardless of which model
+        produced the mesh.
 
         Returns:
             glb_url: The URL of the stored GLB file.
         """
         logger = logging.getLogger(__name__)
-        spec = get_model_spec(model_key)
 
         # 1. Mark product as PROCESSING so callers / UI can show in-progress state
         product = await db.get(Product, product_id)
@@ -1365,7 +1374,7 @@ class ProductService:
         mesh_asset_id: int,
         name: str,
         blob_url: str,
-        model_key: str = DEFAULT_MODEL_KEY,
+        spec: FalModelSpec,
     ) -> None:
         """Open a fresh DB session and run generate_3d_and_finalize_fal in the background.
 
@@ -1374,6 +1383,9 @@ class ProductService:
         SAM-VM readiness/warmth probe is intentionally omitted and fal's own
         poll loop handles the wait. The QUEUE-status flip and WebSocket
         broadcast are kept so the UI behaves identically.
+
+        Takes ``spec`` (not a key to re-resolve) for the same reason
+        :meth:`generate_3d_and_finalize_fal` does — see its docstring.
         """
         from app.core.db import new_session
         from app.api.websocket.broadcaster import broadcaster
@@ -1405,12 +1417,12 @@ class ProductService:
                     mesh_asset_id=mesh_asset_id,
                     name=name,
                     blob_url=blob_url,
-                    model_key=model_key,
+                    spec=spec,
                 )
         except Exception:
             logger.exception(
                 "Background fal 3D generation failed for product %s (model=%s)",
-                product_id, model_key,
+                product_id, spec.key,
             )
 
     @staticmethod

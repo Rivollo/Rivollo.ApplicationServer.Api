@@ -72,7 +72,7 @@ from app.schemas.products import (
 from app.services.activity_service import ActivityService
 from app.services.background_removal_service import background_removal_service
 from app.services.licensing_service import LicensingService
-from app.integrations.fal import get_model_spec
+from app.integrations.fal import get_model_spec, list_model_specs
 from app.services.generation_estimate_service import generation_estimate_service
 from app.services.product_service import product_service, TRIPO_PARTS_MODEL_KEY
 from app.services.dimension_service import DimensionService
@@ -104,13 +104,6 @@ public_router = APIRouter(
 )
 
 PRODUCT_CREATION_AI_CREDIT_COST = 10
-
-# /createProduct generates via fal.ai SAM-3, priced the same as the direct-image
-# "sam3" entry in the fal model registry (app/integrations/fal/registry.py) —
-# both hit the same underlying fal-ai/sam-3/3d-objects call. Keep the two in
-# sync if this changes; do not fold it into the constant above, which still
-# covers /products and the legacy /createProductFal default.
-SAM3_PRODUCT_CREATION_AI_CREDIT_COST = 20
 
 # /createProductWithParts runs TWO chained Tripo tasks (segmented geometry, then
 # texture) against Tripo's own billed account, so it costs more than the
@@ -387,18 +380,32 @@ async def create_product_with_image(
             detail="Invalid userId format. Expected UUID string.",
         )
 
+    # This path always generates via the "sam3" model (fal-ai/sam-3/3d-objects,
+    # called through fal_sam3_client rather than the generic queue client —
+    # that part is unchanged). Its price is *read from* the same registry row
+    # the direct-image path's "sam3" entry uses, resolved once here so the
+    # quota check and the deduction below can never disagree with each other.
+    try:
+        sam3_spec = await get_model_spec(db, "sam3")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+    credit_cost = sam3_spec.credit_cost
+
     # Product generation is limited by AI credits, not product count.
     allowed, quota_info = await LicensingService.check_quota(
         db,
         user_uuid,
         "ai_credits",
-        increment=SAM3_PRODUCT_CREATION_AI_CREDIT_COST,
+        increment=credit_cost,
     )
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Not enough AI credits. {SAM3_PRODUCT_CREATION_AI_CREDIT_COST} credits "
+                f"Not enough AI credits. {credit_cost} credits "
                 "are required to create a product."
             ),
         )
@@ -421,7 +428,7 @@ async def create_product_with_image(
             db,
             user_uuid,
             "ai_credits",
-            increment=SAM3_PRODUCT_CREATION_AI_CREDIT_COST,
+            increment=credit_cost,
         )
 
     except ValueError as e:
@@ -486,10 +493,11 @@ async def create_product_with_image_fal(
             detail="Invalid userId format. Expected UUID string.",
         )
 
-    # Resolve the requested model up front. An unknown key is a 400 — never a
-    # silent fallback, or the user is charged for a model they did not pick.
+    # Resolve the requested model up front. An unknown (or now, since the
+    # registry is DB-backed, deactivated) key is a 400 — never a silent
+    # fallback, or the user is charged for a model they did not pick.
     try:
-        model_spec = get_model_spec(payload.model)
+        model_spec = await get_model_spec(db, payload.model)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -497,17 +505,29 @@ async def create_product_with_image_fal(
         )
 
     # Only paid (Pro/Enterprise) users may generate products via billed fal
-    # vendors. SAM 3D is the one model flagged free-eligible in the registry,
-    # so Free-plan sellers can still use the direct-image path with it.
+    # vendors. Whichever model(s) the registry flags free_plan_eligible are
+    # the exception, so Free-plan sellers can still use the direct-image
+    # path with those. The upgrade message names the free alternative by
+    # reading the registry rather than hardcoding "SAM 3D" — which model is
+    # free-eligible is data now, and this string must not silently go stale
+    # if that ever changes.
     if not model_spec.free_plan_eligible:
         plan_code = await LicensingService.get_user_plan_code(db, user_uuid)
         if plan_code not in ("pro", "enterprise"):
+            free_alternative = next(
+                (s for s in await list_model_specs(db) if s.free_plan_eligible),
+                None,
+            )
+            suggestion = (
+                f" or select {free_alternative.label}, which is free on every plan."
+                if free_alternative
+                else "."
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     f"{model_spec.label} requires a Pro or Enterprise plan. "
-                    "Please subscribe to continue, or select SAM 3D, which is "
-                    "free on every plan."
+                    f"Please subscribe to continue{suggestion}"
                 ),
             )
 
@@ -540,7 +560,7 @@ async def create_product_with_image_fal(
             asset_id=1,
             mesh_asset_id=payload.mesh_asset_id,
             image_url=str(payload.imageURL),
-            model_key=model_spec.key,
+            spec=model_spec,
         )
 
         # Deduct AI credits after successful generation.

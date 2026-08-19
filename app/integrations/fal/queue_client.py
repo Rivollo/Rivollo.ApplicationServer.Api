@@ -306,7 +306,7 @@ class FalQueueClient:
         usdz_content_type: Optional[str] = None
         usdz_url: Optional[str] = None
 
-        if spec.extract_usdz_url is not None:
+        if spec.provides_usdz:
             usdz_url = spec.extract_usdz_url(result)
             if usdz_url:
                 try:

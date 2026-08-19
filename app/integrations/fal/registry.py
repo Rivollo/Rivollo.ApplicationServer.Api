@@ -1,62 +1,76 @@
-"""Registry of fal.ai image-to-3D models.
+"""Registry of image-to-3D generation models — database-backed.
 
-Adding a model is a single entry in ``FAL_MODELS`` — no route, service, billing
-or frontend change. That is the point of this file: everything that differs
-between models lives here, and everything they share lives in
-``queue_client.py``.
+Each row in ``tbl_mstr_3d_models`` (see ``app/models/model_registry.py`` and
+``sql/create_3d_model_registry.sql``) is one selectable model. Adding,
+repricing, reordering, or disabling a model is a database change — no route,
+service, billing, or frontend deploy.
 
-Each spec owns the three things fal models genuinely disagree about:
+This is possible because every model this app calls today speaks fal.ai's
+queue protocol (submit -> poll -> result -> download) and differs from every
+other model only in its request payload and where the result JSON hides the
+download URL — genuinely static data, not logic. ``build_body`` is a template
+merge; ``extract_glb_url``/``extract_usdz_url`` are an ordered "try this
+JSON path, then that one" search. Both are implemented once, generically,
+below, driven entirely by each row's ``provider_config`` — no per-model
+Python function exists anymore.
 
-  * ``endpoint_id``      which queue endpoint to POST to
-  * ``build_body``       the request payload (field names and options differ)
-  * ``extract_glb_url``  where the GLB lands in the result JSON
+Cached in-process with a short TTL — the same pattern
+``app/services/pricing_service.py`` already uses for the same kind of
+problem (configuration edited directly in the database, read on nearly every
+request). See ``MODEL_REGISTRY_CACHE_TTL_SECONDS`` below.
 
-Credit cost lives here too, because models are not priced the same and the
-quota check and the deduction must both read the same number.
+Two lookup functions, deliberately not one, because they answer different
+questions:
+
+  * :func:`get_model_spec`     — "what should a NEW generation request use?"
+    Never resolves an inactive model; an unknown or deactivated key raises.
+  * :func:`get_model_spec_any` — "what WAS this key, historically?" Used only
+    for ETA baselines of past runs, where a model that has since been
+    deactivated must still resolve. Returns ``None`` rather than raising.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
+import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Optional
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.model_registry import Model3DConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class FalModelSpec:
-    """Everything that makes one fal image-to-3D model different from another."""
+    """One selectable image-to-3D model, resolved from a database row.
 
-    # Stable identifier used by the API and stored against generations.
+    ``build_body``/``extract_glb_url``/``extract_usdz_url`` are ordinary
+    methods here (not per-instance closures), generic across every model —
+    see the module docstring. Callers (``queue_client.py``,
+    ``product_service.py``) use this exactly as before; only where the data
+    comes from changed.
+    """
+
     key: str
-    # Shown to sellers in the portal dropdown.
+    provider: str
     label: str
     description: str
-    # fal queue endpoint, e.g. "fal-ai/hunyuan-3d/v3.1/pro/image-to-3d".
     endpoint_id: str
-    # AI credits charged per generation.
     credit_cost: int
-    # Seed ETA in seconds, used only until this model has enough real runs
-    # recorded to compute a median. fal provides no estimate of its own, so
-    # this is a starting point that measured history replaces.
     baseline_estimate_seconds: int
-    # image_url -> request payload
-    build_body: Callable[[str], dict]
-    # result JSON -> GLB download URL (None when absent)
-    extract_glb_url: Callable[[dict], Optional[str]]
-    # result JSON -> USDZ download URL, for models that emit one themselves.
-    # When set and it yields a URL, we store that file directly and skip the
-    # Azure GLB->USDZ conversion job entirely — the vendor's own export is both
-    # faster and higher fidelity than a converted one.
-    extract_usdz_url: Optional[Callable[[dict], Optional[str]]] = None
-    # Upper bound on the fal poll loop. Most models finish inside the default;
-    # Meshy documents 5-10 minutes, which would race a 600s ceiling.
-    max_wait_seconds: float = 600.0
-    # Whether Free-plan sellers may use this model on the direct-image path.
-    # False for every model except SAM 3D: the others are billed vendor calls
-    # we only extend to paying plans, while SAM 3D is kept free to give Free
-    # sellers a no-segmentation option too. The route and quota check both
-    # read this flag, so granting/revoking free access is a one-line change
-    # here rather than a route-level special case.
-    free_plan_eligible: bool = False
+    free_plan_eligible: bool
+    is_default: bool
+    max_wait_seconds: float
+    image_url_field: str
+    request_body_template: dict
+    glb_url_paths: tuple[str, ...]
+    usdz_url_paths: tuple[str, ...]
 
     @property
     def submit_url(self) -> str:
@@ -64,345 +78,203 @@ class FalModelSpec:
 
     @property
     def provides_usdz(self) -> bool:
-        return self.extract_usdz_url is not None
+        return len(self.usdz_url_paths) > 0
+
+    def build_body(self, image_url: str) -> dict:
+        """image_url -> request payload.
+
+        Every current model's request is this static template with one field
+        substituted — see ``provider_config.request_body_template`` on the
+        row this spec came from.
+        """
+        return {**self.request_body_template, self.image_url_field: image_url}
+
+    def extract_glb_url(self, result: dict) -> Optional[str]:
+        """result JSON -> GLB download URL (None when absent)."""
+        return _first_matching_url(result, self.glb_url_paths)
+
+    def extract_usdz_url(self, result: dict) -> Optional[str]:
+        """result JSON -> vendor-supplied USDZ download URL (None when this
+        model doesn't export one, i.e. usdz_url_paths is empty)."""
+        return _first_matching_url(result, self.usdz_url_paths)
 
 
 # --------------------------------------------------------------------------- #
-# Result extractors
+# Generic path resolution — replaces every per-model extractor function.
 # --------------------------------------------------------------------------- #
-def _file_url(node: object) -> Optional[str]:
-    """fal wraps files as {url, content_type, file_name, file_size}."""
-    if isinstance(node, dict):
-        url = node.get("url")
-        if isinstance(url, str) and url:
-            return url
+def _resolve_path(node: Any, segments: list[str]) -> Any:
+    """Walk one dot-path's segments through a JSON-like structure.
+
+    A segment suffixed ``[]`` means "this key holds a list — resolve the
+    REST of the path against each item in turn, and return the first item
+    whose resolution is truthy." That is the one list construct any current
+    model's extractor needs (SAM 3D's ``individual_glbs`` fallback — try
+    each entry's ``.url`` in order, use the first non-empty one); everything
+    else is plain dict traversal. Deliberately not full JSONPath — this one
+    rule is what the real data needs. Never raises: an unexpected shape
+    (wrong type, missing key) just resolves to ``None``.
+    """
+    if not segments:
+        return node
+    segment, *rest = segments
+    if segment.endswith("[]"):
+        key = segment[:-2]
+        items = node.get(key) if isinstance(node, dict) else None
+        if not isinstance(items, list):
+            return None
+        for item in items:
+            value = _resolve_path(item, rest)
+            if value:
+                return value
+        return None
+    if not isinstance(node, dict):
+        return None
+    return _resolve_path(node.get(segment), rest)
+
+
+def _first_matching_url(result: dict, paths: tuple[str, ...]) -> Optional[str]:
+    """Try each dot-path in order; return the first that resolves to a
+    non-empty string. fal wraps files as ``{url, content_type, ...}``, so
+    every current path ends in ``.url``."""
+    for path in paths:
+        value = _resolve_path(result, path.split("."))
+        if isinstance(value, str) and value:
+            return value
     return None
 
 
-def _extract_tripo_glb(result: dict) -> Optional[str]:
-    """Tripo returns model_urls.glb, older responses only model_mesh."""
-    model_urls = result.get("model_urls") or {}
-    if isinstance(model_urls, dict):
-        url = _file_url(model_urls.get("glb"))
-        if url:
-            return url
-    return _file_url(result.get("model_mesh"))
-
-
-def _extract_hunyuan_glb(result: dict) -> Optional[str]:
-    """Hunyuan returns model_glb directly, and also mirrors it in model_urls.glb."""
-    url = _file_url(result.get("model_glb"))
-    if url:
-        return url
-    model_urls = result.get("model_urls") or {}
-    if isinstance(model_urls, dict):
-        return _file_url(model_urls.get("glb"))
-    return None
-
-
-def _extract_trellis_glb(result: dict) -> Optional[str]:
-    """Trellis returns a single model_glb — no model_urls block."""
-    return _file_url(result.get("model_glb"))
-
-
-def _extract_meshy_glb(result: dict) -> Optional[str]:
-    """Meshy returns model_glb, mirrored in model_urls.glb."""
-    url = _file_url(result.get("model_glb"))
-    if url:
-        return url
-    model_urls = result.get("model_urls") or {}
-    if isinstance(model_urls, dict):
-        return _file_url(model_urls.get("glb"))
-    return None
-
-
-def _extract_meshy_usdz(result: dict) -> Optional[str]:
-    """Meshy exports USDZ alongside the GLB, under model_urls.usdz.
-
-    Note the entries in ``model_urls`` can be present but null (Meshy returns
-    ``"blend": null``), so this must tolerate a missing or empty value rather
-    than assume the key implies a file.
-    """
-    model_urls = result.get("model_urls") or {}
-    if isinstance(model_urls, dict):
-        return _file_url(model_urls.get("usdz"))
-    return None
+def _row_to_spec(row: Model3DConfig) -> FalModelSpec:
+    config = row.provider_config or {}
+    return FalModelSpec(
+        key=row.key,
+        provider=row.provider,
+        label=row.label,
+        description=row.description,
+        endpoint_id=row.endpoint_id,
+        credit_cost=row.credit_cost,
+        baseline_estimate_seconds=row.baseline_estimate_seconds,
+        free_plan_eligible=row.free_plan_eligible,
+        is_default=row.is_default,
+        max_wait_seconds=float(row.max_wait_seconds),
+        image_url_field=config.get("image_url_field") or "image_url",
+        request_body_template=dict(config.get("request_body_template") or {}),
+        glb_url_paths=tuple(config.get("glb_url_paths") or ()),
+        usdz_url_paths=tuple(config.get("usdz_url_paths") or ()),
+    )
 
 
 # --------------------------------------------------------------------------- #
-# Request builders
+# Cache
+#
+# tbl_mstr_3d_models is configuration — it changes when someone edits the
+# database, not per request — so resolving it fresh on every product
+# creation / model-picker call spent a DB round trip to produce an answer
+# that is the same 99.9% of the time. Mirrors PRICING_CACHE_TTL_SECONDS in
+# app/services/pricing_service.py exactly, for the same reason: there is no
+# explicit invalidation because nothing in this app writes a row — rows are
+# edited directly against the database, so a change appears within the TTL
+# rather than immediately. Set to 0 to disable caching entirely.
 # --------------------------------------------------------------------------- #
-def _build_tripo_body(image_url: str) -> dict:
-    """Tripo H3.1 request, tuned for a web product viewer.
+MODEL_REGISTRY_CACHE_TTL_SECONDS = int(os.getenv("MODEL_REGISTRY_CACHE_TTL_SECONDS", "60"))
 
-    Note ``quad`` is deliberately never set: the docs warn that quad topology
-    makes Tripo return **FBX** bytes instead of GLB, which would break every
-    downstream step (viewer, colour configurator, USDZ conversion).
+_registry_cache: Optional[tuple[float, list[FalModelSpec]]] = None
+_registry_cache_lock = asyncio.Lock()
+
+
+def clear_model_registry_cache() -> None:
+    """Drop the cached model list.
+
+    Nothing in the request path calls this — it exists so tests don't leak
+    state between cases, and so a future admin write path has an obvious hook.
     """
-    return {
-        "image_url": image_url,
-        "texture": True,
-        "pbr": True,
-        "texture_quality": "detailed",
-        "geometry_quality": "detailed",
-        "texture_alignment": "original_image",
-        "orientation": "align_image",
-        # Cap the mesh. Left unset, Tripo "adaptively determines the count" and
-        # on a real product photo that meant 2,000,000 triangles / 1,035,799
-        # vertices — a 60.8 MB file whose geometry alone was ~56 MB. Two million
-        # triangles also drop the viewer's frame rate far enough that
-        # model-viewer's adaptive renderer lowers resolution while the user
-        # drags, which is why such models look blurry while rotating and snap
-        # sharp when released.
-        #
-        # 50k keeps Tripo in line with Trellis (~36k verts) and Meshy (~29k),
-        # which render smoothly. Surface detail comes from the textures, which
-        # stay at "detailed".
-        "face_limit": 50000,
-    }
+    global _registry_cache
+    _registry_cache = None
 
 
-def _build_hunyuan_body(image_url: str) -> dict:
-    return {
-        "input_image_url": image_url,
-        # "Normal" produces a textured model. "Geometry" would return an
-        # untextured white mesh, which the configurator cannot recolour.
-        "generate_type": "Normal",
-        # PBR is always on: the colour configurator recolours the base-colour
-        # map while preserving normal/roughness/metallic detail, and without
-        # PBR maps a recoloured part looks like flat paint.
-        "enable_pbr": True,
-        # fal's default. Range 40,000-1,500,000.
-        "face_count": 500000,
-    }
+async def _load_active_specs(db: AsyncSession) -> list[FalModelSpec]:
+    result = await db.execute(
+        select(Model3DConfig)
+        .where(Model3DConfig.isactive.is_(True))
+        .order_by(Model3DConfig.order_index)
+    )
+    return [_row_to_spec(row) for row in result.scalars().all()]
 
 
-def _build_trellis_body(image_url: str) -> dict:
-    """Trellis 2 request, tuned for a web product viewer.
+async def list_model_specs(db: AsyncSession) -> list[FalModelSpec]:
+    """All selectable models, in registry (display) order.
 
-    The guidance/sampling parameters are pinned to fal's documented defaults
-    rather than omitted. Trellis exposes ~25 knobs and silently changing one of
-    their defaults would change every model we generate; pinning keeps output
-    reproducible and makes any future change to our own settings explicit.
-
-    Two settings deliberately depart from the API defaults — see the comments on
-    ``decimation_target`` and ``texture_size``. Both were validated against a
-    real product photo, not assumed.
+    Filters to ``isactive`` rows only — this is the "new create request"
+    lookup mode. An inactive model never appears here, so it can never be
+    offered in the picker or charged for on a new generation. Cached; see
+    the module-level comment above.
     """
-    return {
-        "image_url": image_url,
-        # Highest available structure detail. 512 / 1024 / 1536.
-        "resolution": 1536,
-        # Stage 1 — sparse structure
-        "ss_guidance_strength": 7.5,
-        "ss_guidance_rescale": 0.7,
-        "ss_guidance_interval_start": 0.6,
-        "ss_guidance_interval_end": 1,
-        "ss_sampling_steps": 12,
-        "ss_rescale_t": 5,
-        # Stage 2 — shape refinement
-        "shape_slat_guidance_strength": 7.5,
-        "shape_slat_guidance_rescale": 0.5,
-        "shape_slat_guidance_interval_start": 0.6,
-        "shape_slat_guidance_interval_end": 1,
-        "shape_slat_sampling_steps": 12,
-        "shape_slat_rescale_t": 3,
-        # Stage 3 — texture
-        "tex_slat_guidance_strength": 1,
-        "tex_slat_guidance_rescale": 0,
-        "tex_slat_guidance_interval_start": 0.6,
-        "tex_slat_guidance_interval_end": 0.9,
-        "tex_slat_sampling_steps": 12,
-        "tex_slat_rescale_t": 3,
-        # ---- Mesh output ----
-        # 50k vertices, NOT the API default of 500k. fal's own docs say "500k is
-        # good for most uses, reduce to 20k-50k for web/mobile" — and 500k does
-        # not merely produce a heavy file, it makes the remesh/UV-unwrap stage
-        # fail outright: a real product photo returned HTTP 500 after 404s with
-        # every sampling stage already complete. The same image at 50k succeeds.
-        "decimation_target": 50000,
-        # 4096, above the API default of 2048. With geometry decimated for the
-        # web, fine surface detail has to come from the texture rather than from
-        # triangle count — so spend the budget here. Measured at 4.5 MB total,
-        # which is still far lighter than the 500k-vertex output ever was.
-        "texture_size": 4096,
-        # Clean topology for downstream use. Adds time but the mesh is small
-        # enough now that it completes comfortably.
-        "remesh": True,
-        "remesh_band": 1,
-        "remesh_project": 0,
-        "uv_unwrap_angle_threshold_deg": 90,
-        "uv_unwrap_refine_iterations": 0,
-        "uv_unwrap_global_iterations": 1,
-        "uv_unwrap_smooth_strength": 1,
-    }
+    global _registry_cache
+
+    if MODEL_REGISTRY_CACHE_TTL_SECONDS <= 0:
+        return await _load_active_specs(db)
+
+    cached = _registry_cache
+    if cached and time.monotonic() < cached[0]:
+        return cached[1]
+
+    async with _registry_cache_lock:
+        # Re-check under the lock. A request that queued here while another
+        # rebuilt the cache should use that result, not immediately rebuild.
+        cached = _registry_cache
+        if cached and time.monotonic() < cached[0]:
+            return cached[1]
+
+        specs = await _load_active_specs(db)
+        # Never cache an empty result — an unmigrated or unreachable
+        # database would otherwise leave the model picker blank for a full
+        # TTL after the real problem was fixed.
+        if specs:
+            _registry_cache = (time.monotonic() + MODEL_REGISTRY_CACHE_TTL_SECONDS, specs)
+        return specs
 
 
-def _build_sam3_body(image_url: str) -> dict:
-    """SAM-3 request for the direct-image (no mask) path.
+async def get_model_spec(db: AsyncSession, key: Optional[str]) -> FalModelSpec:
+    """Resolve one model for a NEW generation request.
 
-    ``prompt`` defaults to "car" upstream and drives auto-segmentation — wrong
-    for an arbitrary product photo. Nulling it (rather than omitting the key)
-    is what the segmented path's own client does when it wants no
-    auto-segmentation competing with its input; here there is no mask either,
-    so per fal's docs the whole image is reconstructed as one object.
+    An unknown OR inactive key raises rather than silently falling back — a
+    seller must never be charged for a model they did not choose, and must
+    never be able to select a model that has been turned off. ``key=None``
+    resolves to whichever active row has ``is_default`` set (enforced unique
+    in the database — see the partial index on ``tbl_mstr_3d_models``).
     """
-    return {
-        "image_url": image_url,
-        "export_textured_glb": True,
-        "prompt": None,
-    }
+    specs = await list_model_specs(db)
 
+    if key is None:
+        default = next((s for s in specs if s.is_default), None)
+        if default is None:
+            # Configuration error (no default row, or the only default is
+            # inactive) — surfaces as a 500 via the route's generic handler,
+            # which is correct: this is an operator mistake, not a bad request.
+            raise ValueError("No default 3D model is configured.")
+        return default
 
-def _extract_sam3_glb(result: dict) -> Optional[str]:
-    """SAM-3 returns model_glb (combined scene), falling back to the first
-    per-object GLB in individual_glbs for a single-object reconstruction."""
-    url = _file_url(result.get("model_glb"))
-    if url:
-        return url
-    individual = result.get("individual_glbs") or []
-    if isinstance(individual, list):
-        for entry in individual:
-            url = _file_url(entry)
-            if url:
-                return url
-    return None
-
-
-def _build_meshy_body(image_url: str) -> dict:
-    """Meshy-6 Preview request, tuned for a product viewer.
-
-    Rigging and animation are deliberately OFF. fal's own example enables them,
-    but Meshy's docs say rigging targets "humanoid characters with clearly
-    defined limbs" — a chair or a shoe has none, so it adds minutes of work and
-    returns nulls (fal's own sample output shows rig_task_id: null). Turn them
-    on only if Rivollo ever sells character models.
-    """
-    return {
-        "image_url": image_url,
-        # "standard" = regular high-detail mesh. "lowpoly" would discard the
-        # detail we are paying Meshy for.
-        "model_type": "standard",
-        # Triangles for detailed geometry; quads matter for animation, not for
-        # a static product render.
-        "topology": "triangle",
-        # Meshy's default, and already web-appropriate.
-        "target_polycount": 30000,
-        "symmetry_mode": "auto",
-        "should_remesh": True,
-        "should_texture": True,
-        # Metallic / roughness / normal maps in addition to base colour. Without
-        # this the colour configurator has no surface detail to preserve when it
-        # recolours, and recoloured parts read as flat paint.
-        "enable_pbr": True,
-        "enable_rigging": False,
-        "enable_animation": False,
-        "enable_safety_checker": True,
-    }
-
-
-# --------------------------------------------------------------------------- #
-# The registry
-# --------------------------------------------------------------------------- #
-DEFAULT_MODEL_KEY = "sam3"
-
-FAL_MODELS: dict[str, FalModelSpec] = {
-    # Listed first: it's both the registry default and the only model every
-    # plan (including Free) can use, so it belongs at the top of the picker
-    # rather than wherever alphabetical/insertion order would otherwise put it.
-    "sam3": FalModelSpec(
-        key="sam3",
-        label="SAM 3D",
-        description="Whole-image reconstruction",
-        endpoint_id="fal-ai/sam-3/3d-objects",
-        # SAM 3D is priced the same on both paths it powers — this direct
-        # (no-mask) path and the segmented (/createProduct) path, which reads
-        # its own SAM3_PRODUCT_CREATION_AI_CREDIT_COST constant in
-        # app/api/routes/products.py. Keep the two in sync if this changes.
-        credit_cost=20,
-        # No independent measurement yet for the direct (no-mask) request
-        # shape; seeded from the segmented path's fal_sam3_client history,
-        # which the measured median replaces after 3 runs on this path.
-        baseline_estimate_seconds=180,
-        build_body=_build_sam3_body,
-        extract_glb_url=_extract_sam3_glb,
-        # The one direct-image model Free-plan sellers may use.
-        free_plan_eligible=True,
-    ),
-    "tripo": FalModelSpec(
-        key="tripo",
-        label="Tripo",
-        # Kept to a short tag, not a sentence — it renders inline next to the
-        # time and credit cost in the model picker.
-        description="Fast and reliable",
-        endpoint_id="tripo3d/h3.1/image-to-3d",
-        credit_cost=100,
-        # Measured at 165s end-to-end on a real product photo with face_limit
-        # applied. Seeded slightly above so the countdown does not hit zero
-        # before the model lands; the measured median replaces it after 3 runs.
-        baseline_estimate_seconds=180,
-        build_body=_build_tripo_body,
-        extract_glb_url=_extract_tripo_glb,
-    ),
-    "hunyuan": FalModelSpec(
-        key="hunyuan",
-        label="Hunyuan",
-        description="Full PBR textures",
-        endpoint_id="fal-ai/hunyuan-3d/v3.1/pro/image-to-3d",
-        credit_cost=100,
-        # Measured end-to-end at ~202s (submit → GLB downloaded) on a live run.
-        baseline_estimate_seconds=240,
-        build_body=_build_hunyuan_body,
-        extract_glb_url=_extract_hunyuan_glb,
-    ),
-    "trellis": FalModelSpec(
-        key="trellis",
-        label="Trellis",
-        description="Sharpest detail",
-        endpoint_id="fal-ai/trellis-2",
-        credit_cost=100,
-        # Seed from live runs on a real product photo: 241s and 57s for the
-        # same input on different runners — fal's queue variance is wide, so
-        # this sits between them until the measured median takes over.
-        baseline_estimate_seconds=180,
-        build_body=_build_trellis_body,
-        extract_glb_url=_extract_trellis_glb,
-    ),
-    "meshy": FalModelSpec(
-        key="meshy",
-        label="Meshy",
-        description="Best overall quality",
-        endpoint_id="fal-ai/meshy/v6/image-to-3d",
-        credit_cost=200,
-        # Meshy documents 5-10 minutes; a live run on a real product photo took
-        # 204s. Seed between the two rather than trusting either alone — the
-        # measured median replaces this after three runs.
-        baseline_estimate_seconds=360,
-        # ...which also means the default 600s poll ceiling would race the
-        # model itself. Give it room for queue time on top of generation.
-        max_wait_seconds=1200.0,
-        build_body=_build_meshy_body,
-        extract_glb_url=_extract_meshy_glb,
-        # Meshy exports USDZ itself — no Azure conversion job needed.
-        extract_usdz_url=_extract_meshy_usdz,
-    ),
-}
-
-
-def list_model_specs() -> list[FalModelSpec]:
-    """All selectable models, in registry (display) order."""
-    return list(FAL_MODELS.values())
-
-
-def get_model_spec(key: Optional[str]) -> FalModelSpec:
-    """Look up a model by key.
-
-    An unknown key raises rather than silently falling back to the default —
-    a seller must never be charged for a model they did not choose.
-    """
-    resolved = (key or DEFAULT_MODEL_KEY).strip().lower()
-    spec = FAL_MODELS.get(resolved)
+    resolved_key = key.strip().lower()
+    spec = next((s for s in specs if s.key == resolved_key), None)
     if spec is None:
-        valid = ", ".join(FAL_MODELS)
+        valid = ", ".join(sorted(s.key for s in specs))
         raise ValueError(f"Unknown 3D model '{key}'. Valid models: {valid}")
     return spec
+
+
+async def get_model_spec_any(db: AsyncSession, key: str) -> Optional[FalModelSpec]:
+    """Resolve a model by key regardless of ``isactive``.
+
+    For ETA baselines and other historical lookups (a
+    ``ModelGenerationStat`` row can reference a model that has since been
+    deactivated, and computing its baseline must still work). Deliberately
+    NOT used for new generation requests — see :func:`get_model_spec`.
+    Bypasses the cache (this path is rare — every current caller already
+    passes an explicit baseline, see ``generation_estimate_service.py``) and
+    returns ``None`` rather than raising when the key never existed, since
+    callers here want a graceful fallback, not a 400/500.
+    """
+    result = await db.execute(
+        select(Model3DConfig).where(Model3DConfig.key == key.strip().lower())
+    )
+    row = result.scalar_one_or_none()
+    return _row_to_spec(row) if row else None

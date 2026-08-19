@@ -6,8 +6,6 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from typing import List, Optional
 
-from app.integrations.fal import DEFAULT_MODEL_KEY
-
 
 # === Core Product Schemas ===
 
@@ -60,12 +58,14 @@ class ProductCreateWithFalImage(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     imageURL: HttpUrl
     mesh_asset_id: int = 9
-    model: str = Field(
-        DEFAULT_MODEL_KEY,
+    model: Optional[str] = Field(
+        None,
         description=(
             "Which fal.ai model generates the mesh. Valid keys come from "
-            "GET /ai/3d-models. Defaults to the original model so existing "
-            "clients keep working unchanged."
+            "GET /ai/3d-models. Omitted or null resolves to whichever model "
+            "the registry currently flags as default — resolved at request "
+            "time (it's a database row, not a fixed value), so this stays "
+            "correct even if the default model changes without a deploy."
         ),
     )
 

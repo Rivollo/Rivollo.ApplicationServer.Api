@@ -9,6 +9,7 @@ from . import subscription_enums  # noqa: F401
 from . import link_share_log  # noqa: F401
 from . import webhook_event  # noqa: F401
 from . import user_device  # noqa: F401
+from . import model_registry  # noqa: F401
 
 
 __all__ = ["Base"]
