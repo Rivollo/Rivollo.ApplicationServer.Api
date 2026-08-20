@@ -16,12 +16,15 @@ from app.schemas.auth import (
     GoogleAuthRequest,
     LoginRequest,
     ResetPasswordRequest,
+    RestoreAccountRequest,
+    RestoreAccountResponse,
     SendSignupOtpRequest,
     SignupRequest,
     UserResponse,
     VerifyOTPRequest,
     VerifySignupOtpRequest,
 )
+from app.services.account_service import AccountService
 from app.services.activity_service import ActivityService
 from app.services.auth_service import AuthService
 from app.services.email_service import EmailService
@@ -285,6 +288,55 @@ async def reset_password(
         name=user.name or user.email,
     )
     return api_success({"message": "Password reset successfully"})
+
+
+@router.post("/auth/account/restore", response_model=dict)
+async def restore_account(
+    payload: RestoreAccountRequest,
+    request: Request,
+    db: DB,
+    _: AppTokenVerified,
+):
+    """Restore an account that is pending deletion, within its recovery window.
+
+    Lives under /auth rather than /users because a pending-deletion account cannot
+    satisfy the CurrentUser dependency — every authenticated lookup filters
+    `deleted_at IS NULL`, which is exactly the set this endpoint operates on. The
+    caller therefore re-authenticates here instead of presenting a token.
+
+    Email/password accounts: send { "email": ..., "password": ... }
+    Google accounts:         send { "email": ..., "credential": <google id token> }
+
+    Returns 401 for bad credentials or an unknown address, 409 if the account is
+    not pending deletion, and 410 once the recovery period has ended.
+    """
+    google_sub = None
+    if payload.credential:
+        # Verified before the service takes its row lock — this is a network call.
+        google_sub = await AuthService.verify_google_credential(payload.credential)
+
+    result = await AccountService.restore_account(
+        db=db,
+        email=payload.email,
+        password=payload.password,
+        google_sub=google_sub,
+    )
+
+    await ActivityService.log_auth_action(
+        db=db,
+        action="user.account.restored",
+        user_id=result.user_id,
+        request=request,
+        metadata={"products_restored": result.products_restored},
+    )
+
+    return api_success(
+        RestoreAccountResponse(
+            message="Your account has been restored.",
+            restored_at=result.restored_at,
+            products_restored=result.products_restored,
+        ).model_dump()
+    )
 
 
 @router.post("/auth/google", response_model=dict)

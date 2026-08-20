@@ -1,10 +1,12 @@
 """Authentication service for user signup, login, and OAuth."""
 
+import logging
 import random
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +15,8 @@ from app.core.config import settings
 from app.core.security import create_access_token, decode_access_token, generate_token, hash_password, hash_token, verify_password
 from app.models.models import AppToken, AuthIdentity, AuthProvider, PasswordReset, SignupOtp, User
 from app.services.licensing_service import LicensingService
+
+logger = logging.getLogger(__name__)
 
 
 class AuthService:
@@ -141,6 +145,47 @@ class AuthService:
             utm_source=utm_source,
         )
         return user, True
+
+    @staticmethod
+    async def verify_google_credential(credential: str) -> Optional[str]:
+        """Verify a Google ID token and return its ``sub``, or None if invalid.
+
+        Applies the same three checks as POST /auth/google: Google must accept the
+        token, it must have been minted for *this* application (``aud``), and the
+        address must be verified. A token issued for a different client is a valid
+        Google token and still must not authenticate anyone here.
+
+        Returns the provider user id rather than the whole payload because that is
+        the only field callers need to match against a stored AuthIdentity.
+
+        Network-bound: never call this while holding a database row lock.
+        """
+        if not credential:
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    "https://oauth2.googleapis.com/tokeninfo",
+                    params={"id_token": credential},
+                )
+        except httpx.RequestError:
+            logger.warning("Google tokeninfo request failed", exc_info=True)
+            return None
+
+        if resp.status_code != 200:
+            return None
+
+        token_info = resp.json()
+
+        if token_info.get("aud") != settings.GOOGLE_CLIENT_ID:
+            return None
+
+        if str(token_info.get("email_verified", "")).lower() not in {"true", "1", "yes"}:
+            return None
+
+        sub = token_info.get("sub")
+        return str(sub) if sub else None
 
     @staticmethod
     def generate_token(user_id: uuid.UUID, remember_me: bool = False) -> str:

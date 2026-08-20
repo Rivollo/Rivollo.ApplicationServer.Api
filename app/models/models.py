@@ -36,7 +36,23 @@ class UUIDMixin:
 
 
 class AuditMixin:
-    """Audit fields that exist in all tables: created_by, created_date, updated_by, updated_date"""
+    """Audit fields that exist in all tables: created_by, created_date, updated_by, updated_date
+
+    created_by and updated_by ARE foreign keys to tbl_users(id) in the database —
+    43 of them — even though no ForeignKey is declared here. They were created
+    outside the ORM and e7a15c93f0b2 converted every one to ON DELETE SET NULL,
+    so erasing a user anonymises their audit trail rather than failing on a
+    constraint violation.
+
+    Leaving them undeclared is a deliberate choice, not an oversight. Declaring
+    43 ForeignKeys would change SQLAlchemy's insert ordering across nearly every
+    model in this project to unblock a job that only needs the database rule.
+    The cost is that the ORM cannot see them, which means
+    `alembic revision --autogenerate` reads all 43 as constraints to DROP —
+    so migrations/env.py installs an include_object hook that refuses to
+    autogenerate foreign keys at all. Read that hook before changing anything
+    here; the comment is documentation, the hook is the actual guard.
+    """
     created_by: Mapped[Optional[uuid.UUID]] = mapped_column(PGUUID(as_uuid=True))
     created_date: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
@@ -157,6 +173,15 @@ class User(UUIDMixin, CreatedAtMixin, AuditMixin, SoftDeleteMixin, Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"), default=True
     )
+    # When permanent deletion becomes due. Set alongside deleted_at when the user
+    # requests deletion; NULL means no deletion is pending.
+    #
+    # deleted_at answers "when was deletion requested" and purge_after answers
+    # "when does the account stop being recoverable". Keeping them separate is
+    # what makes the retention window per-account data — extendable for a legal
+    # hold — rather than a constant baked into the purge query. An account is
+    # recoverable exactly while deleted_at IS NOT NULL AND purge_after > now().
+    purge_after: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
 
     # Property for backward compatibility
     @property

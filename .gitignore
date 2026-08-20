@@ -247,3 +247,8 @@ npm-debug.log*
 # use in source control, where it would go stale between releases and be read
 # as current. Keep the working copy locally; share it directly.
 PROD_DEPLOYMENT.md
+
+# Investigation/handoff notes for the Account Purge Job spike — internal
+# working notes, not project documentation. Would go stale the moment the
+# purge job repo starts diverging from what was found here.
+ACCOUNT_PURGE_JOB_HANDOFF.md

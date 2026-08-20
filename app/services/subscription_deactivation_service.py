@@ -26,7 +26,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.models import Notification
+from app.models.models import Notification, User
 from app.models.subscription import Subscription
 from app.models.subscription_enums import SubscriptionStatus
 from app.queries.subscription_queries import (
@@ -62,8 +62,17 @@ class SubscriptionDeactivationService:
         if not reminder_days:
             return
 
+        # Deleted accounts are excluded. Their owner cannot log in, cannot renew,
+        # and cannot turn the reminders off — but their FCM tokens are still
+        # registered, so without this join a user who deleted their account would
+        # keep getting "your subscription expires in 5 days" push notifications
+        # for up to 30 days. The subscription table has no owner-state of its own,
+        # hence the join rather than a filter.
         result = await db.execute(
-            select(Subscription).where(
+            select(Subscription)
+            .join(User, User.id == Subscription.user_id)
+            .where(
+                User.deleted_at.is_(None),
                 Subscription.status.in_([SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING]),
                 Subscription.current_period_end.is_not(None),
             )

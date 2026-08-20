@@ -73,11 +73,21 @@ class Payment(Base):
         nullable=True,
     )
 
-    # Who made this payment
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    # Who made this payment — NULL once that user has been permanently erased.
+    #
+    # Nullable + SET NULL rather than NOT NULL + CASCADE because payments are
+    # retained: books-of-account retention is ours as merchant of record, not
+    # Razorpay's as processor. Erasing an account anonymises the row (amount,
+    # currency, status, timestamps and the razorpay_* ids all survive) instead
+    # of destroying the financial record. See migration d94b62e8c1f5.
+    #
+    # Nothing reads this column — the webhook services only look payments up by
+    # razorpay_order_id — so treat a NULL here as "erased user", never as an
+    # error. Any new query filtering on user_id must handle NULL explicitly.
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PGUUID(as_uuid=True),
-        ForeignKey("tbl_users.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("tbl_users.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     # Linked after subscription is successfully activated (nullable initially)
@@ -132,5 +142,5 @@ class Payment(Base):
     )
 
     # Relationships
-    user: Mapped["User"] = relationship("User")
+    user: Mapped[Optional["User"]] = relationship("User")
     subscription: Mapped[Optional["Subscription"]] = relationship("Subscription")

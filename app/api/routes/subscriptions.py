@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends
 from app.api.deps import CurrentUser, DB, OptionalUser
 from app.database.subscription_repo import SubscriptionRepository
 from app.schemas.subscriptions import Plan as PlanSchema, PlanFeature, PlanPricing
+from app.services.subscription_guard import has_active_paid_subscription
 from app.services.subscription_service import SubscriptionService
 from app.utils.envelopes import api_success
 
@@ -38,6 +39,20 @@ async def get_my_subscription(
     """
     # Delegate all logic to service layer
     subscription_data = await SubscriptionService.get_user_subscription(db, current_user.id)
+
+    # Whether Delete Account should be offered. Set here, once, rather than in
+    # SubscriptionService: that method builds SubscriptionMe at three separate
+    # sites across five return paths, and a value assembled three times is a
+    # value that eventually disagrees with itself. By this line every path has
+    # converged on one object.
+    #
+    # It calls the very function AccountService.delete_account guards with, so
+    # the hint and the enforcement cannot drift apart. (The dependency also only
+    # runs one way: subscription_guard imports subscription_service for its
+    # expiry check, so the service cannot import the guard back.)
+    subscription_data.can_delete_account = not await has_active_paid_subscription(
+        db, current_user.id
+    )
 
     # Return formatted response
     # by_alias=True → uses camelCase aliases (periodStart, periodEnd, daysRemaining, etc.)
