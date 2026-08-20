@@ -23,3 +23,12 @@ class DeleteAccountRequest(BaseModel):
 class DeleteAccountResponse(BaseModel):
     message: str
     deleted_at: datetime
+    # When the account stops being restorable. Returned rather than left for the
+    # client to compute as deleted_at + 30 days, because that would copy the
+    # retention window into every client and they would all have to be redeployed
+    # to change it — and any that lagged would show a date the server disagrees
+    # with. ACCOUNT_RETENTION_DAYS stays the single source of truth.
+    #
+    # The purge job runs daily at 00:00 UTC, so erasure happens at the first run
+    # AFTER this instant, not exactly on it. Do not present it to the second.
+    purge_after: datetime

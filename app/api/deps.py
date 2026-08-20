@@ -17,8 +17,18 @@ from app.services.auth_service import AuthService
 bearer_scheme = HTTPBearer(auto_error=False)
 security = HTTPBearer()
 
-# Shown whenever a deactivated account (is_active = false) tries to authenticate
+# Shown when an account was deactivated by us (is_active = false) and the owner
+# cannot do anything about it themselves.
 ACCOUNT_DEACTIVATED_DETAIL = "Your account has been deactivated. Please contact support."
+
+# Shown when the owner deleted their OWN account and is still inside the 30-day
+# recovery window. Deliberately distinct from ACCOUNT_DEACTIVATED_DETAIL: telling
+# someone to contact support about a state they entered on purpose, and can undo
+# on purpose, sends a self-service action into a support queue.
+ACCOUNT_PENDING_DELETION_DETAIL = (
+    "Your account is scheduled for deletion. You can restore it until the recovery "
+    "period ends."
+)
 
 
 async def get_current_user(
@@ -47,14 +57,33 @@ async def get_current_user(
     except ValueError:
         raise credentials_exception
 
-    # Fetch user from database
-    result = await db.execute(select(User).where(User.id == user_id, User.deleted_at.is_(None)))
+    # Loaded WITHOUT the usual `deleted_at IS NULL` filter, purely so the two
+    # rejection cases below can be told apart. Filtering here instead would fold
+    # a soft-deleted account into `user is None` and answer 401 "Could not
+    # validate credentials" — indistinguishable from an expired token, which
+    # sends someone who deleted their own account looking for a login bug
+    # instead of the restore flow.
+    #
+    # Every path below either raises or returns a user whose deleted_at is NULL.
+    # Do not add a `return user` above those guards.
+    result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
 
     if user is None:
         raise credentials_exception
 
-    # Deactivated accounts: reject tokens issued before deactivation
+    # Pending deletion, still recoverable. 403 rather than 401: the token is
+    # perfectly valid and the caller is who they say they are — they just have no
+    # access while the account is scheduled for erasure. Answering 401 would
+    # invite clients to treat it as "refresh your token and retry", which no
+    # amount of retrying fixes.
+    if user.deleted_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ACCOUNT_PENDING_DELETION_DETAIL,
+        )
+
+    # Deactivated by us: reject tokens issued before deactivation.
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

@@ -64,19 +64,30 @@ async def delete_account_endpoint(
     current_user: CurrentUser,
     db: DB,
 ):
-    """Permanently soft-delete the authenticated user's account and all their products.
+    """Schedule the authenticated user's account for deletion.
+
+    The account and all its data are deactivated immediately but retained for 30
+    days, during which the account can still be restored. Nothing is erased here.
 
     Email/password users: send { "password": "current_password" }
     Google OAuth users:   send { "confirmation": "DELETE MY ACCOUNT" }
     """
-    deleted_at = await AccountService.delete_account(
+    result = await AccountService.delete_account(
         db=db,
         user=current_user,
         password=payload.password,
         confirmation=payload.confirmation,
     )
+    # "has been deleted" was accurate when deletion was immediate and is not any
+    # more — the account is recoverable for the whole retention window, and copy
+    # that says otherwise talks people out of restoring an account they still
+    # have. Say what is true and name the way back.
     response = DeleteAccountResponse(
-        message="Your account has been deleted. All your data has been deactivated.",
-        deleted_at=deleted_at,
+        message=(
+            "Your account is scheduled for deletion and all your data has been "
+            "deactivated. You can restore it until the recovery period ends."
+        ),
+        deleted_at=result.deleted_at,
+        purge_after=result.purge_after,
     )
     return api_success(response.model_dump())

@@ -51,6 +51,12 @@ class SubscriptionMe(BaseModel):
                      the customer has until the period ends. Only the renewal
                      is gone, so the frontend must say "Cancels on <period_end>"
                      rather than "Renews on <period_end>".
+        can_delete_account:
+                     False while a paid subscription is still running, so the
+                     frontend can grey out Delete Account and explain why. It is
+                     a hint for the UI, never the control: the same rule is
+                     enforced in AccountService.delete_account, which returns 409
+                     regardless of what any client believes.
     """
 
     plan: str = Field(..., description="Plan code: free, pro, enterprise")
@@ -72,6 +78,18 @@ class SubscriptionMe(BaseModel):
         description=(
             "True when the subscription is cancelled but paid access continues "
             "to periodEnd. Show 'Cancels on <periodEnd>', not 'Renews on'."
+        ),
+    )
+    # Defaults to True so that a path which somehow failed to set it leaves the
+    # option available rather than trapping someone in an account they cannot
+    # delete. The backend refuses the request anyway, so an over-permissive hint
+    # costs a 409; an over-restrictive one costs the user their right to leave.
+    can_delete_account: bool = Field(
+        True,
+        alias="canDeleteAccount",
+        description=(
+            "False while a paid subscription is still running. Advisory only - "
+            "DELETE /users/me/account enforces the same rule and returns 409."
         ),
     )
 

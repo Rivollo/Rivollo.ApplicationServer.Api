@@ -150,6 +150,34 @@ class ResetPasswordRequest(BaseModel):
         return self
 
 
+class RestoreAccountRequest(BaseModel):
+    """Restore an account that is pending deletion.
+
+    Supply the credential matching how the account signs in: `password` for
+    email/password accounts, `credential` (a Google ID token) for Google accounts.
+    Not gated on the disposable-domain check — the address is already registered,
+    and blocking it here would strand a real account inside its recovery window.
+    """
+
+    email: EmailStr
+    password: Optional[str] = None
+    credential: Optional[str] = Field(
+        default=None, description="Google ID token, for accounts without a password"
+    )
+
+    @model_validator(mode="after")
+    def _require_one_credential(self):
+        if not self.password and not self.credential:
+            raise ValueError("Either password or credential is required.")
+        return self
+
+
+class RestoreAccountResponse(BaseModel):
+    message: str
+    restored_at: datetime
+    products_restored: int
+
+
 class AppTokenRequest(BaseModel):
     clientKey: str = Field(..., min_length=1, max_length=100)
 

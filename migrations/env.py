@@ -57,12 +57,42 @@ target_metadata = Base.metadata
 config.set_main_option("sqlalchemy.url", _get_database_url().replace("%", "%%"))
 
 
+def include_object(object_, name, type_, reflected, compare_to) -> bool:
+    """Keep autogenerate away from foreign keys entirely.
+
+    43 foreign keys run from created_by / updated_by columns to tbl_users(id),
+    and NONE of them are declared in the ORM — AuditMixin defines those columns
+    as plain UUIDs with no ForeignKey (see app/models/models.py). Autogenerate
+    compares the model against the database and emits DDL for whatever it finds
+    only in the database, so it reads all 43 as constraints to DROP.
+
+    They were converted to ON DELETE SET NULL by e7a15c93f0b2 so that erasing a
+    user anonymises their audit trail instead of failing. Dropping them would
+    hand the account purge job a schema that passes its contract check and then
+    leaves dangling references to users that no longer exist.
+
+    A comment cannot prevent that; this hook can. Foreign keys in this project
+    are owned by migrations, never by autogenerate, so refusing the whole
+    category is both the safe answer and an honest description of reality.
+
+    Note that autogenerate is discouraged here regardless — the schema has
+    drifted from the migration chain (columns exist that no revision created,
+    and three modelled tables do not exist at all), so its output always needs
+    reading line by line. This hook removes the single most destructive class of
+    false positive; it does not make autogenerate trustworthy.
+    """
+    if type_ == "foreign_key_constraint":
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
 	context.configure(
 		url=config.get_main_option("sqlalchemy.url"),
 		target_metadata=target_metadata,
 		literal_binds=True,
 		dialect_opts={"paramstyle": "named"},
+		include_object=include_object,
 	)
 
 	with context.begin_transaction():
@@ -70,7 +100,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-	context.configure(connection=connection, target_metadata=target_metadata)
+	context.configure(
+		connection=connection,
+		target_metadata=target_metadata,
+		include_object=include_object,
+	)
 
 	with context.begin_transaction():
 		context.run_migrations()
