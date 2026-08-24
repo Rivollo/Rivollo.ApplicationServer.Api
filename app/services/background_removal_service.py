@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import Product, ProductAsset, ProductAssetMapping
 from app.services.storage import storage_service
+from app.services.image_moderation_service import image_moderation_service
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,16 @@ class BackgroundRemovalService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Failed to read image: {str(exc)}",
             )
+
+        # Unauthenticated route, so no strike can be recorded — but the image is
+        # still refused. Attribute to the product owner where one exists.
+        await image_moderation_service.screen(
+            content,
+            user_id=getattr(product, "created_by", None),
+            source="products.remove_background",
+            filename=file.filename,
+            content_type=file.content_type,
+        )
 
         # Call external rembg HTTP API
         try:

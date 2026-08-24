@@ -10,7 +10,9 @@ before it had nothing to say, so the common cases never touch DNS:
                        until the address as a whole is known to parse.
                        Yields the ascii/punycode domain DNS can look up.
   Stage 2  ALLOWLIST   trusted domains (EMAIL_DOMAIN_ALLOWLIST) -> OK, no DNS.
-  Stage 3  DISPOSABLE  set lookup against 8k known temp-mail domains, free.
+  Stage 3  DISPOSABLE  operator denylist (app/data/email_domain_denylist.txt
+                       + EMAIL_DOMAIN_DENYLIST) then the upstream 8k-domain
+                       package. Both free set lookups.
   Stage 4  MX / DNS    the only stage that touches the network.
 
 Stage 1 is deliberately the module's only parser. An allowlist probe ahead
@@ -51,6 +53,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from enum import Enum
 from typing import Optional
 
@@ -88,6 +91,34 @@ except Exception:
 # customer domains can be added without a deploy. Guards against a bad
 # upstream blocklist release taking out signups from a major provider.
 ALLOWLIST: frozenset[str] = settings.get_email_domain_allowlist()
+
+# Operator denylist — stage 3a. Two sources, merged once at import:
+#   * app/data/email_domain_denylist.txt  (checked in, one domain per line)
+#   * EMAIL_DOMAIN_DENYLIST                (env, comma-separated, no deploy)
+# Exists because the upstream blocklist is a static snapshot: koboywin.com
+# and ehwit.com were both absent from it (still absent in 0.0.242) while
+# publishing real MX records, so every stage waved them through. Unlike the
+# upstream list this one is also enforced on the login / Google paths — it
+# is an explicit operator decision, so locking those accounts out is the
+# intent, not collateral.
+_DENYLIST_FILE = Path(__file__).resolve().parent.parent / "data" / "email_domain_denylist.txt"
+
+
+def _load_denylist_file(path: Path) -> frozenset[str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        logger.warning("Email domain denylist file not found: %s", path)
+        return frozenset()
+    out = set()
+    for line in lines:
+        line = line.split("#", 1)[0].strip().lower().lstrip("@")
+        if line:
+            out.add(line)
+    return frozenset(out)
+
+
+DENYLIST: frozenset[str] = _load_denylist_file(_DENYLIST_FILE) | settings.get_email_domain_denylist()
 
 # Providers that treat +tags as routing to the same mailbox.
 PLUS_TAG_PROVIDERS: frozenset[str] = frozenset({
@@ -155,21 +186,49 @@ def normalize_email(email: str) -> Optional[str]:
     return f"{local}@{domain}" if local else None
 
 
+def _matches_parent(domain: str, names: frozenset[str] | set[str]) -> bool:
+    """True if `domain` or any parent domain is in `names` (never the bare TLD)."""
+    parts = domain.split(".")
+    for i in range(len(parts) - 1):
+        if ".".join(parts[i:]) in names:
+            return True
+    return False
+
+
+def is_denied_domain(domain: str) -> bool:
+    """True if the domain (or a parent) is on the OPERATOR denylist.
+
+    Separate from `is_disposable` because callers on the existing-user paths
+    (login, Google sign-in, password reset) only enforce this list — an
+    upstream blocklist release must never lock a real customer out.
+    """
+    domain = domain.strip().lower()
+    if not domain or domain in ALLOWLIST:
+        return False
+    return _matches_parent(domain, DENYLIST)
+
+
+def is_denied_email(email: str) -> bool:
+    """`is_denied_domain` for a full address; malformed input is not denied."""
+    email = (email or "").strip().lower()
+    if email.count("@") != 1:
+        return False
+    return is_denied_domain(email.rsplit("@", 1)[1])
+
+
 def is_disposable(domain: str) -> bool:
     """True if the domain (or any parent domain) is a known temp-mail service.
 
-    Walks up the subdomain chain because many services hand out wildcards
-    like xyz.mailinator.com, which a flat set lookup would miss.
+    Checks the operator denylist first, then the upstream package. Walks up
+    the subdomain chain because many services hand out wildcards like
+    xyz.mailinator.com, which a flat set lookup would miss.
     """
     domain = domain.strip().lower()
     if domain in ALLOWLIST:
         return False
-    parts = domain.split(".")
-    # Stop before the bare TLD — ".com" must never match.
-    for i in range(len(parts) - 1):
-        if ".".join(parts[i:]) in blocklist:
-            return True
-    return False
+    if _matches_parent(domain, DENYLIST):
+        return True
+    return _matches_parent(domain, blocklist)
 
 
 def _interpret_mx(answers) -> Verdict:

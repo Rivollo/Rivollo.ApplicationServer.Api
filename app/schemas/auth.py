@@ -5,7 +5,7 @@ from typing import Optional
 
 from pydantic import BaseModel, EmailStr, Field, model_validator, field_validator
 
-from app.utils.email_domain_check import MESSAGES, Verdict, is_disposable
+from app.utils.email_domain_check import MESSAGES, Verdict, is_denied_email, is_disposable
 
 
 def is_valid_email_domain(email: str) -> bool:
@@ -39,6 +39,24 @@ def _reject_disposable(v: str) -> str:
     return v
 
 
+DENIED_DOMAIN_MESSAGE = (
+    "Email addresses from this provider are not accepted on Rivollo. "
+    "Please use a permanent work or personal email address."
+)
+
+
+def _reject_denied(v: str) -> str:
+    """`email` validator for EXISTING-user paths (login, password reset).
+
+    Only the operator denylist applies here — never the upstream disposable
+    package — so a bad upstream release cannot lock real customers out, while
+    domains we have explicitly chosen to ban stay banned everywhere.
+    """
+    if is_denied_email(v):
+        raise ValueError(DENIED_DOMAIN_MESSAGE)
+    return v
+
+
 class SendSignupOtpRequest(BaseModel):
     """Request to send an OTP to verify an email address before signup."""
 
@@ -62,8 +80,10 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
     remember_me: bool = False
-    # No disposable-domain gate here: the address is already registered, so
-    # rejecting it would lock an existing user out of their own account.
+    # No upstream disposable-domain gate here: the address is already
+    # registered, so rejecting it would lock an existing user out of their own
+    # account. The operator denylist IS enforced — see _reject_denied.
+    _check_email = field_validator("email", mode="after")(_reject_denied)
 
 
 class SignupRequest(BaseModel):
@@ -125,7 +145,8 @@ class ForgotPasswordRequest(BaseModel):
     """Request to initiate a password reset."""
 
     email: EmailStr
-    # No disposable-domain gate — existing-user path, see LoginRequest.
+    # Operator denylist only — existing-user path, see LoginRequest.
+    _check_email = field_validator("email", mode="after")(_reject_denied)
 
 
 class VerifyOTPRequest(BaseModel):

@@ -13,6 +13,7 @@ import sys
 from opentelemetry.trace import get_current_span
 
 from app.core.config import settings
+from app.services.image_moderation_service import ContentPolicyViolation
 from app.api.routes.auth import router as auth_router
 from app.api.routes.users import router as users_router
 from app.api.routes.products import router as products_router, public_router as public_products_router, public_noauth_router as public_products_noauth_router, v2_router as products_v2_router
@@ -300,6 +301,16 @@ async def request_logging_middleware(request: Request, call_next):
 
 # Startup is now handled by the lifespan context manager above.
 # The legacy @app.on_event("startup") decorator is removed.
+
+
+@app.exception_handler(ContentPolicyViolation)
+async def content_policy_violation_handler(request: Request, exc: ContentPolicyViolation):
+	# 422 for a rejected image, 403 once the account has been suspended. Uses
+	# the api_error envelope so the portal can branch on error.code.
+	return JSONResponse(
+		status_code=exc.status_code,
+		content=api_error(code=exc.code, message=exc.message, details=exc.details()),
+	)
 
 
 @app.exception_handler(Exception)

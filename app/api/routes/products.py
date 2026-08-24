@@ -71,6 +71,7 @@ from app.schemas.products import (
 )
 from app.services.activity_service import ActivityService
 from app.services.background_removal_service import background_removal_service
+from app.services.image_moderation_service import ContentPolicyViolation, image_moderation_service
 from app.services.licensing_service import LicensingService
 from app.integrations.fal import get_model_spec, list_model_specs
 from app.services.generation_estimate_service import generation_estimate_service
@@ -801,9 +802,16 @@ async def create_product_from_glb(
             )
         image_bytes = await image.read()
         if image_bytes:
+            image_content_type = image.content_type or f"image/{img_ext[1:]}"
+            await image_moderation_service.screen(
+                image_bytes,
+                user_id=current_user.id,
+                source="products.create_from_glb.thumbnail",
+                filename=image.filename,
+                content_type=image_content_type,
+            )
             image_stream = io.BytesIO(image_bytes)
             image_filename = f"thumbnail{img_ext}"
-            image_content_type = image.content_type or f"image/{img_ext[1:]}"
             image_size = len(image_bytes)
     elif image_base64 and image_base64.strip():
         # Priority 2: a base64 data URL (e.g. model-viewer.toDataURL()).
@@ -916,8 +924,16 @@ async def upload_product_original_image(
             detail=f"Invalid image format. Allowed formats: {', '.join(sorted(allowed_extensions))}",
         )
 
+    image_bytes = await image.read()
+    await image_moderation_service.screen(
+        image_bytes,
+        user_id=current_user.id,
+        source="products.original_image",
+        filename=image.filename,
+        content_type=image.content_type or f"image/{file_ext[1:]}",
+    )
+
     try:
-        image_bytes = await image.read()
         image_stream = io.BytesIO(image_bytes)
         image_url = await product_service.upload_original_product_image(
             db=db,
@@ -1892,6 +1908,13 @@ async def update_product_details(
             try:
                 image_bytes = await background_image.read()
                 content_type = background_image.content_type or f"image/{file_ext[1:]}"
+                await image_moderation_service.screen(
+                    image_bytes,
+                    user_id=current_user.id,
+                    source="products.background_image",
+                    filename=background_image.filename,
+                    content_type=content_type,
+                )
                 filename = f"background-{uuid.uuid4()}{file_ext}"
                 image_stream = io.BytesIO(image_bytes)
                 
@@ -2098,6 +2121,9 @@ async def update_product_details(
 
         logger.info(f"Final response keys: {response_data.keys()}")
         return api_success(response_data)
+    except ContentPolicyViolation:
+        # Rendered by the handler in app.main (422 / 403), not a 500.
+        raise
     except HTTPException:
         # Re-raise HTTP exceptions as-is
         raise
