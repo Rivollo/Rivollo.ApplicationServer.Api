@@ -66,12 +66,21 @@ class AuthService:
         email: str,
         password: str,
     ) -> Optional[User]:
-        """Authenticate user with email and password."""
+        """Verify an email/password credential.
+
+        Deliberately does NOT filter `deleted_at IS NULL`. An account inside its
+        recovery window has to be reachable by sign-in, because presenting the
+        right password is what brings it back; filtering here would answer its
+        owner with "invalid email or password" and send them looking for a login
+        bug instead of the way back in.
+
+        The CALLER is therefore responsible for `user.deleted_at` — see
+        AccountService.restore_on_sign_in. Do not reuse this as a general "is
+        there a live user" lookup; get_user_by_email is that lookup and keeps
+        the filter.
+        """
         result = await db.execute(
-            select(User).where(
-                User.email == email.lower(),
-                User.deleted_at.is_(None),
-            )
+            select(User).where(User.email == email.lower())
         )
         user = result.scalar_one_or_none()
 
@@ -95,6 +104,20 @@ class AuthService:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def get_user_by_email_including_deleted(
+        db: AsyncSession, email: str
+    ) -> Optional[User]:
+        """Get user by email, INCLUDING accounts pending deletion.
+
+        Only the Google sign-in path wants this. Signup, the OTP gate and
+        forgot-password must keep using get_user_by_email, whose
+        `deleted_at IS NULL` filter is what stops them acting on an account
+        that is on its way out.
+        """
+        result = await db.execute(select(User).where(User.email == email.lower()))
+        return result.scalar_one_or_none()
+
+    @staticmethod
     async def get_or_create_google_user(
         db: AsyncSession,
         google_id: str,
@@ -113,16 +136,25 @@ class AuthService:
         identity = result.scalar_one_or_none()
 
         if identity:
-            # Get existing user
+            # No `deleted_at IS NULL` filter. This is the branch a deleted Google
+            # user takes — deletion keeps AuthIdentity precisely so it can — and
+            # filtering here would drop them through to the create branch below,
+            # straight into tbl_users' UNIQUE(email): a 500 for someone who is
+            # simply signing back in. The caller restores them.
             result = await db.execute(
-                select(User).where(User.id == identity.user_id, User.deleted_at.is_(None))
+                select(User).where(User.id == identity.user_id)
             )
             user = result.scalar_one_or_none()
             if user:
                 return user, False
 
-        # Check if user with email exists
-        existing_user = await AuthService.get_user_by_email(db, email)
+        # Also unfiltered, for accounts deleted BEFORE deletion started keeping
+        # AuthIdentity. Their identity row is gone, so the branch above can never
+        # match them, and f61a03d7b8e4 backfilled purge_after specifically to
+        # give them a recovery window — which they could not use if this lookup
+        # hid them. Google has already verified the caller owns the address, and
+        # the link step below re-creates the identity row the old deletion removed.
+        existing_user = await AuthService.get_user_by_email_including_deleted(db, email)
         if existing_user:
             # Link Google identity to existing user
             identity = AuthIdentity(

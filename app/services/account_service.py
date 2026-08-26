@@ -268,49 +268,14 @@ class AccountService:
                 ),
             )
 
-        # Captured before the clear below — this is the deletion fingerprint.
-        original_deleted_at = user.deleted_at
-
-        # Guarded exactly like deletion: the row lock already serialises callers,
-        # and this WHERE clause means that even if one slipped through, only the
-        # first restore can match.
-        result = await db.execute(
-            update(User)
-            .where(
-                User.id == user.id,
-                User.deleted_at.is_not(None),
-                User.purge_after > now,
-            )
-            .values(
-                is_active=True,
-                deleted_at=None,
-                purge_after=None,
-                updated_date=now,
-            )
-            .returning(User.id)
-        )
-        if result.first() is None:
+        products_restored = await _apply_restore(db, user, now)
+        if products_restored is None:
             # Another request restored this account between our lock and here.
             # Nothing was written; report success is wrong, so surface the race.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="This account is not pending deletion.",
             )
-
-        # Only products the cascade took down. A product the user deleted
-        # themselves carries a different deleted_at and stays deleted — restoring
-        # it would resurrect something they had chosen to remove, and if it was
-        # published, put it back online.
-        restored = await db.execute(
-            update(Product)
-            .where(
-                Product.created_by == user.id,
-                Product.deleted_at == original_deleted_at,
-            )
-            .values(deleted_at=None)
-            .returning(Product.id)
-        )
-        products_restored = len(restored.fetchall())
 
         await db.commit()
 
@@ -325,6 +290,133 @@ class AccountService:
             restored_at=now,
             products_restored=products_restored,
         )
+
+    @staticmethod
+    async def restore_on_sign_in(
+        db: AsyncSession,
+        user: User,
+    ) -> Optional[AccountRestoreResult]:
+        """Undo a pending deletion because the owner just signed in.
+
+        This is the ordinary way an account comes back. POST /auth/account/restore
+        still exists for clients that want to ask explicitly, but nobody has to
+        call it: signing in is already proof of ownership — the same proof restore
+        asks for — so demanding a second, separate step would only strand people
+        who deleted an account they turned out to still want.
+
+        Call only once the credential has been verified. Returns None when the
+        account was not pending deletion, which is every ordinary sign-in, so
+        callers can read None as "carry on".
+
+        Two things differ from restore_account, and both follow from the caller:
+
+        * Ownership is already proven, so there is no identity check here. The
+          caller must not skip its own.
+        * Losing the race is not an error. restore_account raises 409 because a
+          client that explicitly asked to restore deserves to know its request
+          did nothing; a sign-in only needs the account live, and whoever won the
+          race left it exactly that way. It signs the user in either way.
+
+        Past the window this raises 403 rather than restoring. The purge job may
+        already have erased data by then, so a "restored" account could come back
+        pointing at files that are gone.
+        """
+        if user.deleted_at is None:
+            return None  # fast path: ordinary sign-in, no lock taken
+
+        now = datetime.now(timezone.utc)
+
+        # The same locked lookup restore_account uses, for the same reasons:
+        # every other user lookup in this codebase hides exactly the rows this
+        # needs, and FOR UPDATE makes a concurrent restore or delete queue rather
+        # than interleave. It also re-reads the row, so the check above — made
+        # against a possibly stale object — is not the one that decides.
+        locked = await UserRepository.get_for_restore(db, user.email)
+        if locked is None or locked.deleted_at is None:
+            # Already live: another request won, or the object we were handed was
+            # stale. Either way the account is in the state this caller wanted.
+            return None
+
+        if locked.purge_after is None or locked.purge_after <= now:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "This account was deleted and its recovery period has ended. "
+                    "It can no longer be restored."
+                ),
+            )
+
+        products_restored = await _apply_restore(db, locked, now)
+        if products_restored is None:
+            return None
+
+        await db.commit()
+
+        logger.info(
+            "Account restored on sign-in | user_id=%s | email=%s | products_restored=%d",
+            locked.id,
+            locked.email,
+            products_restored,
+        )
+        return AccountRestoreResult(
+            user_id=locked.id,
+            restored_at=now,
+            products_restored=products_restored,
+        )
+
+
+async def _apply_restore(
+    db: AsyncSession, user: User, now: datetime
+) -> Optional[int]:
+    """Clear a pending deletion and bring back the products it took down.
+
+    The caller has verified ownership, holds the row lock, and has checked the
+    window. Returns the number of products restored, or None if the guarded
+    UPDATE matched nothing — meaning another request got there first and this
+    one wrote nothing at all. Does not commit; the caller owns the transaction.
+
+    Shared by restore_account and restore_on_sign_in so the two entry points
+    cannot drift. They differ in how they answer their caller, not in what they
+    write, and what they write is the part that must stay identical.
+    """
+    # Captured before the clear below — this is the deletion fingerprint.
+    original_deleted_at = user.deleted_at
+
+    # Guarded exactly like deletion: the row lock already serialises callers,
+    # and this WHERE clause means that even if one slipped through, only the
+    # first restore can match.
+    result = await db.execute(
+        update(User)
+        .where(
+            User.id == user.id,
+            User.deleted_at.is_not(None),
+            User.purge_after > now,
+        )
+        .values(
+            is_active=True,
+            deleted_at=None,
+            purge_after=None,
+            updated_date=now,
+        )
+        .returning(User.id)
+    )
+    if result.first() is None:
+        return None
+
+    # Only products the cascade took down. A product the user deleted
+    # themselves carries a different deleted_at and stays deleted — restoring
+    # it would resurrect something they had chosen to remove, and if it was
+    # published, put it back online.
+    restored = await db.execute(
+        update(Product)
+        .where(
+            Product.created_by == user.id,
+            Product.deleted_at == original_deleted_at,
+        )
+        .values(deleted_at=None)
+        .returning(Product.id)
+    )
+    return len(restored.fetchall())
 
 
 async def _verify_restore_identity(

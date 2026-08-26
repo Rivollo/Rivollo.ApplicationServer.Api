@@ -186,6 +186,27 @@ async def login(
             detail="Invalid email or password",
         )
 
+    # A correct password inside the recovery window brings a deleted account
+    # back, and sign-in then continues exactly as it would for anyone else.
+    #
+    # Placed after the password check so it cannot be used to probe which
+    # addresses have deleted accounts, and before the is_active check because
+    # deletion sets is_active = false — reaching that check first would answer
+    # "contact support", which is both wrong and a self-service action pushed
+    # into a support queue. Raises 403 past the window.
+    restored = await AccountService.restore_on_sign_in(db, user)
+    if restored is not None:
+        await ActivityService.log_auth_action(
+            db=db,
+            action="user.account.restored",
+            user_id=user.id,
+            request=request,
+            metadata={"products_restored": restored.products_restored, "via": "login"},
+        )
+        # _apply_restore wrote through Core UPDATE, so the ORM object still
+        # carries the pre-restore is_active = false.
+        await db.refresh(user)
+
     # Checked after the password is verified so this cannot be used to probe emails
     if not user.is_active:
         raise HTTPException(
@@ -218,6 +239,8 @@ async def login(
         AuthResponse(
             user=user_data,
             token=token,
+            account_restored=restored is not None,
+            products_restored=restored.products_restored if restored else None,
         ).model_dump()
     )
 
@@ -338,7 +361,7 @@ async def restore_account(
         ).model_dump()
     )
 
-
+ 
 @router.post("/auth/google", response_model=dict)
 async def google_auth(
     payload: GoogleAuthRequest,
@@ -404,6 +427,21 @@ async def google_auth(
         utm_source=payload.utm_source,
     )
 
+    # Same rule as password sign-in: Google has already verified the caller owns
+    # this address, so signing in inside the recovery window restores the
+    # account. Must run before the is_active check (deletion sets it false) and
+    # before the profile writes below, which assume a live account.
+    restored = await AccountService.restore_on_sign_in(db, user)
+    if restored is not None:
+        await ActivityService.log_auth_action(
+            db=db,
+            action="user.account.restored",
+            user_id=user.id,
+            request=request,
+            metadata={"products_restored": restored.products_restored, "via": "google"},
+        )
+        await db.refresh(user)
+
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -457,6 +495,8 @@ async def google_auth(
         AuthResponse(
             user=user_data,
             token=token,
+            account_restored=restored is not None,
+            products_restored=restored.products_restored if restored else None,
         ).model_dump()
     )
 
