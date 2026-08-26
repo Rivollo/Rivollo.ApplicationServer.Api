@@ -111,6 +111,15 @@ class AuthResponse(BaseModel):
     user: UserResponse
     token: str
     expires_at: Optional[datetime] = None
+    # True when this sign-in brought a deleted account back, so the client can
+    # say "welcome back, your account has been restored" instead of dropping the
+    # user into an account they had asked us to delete with no acknowledgement
+    # that anything happened.
+    account_restored: bool = False
+    # How many products came back with it. None on an ordinary sign-in — absent
+    # rather than 0, so "no restore happened" cannot be read as "restored, and
+    # you had nothing".
+    products_restored: Optional[int] = None
 
 
 class UserUpdateRequest(BaseModel):
