@@ -4,7 +4,9 @@ Gracefully skips sending if RESEND_API_KEY is not configured.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import date
+from html import escape
 from typing import Optional
 
 import httpx
@@ -22,6 +24,7 @@ async def _send(
     subject: str,
     html_body: str,
     cc: Optional[list[str]] = None,
+    bcc: Optional[list[str]] = None,
 ) -> None:
     """Send an email via Resend."""
     if not settings.RESEND_API_KEY:
@@ -34,10 +37,14 @@ async def _send(
         "html": html_body,
     }
 
-    # Drop any CC that duplicates the recipient — Resend would deliver twice.
+    # Drop any CC/BCC that duplicates the recipient — Resend would deliver twice.
     cc_list = [addr for addr in (cc or []) if addr.lower() != to_email.lower()]
     if cc_list:
         payload["cc"] = cc_list
+
+    bcc_list = [addr for addr in (bcc or []) if addr.lower() != to_email.lower()]
+    if bcc_list:
+        payload["bcc"] = bcc_list
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -70,6 +77,63 @@ async def _send(
     logger.info("Email sent | to: %s | subject: %s", to_email, subject)
 
 
+_RESEND_AUDIENCES_URL = "https://api.resend.com/audiences"
+
+
+async def _add_contact(email: str, name: Optional[str] = None) -> None:
+    """Add or update a contact in the configured Resend audience.
+
+    Resend upserts by email — calling this for an address already in the
+    audience just updates it, never duplicates or errors. Requires
+    RESEND_API_KEY to have "Full access" permission; a "Sending access" key
+    is rejected here with a 401, even though it can send emails fine.
+    """
+    if not settings.RESEND_API_KEY:
+        raise RuntimeError("RESEND_API_KEY is not configured.")
+    if not settings.RESEND_AUDIENCE_ID:
+        raise RuntimeError("RESEND_AUDIENCE_ID is not configured.")
+
+    first_name, _, last_name = (name or "").strip().partition(" ")
+
+    payload: dict = {"email": email, "unsubscribed": False}
+    if first_name:
+        payload["first_name"] = first_name
+    if last_name:
+        payload["last_name"] = last_name
+
+    url = f"{_RESEND_AUDIENCES_URL}/{settings.RESEND_AUDIENCE_ID}/contacts"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+            )
+    except httpx.TimeoutException:
+        logger.error("Resend timeout adding contact | email: %s", email)
+        raise RuntimeError("Failed to add contact: request timed out.")
+    except httpx.RequestError as exc:
+        logger.error("Resend network error adding contact | email: %s | error: %s", email, exc)
+        raise RuntimeError(f"Failed to add contact: network error — {exc}")
+
+    if resp.status_code not in (200, 201):
+        try:
+            error_detail = resp.json()
+        except Exception:
+            error_detail = resp.text
+        logger.error(
+            "Resend error adding contact | email: %s | status: %s | detail: %s",
+            email, resp.status_code, error_detail,
+        )
+        raise RuntimeError(f"Resend error (status {resp.status_code}): {error_detail}")
+
+    logger.info("Contact added to Resend audience | email: %s", email)
+
+
 class EmailService:
 
     @staticmethod
@@ -99,7 +163,8 @@ class EmailService:
     async def send_welcome_email(to_email: str, name: str) -> None:
         """Send a welcome email after successful account creation.
 
-        CC'd to WELCOME_EMAIL_CC so the team is notified of every new signup.
+        BCC'd to WELCOME_EMAIL_CC so the team is notified of every new signup,
+        without that address being visible to the recipient or other BCCs.
         """
         subject = f"Welcome to {settings.RESEND_FROM_NAME}!"
         html_body = _welcome_template(name=name, frontend_url=settings.FRONTEND_URL)
@@ -108,8 +173,23 @@ class EmailService:
             to_name=name,
             subject=subject,
             html_body=html_body,
-            cc=settings.get_welcome_email_cc(),
+            bcc=settings.get_welcome_email_cc(),
         )
+
+    @staticmethod
+    async def add_user_to_audience(email: str, name: Optional[str] = None) -> None:
+        """Add a newly created user's email to the configured Resend audience.
+
+        Call this only for a genuinely NEW user, right alongside the welcome
+        email — never on login, so a returning user is never re-added or
+        otherwise touched. Skips silently (no exception) if RESEND_AUDIENCE_ID
+        isn't configured, so environments without an audience set up (e.g. a
+        fresh local .env) don't fail signup over an optional feature.
+        """
+        if not settings.RESEND_AUDIENCE_ID:
+            logger.info("RESEND_AUDIENCE_ID not configured — skipping audience contact add for %s", email)
+            return
+        await _add_contact(email=email, name=name)
 
     @staticmethod
     async def send_signup_verification_otp(to_email: str, otp: str, expires_minutes: int) -> None:
@@ -386,83 +466,193 @@ def _reset_success_template(name: str, frontend_url: str) -> str:
 </html>"""
 
 
-def _signup_otp_template(otp: str, expires_minutes: int) -> str:
-    banner = _banner_header(settings.RESEND_FROM_NAME)
-    footer = _footer(settings.RESEND_FROM_NAME)
-    return f"""<!DOCTYPE html>
+@dataclass(frozen=True)
+class RivolloEmailSettings:
+    """Values the new signup-OTP/welcome templates below are parametrized by.
+
+    Sourced from the real app settings (see EMAIL_SETTINGS just below) —
+    this dataclass exists only so the template functions stay easy to unit
+    test / reuse standalone, not as a second place these values live.
+    """
+
+    resend_from_name: str = "Rivollo"
+    support_email: str = "contact@rivollo.com"
+    # Must be a real public HTTPS URL — email clients cannot load a local
+    # file path or a data: URI. Empty falls back to a text wordmark.
+    resend_logo_url: str = ""
+    discord_invite_url: str = "https://discord.gg/cHwWTSFN5"
+
+
+EMAIL_SETTINGS = RivolloEmailSettings(
+    resend_from_name=settings.RESEND_FROM_NAME,
+    support_email=settings.SUPPORT_EMAIL,
+    resend_logo_url=settings.RESEND_LOGO_URL,
+    discord_invite_url=settings.DISCORD_INVITE_URL,
+)
+
+
+def _safe_name(name: str | None) -> str:
+    """Return an HTML-safe display name."""
+    value = (name or "").strip()
+    return escape(value if value else "there")
+
+
+def _brand_banner(email_settings: RivolloEmailSettings = EMAIL_SETTINGS) -> str:
+    """Centered logo/wordmark header for the signup-OTP and welcome emails.
+
+    Distinct from _banner_header above (which the other three templates use
+    unchanged) — this one renders an actual <img> when RESEND_LOGO_URL is
+    configured, falling back to a styled text wordmark when it isn't.
+    """
+
+    brand_name = escape(email_settings.resend_from_name or "Rivollo")
+    logo_url = escape(email_settings.resend_logo_url or "", quote=True)
+
+    if logo_url:
+        brand_html = f"""
+          <a href="https://www.rivollo.com" target="_blank" style="display:inline-block;text-decoration:none;">
+            <img src="{logo_url}" alt="{brand_name}" width="190" border="0"
+              style="display:block;width:190px;max-width:190px;height:auto;margin:0 auto;border:0;outline:none;text-decoration:none;" />
+          </a>
+        """
+    else:
+        brand_html = f"""
+          <a href="https://www.rivollo.com" target="_blank"
+            style="display:inline-block;font-family:Arial,Helvetica,sans-serif;font-size:28px;line-height:34px;font-weight:800;letter-spacing:1px;color:#2364c7;text-decoration:none;">
+            {brand_name}
+          </a>
+        """
+
+    return f"""
+          <tr>
+            <td align="center" bgcolor="#ffffff" style="padding:28px 24px;background-color:#ffffff;border-bottom:1px solid #eaecf0;text-align:center;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto;">
+                <tr><td align="center" style="text-align:center;">{brand_html}</td></tr>
+              </table>
+            </td>
+          </tr>"""
+
+
+def _brand_footer(email_settings: RivolloEmailSettings = EMAIL_SETTINGS) -> str:
+    """Shared transactional footer for the signup-OTP and welcome emails."""
+
+    current_year = date.today().year
+    brand_name = escape(email_settings.resend_from_name or "Rivollo")
+    support_email = escape(email_settings.support_email or "contact@rivollo.com", quote=True)
+
+    return f"""
+          <tr>
+            <td align="center" bgcolor="#f8f9fc" style="padding:24px 36px 26px;background-color:#f8f9fc;border-top:1px solid #eaecf0;text-align:center;">
+              <p style="margin:0 0 8px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:21px;color:#98a2b3;">
+                Need help? Reach us at
+                <a href="mailto:{support_email}" style="color:#315BD6;text-decoration:none;">{support_email}</a>
+              </p>
+              <p style="margin:0 0 7px;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:20px;color:#b0b7c3;">
+                &copy; {current_year} {brand_name}. All rights reserved.
+              </p>
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:20px;">
+                <a href="https://www.rivollo.com" target="_blank" style="color:#98a2b3;text-decoration:none;">www.rivollo.com</a>
+              </p>
+            </td>
+          </tr>"""
+
+
+def _signup_otp_template(
+    otp: str,
+    expires_minutes: int,
+    name: str = "there",
+    email_settings: RivolloEmailSettings = EMAIL_SETTINGS,
+) -> str:
+    banner = _brand_banner(email_settings)
+    footer = _brand_footer(email_settings)
+
+    display_name = _safe_name(name)
+    otp_value = escape(str(otp))
+    expiry = max(1, int(expires_minutes))
+    brand_name = escape(email_settings.resend_from_name or "Rivollo")
+
+    return f"""<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Verify Your Email</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="x-apple-disable-message-reformatting" />
+  <meta name="color-scheme" content="light" />
+  <meta name="supported-color-schemes" content="light" />
+  <title>Verify your {brand_name} account</title>
+  <!--[if mso]>
+  <style>
+    table {{ border-collapse:collapse; }}
+    td, p, a, h1 {{ font-family:Arial,Helvetica,sans-serif !important; }}
+  </style>
+  <![endif]-->
 </head>
-<body style="margin:0;padding:0;background-color:#f0f2f8;font-family:Arial,sans-serif;">
+<body style="margin:0;padding:0;background-color:#f4f6fb;font-family:Arial,Helvetica,sans-serif;color:#101828;">
 
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f2f8;padding:40px 0;">
+  <div style="display:none;font-size:1px;color:#f4f6fb;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
+    Your {brand_name} verification code is {otp_value}. It expires in {expiry} minutes.
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f4f6fb" style="width:100%;background-color:#f4f6fb;">
     <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+      <td align="center" style="padding:32px 16px;">
+        <table role="presentation" width="620" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff"
+          style="width:100%;max-width:620px;background-color:#ffffff;border-radius:16px;overflow:hidden;">
 
           {banner}
 
-          <!-- ── Body ── -->
           <tr>
-            <td style="padding:40px 40px 32px;">
-
-              <p style="margin:0 0 8px;font-size:11px;letter-spacing:2.5px;color:#3a5bd9;text-transform:uppercase;font-weight:600;">
-                Email Verification
-              </p>
-
-              <p style="margin:0 0 16px;font-size:22px;color:#1a1a4e;font-weight:700;line-height:1.3;">
-                Verify your email address
-              </p>
-
-              <p style="margin:0 0 28px;font-size:14px;color:#666666;line-height:1.8;">
-                Use the one-time code below to verify your email and complete your sign-up.
-                For your security, this code expires in
-                <strong style="color:#3a5bd9;">{expires_minutes} minutes</strong>.
-              </p>
-
-              <!-- OTP Box -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 28px;">
+            <td align="center" bgcolor="#ffffff" style="padding:46px 42px 22px;background-color:#ffffff;text-align:center;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto 20px;">
                 <tr>
-                  <td align="center">
-                    <table cellpadding="0" cellspacing="0">
-                      <tr>
-                        <td style="background-color:#eef1fc;border:2px solid #3a5bd9;border-radius:12px;padding:20px 52px;text-align:center;">
-                          <span style="font-size:42px;font-weight:700;letter-spacing:16px;color:#1a1a4e;font-family:'Courier New',Courier,monospace;">
-                            {otp}
-                          </span>
-                        </td>
-                      </tr>
-                    </table>
+                  <td align="center" bgcolor="#eef4ff" style="padding:9px 18px;background-color:#eef4ff;border-radius:999px;text-align:center;">
+                    <span style="font-size:12px;line-height:16px;font-weight:700;letter-spacing:1px;color:#2459c4;text-transform:uppercase;">
+                      Account Verification
+                    </span>
                   </td>
                 </tr>
               </table>
+              <h1 style="margin:0 0 14px;font-size:30px;line-height:39px;font-weight:800;color:#10145f;">Verify your email</h1>
+              <p style="margin:0 auto 8px;max-width:500px;font-size:16px;line-height:27px;color:#344054;">Hi <strong>{display_name}</strong>,</p>
+              <p style="margin:0 auto;max-width:500px;font-size:15px;line-height:26px;color:#667085;">
+                Thanks for signing up for {brand_name}. Use the verification code below to complete your account setup.
+              </p>
+            </td>
+          </tr>
 
-              <!-- Tip box -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+          <tr>
+            <td align="center" bgcolor="#ffffff" style="padding:18px 42px 22px;background-color:#ffffff;text-align:center;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto;">
                 <tr>
-                  <td style="background-color:#fff8e6;border-left:3px solid #f59e0b;border-radius:4px;padding:12px 16px;">
-                    <p style="margin:0;font-size:13px;color:#92400e;line-height:1.6;">
-                      <strong>Security tip:</strong> Never share this code with anyone.
-                      {settings.RESEND_FROM_NAME} will never ask for your OTP via phone or chat.
+                  <td align="center" bgcolor="#f5f7ff" style="padding:20px 32px;background-color:#f5f7ff;border:1px solid #dfe4ff;border-radius:14px;text-align:center;">
+                    <span style="font-family:'Courier New',Courier,monospace;font-size:34px;line-height:42px;font-weight:800;letter-spacing:8px;color:#315BD6;">
+                      {otp_value}
+                    </span>
+                  </td>
+                </tr>
+              </table>
+              <p style="margin:18px 0 0;font-size:14px;line-height:22px;color:#667085;">
+                This code will expire in <strong style="color:#315BD6;">{expiry} minutes</strong>.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td bgcolor="#ffffff" style="padding:10px 42px 42px;background-color:#ffffff;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f8f9fc"
+                style="width:100%;background-color:#f8f9fc;border-radius:12px;">
+                <tr>
+                  <td style="padding:18px 20px;text-align:left;">
+                    <p style="margin:0 0 6px;font-size:14px;line-height:22px;font-weight:700;color:#344054;">
+                      Keep your verification code private
+                    </p>
+                    <p style="margin:0;font-size:13px;line-height:21px;color:#667085;">
+                      {brand_name} will never ask you to share this code with anyone.
+                      If you did not attempt to create an account, you can safely ignore this email.
                     </p>
                   </td>
                 </tr>
               </table>
-
-              <!-- Divider -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
-                <tr>
-                  <td style="border-top:1px solid #eeeeee;font-size:0;line-height:0;">&nbsp;</td>
-                </tr>
-              </table>
-
-              <p style="margin:0;font-size:12px;color:#999999;line-height:1.7;">
-                If you did not attempt to create an account, you can safely ignore this email.
-              </p>
-
             </td>
           </tr>
 
@@ -477,125 +667,82 @@ def _signup_otp_template(otp: str, expires_minutes: int) -> str:
 </html>"""
 
 
-def _welcome_template(name: str, frontend_url: str) -> str:
-    banner = _banner_header(settings.RESEND_FROM_NAME)
-    footer = _footer(settings.RESEND_FROM_NAME)
-    font_stack = "-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif"
-    return f"""<!DOCTYPE html>
+def _welcome_template(
+    name: str,
+    frontend_url: str,
+    email_settings: RivolloEmailSettings = EMAIL_SETTINGS,
+) -> str:
+    banner = _brand_banner(email_settings)
+    footer = _brand_footer(email_settings)
+
+    display_name = _safe_name(name)
+    brand_name = escape(email_settings.resend_from_name or "Rivollo")
+    dashboard_url = escape((frontend_url or "https://app.rivollo.com").rstrip("/"), quote=True)
+    discord_url = escape(email_settings.discord_invite_url or "https://discord.gg/cHwWTSFN5", quote=True)
+
+    return f"""<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Welcome to {settings.RESEND_FROM_NAME}</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="x-apple-disable-message-reformatting" />
+  <meta name="color-scheme" content="light" />
+  <meta name="supported-color-schemes" content="light" />
+  <title>Welcome to {brand_name}</title>
+  <!--[if mso]>
+  <style>
+    table {{ border-collapse:collapse; }}
+    td, p, a, h1, h2 {{ font-family:Arial,Helvetica,sans-serif !important; }}
+  </style>
+  <![endif]-->
 </head>
-<body style="margin:0;padding:0;background-color:#f0f2f8;font-family:{font_stack};">
+<body style="margin:0;padding:0;background-color:#f4f6fb;font-family:Arial,Helvetica,sans-serif;color:#101828;">
 
-  <!-- Preheader text (hidden, shows in inbox preview) -->
-  <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;color:#f0f2f8;line-height:1px;">
-    Your {settings.RESEND_FROM_NAME} account is ready — start building your product catalogue today.&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;&nbsp;&#847;
+  <div style="display:none;font-size:1px;color:#f4f6fb;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
+    Welcome to {brand_name}, {display_name}. Your account is ready to start creating your first interactive 3D experience.
   </div>
 
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f2f8;padding:40px 0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f4f6fb" style="width:100%;background-color:#f4f6fb;">
     <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+      <td align="center" style="padding:32px 16px;">
+        <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff"
+          style="width:100%;max-width:680px;background-color:#ffffff;border-radius:16px;overflow:hidden;">
 
           {banner}
 
-          <!-- ── Hero ── -->
           <tr>
-            <td style="background:linear-gradient(180deg,#eef1fc 0%,#ffffff 100%);padding:40px 40px 30px;text-align:center;">
-              <p style="margin:0 0 8px;font-size:11px;letter-spacing:2.5px;color:#3a5bd9;text-transform:uppercase;font-weight:600;">
-                Welcome to {settings.RESEND_FROM_NAME}
-              </p>
-              <p style="margin:0 0 14px;font-size:26px;color:#1a1a4e;font-weight:700;line-height:1.3;">
-                Hello, {name} — glad to have you.
-              </p>
-              <p style="margin:0;font-size:15px;color:#555555;line-height:1.8;max-width:460px;display:inline-block;">
-                Your account is ready. Turn any product into an immersive 3D experience, instantly.
+            <td align="center" bgcolor="#ffffff" style="padding:48px 48px 30px;background-color:#ffffff;text-align:center;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto 20px;">
+                <tr>
+                  <td align="center" bgcolor="#eef4ff" style="padding:9px 18px;background-color:#eef4ff;border-radius:999px;">
+                    <span style="font-size:12px;line-height:16px;font-weight:700;letter-spacing:1px;color:#2459c4;text-transform:uppercase;">
+                      Welcome to {brand_name}
+                    </span>
+                  </td>
+                </tr>
+              </table>
+              <h1 style="margin:0 0 12px;font-size:32px;line-height:41px;font-weight:800;color:#10145f;">Welcome, {display_name}!</h1>
+              <p style="margin:0 auto;max-width:560px;font-size:16px;line-height:28px;color:#667085;">
+                Your {brand_name} account is ready. Turn product images into interactive 3D experiences,
+                customize how they are presented, and share them with customers from one place.
               </p>
             </td>
           </tr>
 
-          <!-- ── Divider ── -->
           <tr>
-            <td style="padding:0 40px;">
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr><td style="border-top:1px solid #eeeeee;font-size:0;line-height:0;">&nbsp;</td></tr>
-              </table>
-            </td>
-          </tr>
-
-          <!-- ── Features ── -->
-          <tr>
-            <td style="padding:28px 40px 8px;">
-              <p style="margin:0 0 20px;font-size:13px;color:#1a1a4e;font-weight:700;text-transform:uppercase;letter-spacing:1px;">
-                What you can do with {settings.RESEND_FROM_NAME}
+            <td align="center" bgcolor="#ffffff" style="padding:38px 48px 34px;background-color:#ffffff;text-align:center;">
+              <h2 style="margin:0 0 10px;font-size:23px;line-height:31px;font-weight:800;color:#10145f;">
+                Ready to create your first 3D model?
+              </h2>
+              <p style="margin:0 0 24px;font-size:15px;line-height:25px;color:#667085;">
+                Open your {brand_name} dashboard and start creating.
               </p>
-
-              <!-- Feature 1 -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 18px;">
+              <table role="presentation" width="270" cellpadding="0" cellspacing="0" border="0" align="center" style="width:270px;margin:0 auto;">
                 <tr>
-                  <td style="width:40px;vertical-align:top;padding-top:2px;">
-                    <table cellpadding="0" cellspacing="0"><tr>
-                      <td style="width:34px;height:34px;background-color:#eef1fc;border-radius:8px;text-align:center;vertical-align:middle;">
-                        <span style="font-size:16px;line-height:34px;display:block;">&#127919;</span>
-                      </td>
-                    </tr></table>
-                  </td>
-                  <td style="padding-left:16px;vertical-align:top;">
-                    <p style="margin:0 0 3px;font-size:14px;color:#1a1a4e;font-weight:600;">2D → interactive 3D conversion</p>
-                    <p style="margin:0;font-size:13px;color:#777777;line-height:1.7;">Turn product photos into web-ready 3D models with hotspots, custom backgrounds, and purchase links.</p>
-                  </td>
-                </tr>
-              </table>
-
-              <!-- Feature 2 -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 18px;">
-                <tr>
-                  <td style="width:40px;vertical-align:top;padding-top:2px;">
-                    <table cellpadding="0" cellspacing="0"><tr>
-                      <td style="width:34px;height:34px;background-color:#eef1fc;border-radius:8px;text-align:center;vertical-align:middle;">
-                        <span style="font-size:16px;line-height:34px;display:block;">&#128279;</span>
-                      </td>
-                    </tr></table>
-                  </td>
-                  <td style="padding-left:16px;vertical-align:top;">
-                    <p style="margin:0 0 3px;font-size:14px;color:#1a1a4e;font-weight:600;">Share your storefront instantly</p>
-                    <p style="margin:0;font-size:13px;color:#777777;line-height:1.7;">Generate a shareable link and send it to clients, buyers, or partners.</p>
-                  </td>
-                </tr>
-              </table>
-
-              <!-- Feature 4 -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 32px;">
-                <tr>
-                  <td style="width:40px;vertical-align:top;padding-top:2px;">
-                    <table cellpadding="0" cellspacing="0"><tr>
-                      <td style="width:34px;height:34px;background-color:#eef1fc;border-radius:8px;text-align:center;vertical-align:middle;">
-                        <span style="font-size:16px;line-height:34px;display:block;">&#128202;</span>
-                      </td>
-                    </tr></table>
-                  </td>
-                  <td style="padding-left:16px;vertical-align:top;">
-                    <p style="margin:0 0 3px;font-size:14px;color:#1a1a4e;font-weight:600;">Product analytics</p>
-                    <p style="margin:0;font-size:13px;color:#777777;line-height:1.7;">Track views, engagement, and buyer interest per product — so you know exactly what's working.</p>
-                  </td>
-                </tr>
-              </table>
-
-            </td>
-          </tr>
-
-          <!-- ── CTA ── -->
-          <tr>
-            <td style="padding:0 40px 40px;text-align:center;">
-              <table cellpadding="0" cellspacing="0" style="margin:0 auto;">
-                <tr>
-                  <td style="background:linear-gradient(135deg,#3a5bd9,#1a1a4e);border-radius:30px;">
-                    <a href="{frontend_url}"
-                       style="display:inline-block;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 48px;border-radius:30px;font-family:{font_stack};letter-spacing:0.3px;">
-                      Go to my dashboard &rarr;
+                  <td align="center" bgcolor="#315BD6" style="background-color:#315BD6;border-radius:28px;text-align:center;">
+                    <a href="{dashboard_url}" target="_blank"
+                      style="display:block;width:268px;padding:16px 0;border:1px solid #315BD6;border-radius:28px;background-color:#315BD6;color:#ffffff !important;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:20px;font-weight:700;text-decoration:none;text-align:center;">
+                      Go to My Dashboard &rarr;
                     </a>
                   </td>
                 </tr>
@@ -603,22 +750,31 @@ def _welcome_template(name: str, frontend_url: str) -> str:
             </td>
           </tr>
 
-          <!-- ── Divider ── -->
           <tr>
-            <td style="padding:0 40px;">
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr><td style="border-top:1px solid #eeeeee;font-size:0;line-height:0;">&nbsp;</td></tr>
+            <td align="center" style="padding:0 48px 44px;text-align:center;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f8f9fc"
+                style="width:100%;background-color:#f8f9fc;border-radius:12px;">
+                <tr>
+                  <td align="center" style="padding:24px;text-align:center;">
+                    <p style="margin:0 0 7px;font-size:15px;line-height:23px;font-weight:700;color:#344054;">
+                      Join the {brand_name} community
+                    </p>
+                    <p style="margin:0 0 20px;font-size:13px;line-height:21px;color:#667085;">
+                      Get product updates, share your 3D creations, and connect with our team on Discord.
+                    </p>
+                    <table role="presentation" width="270" cellpadding="0" cellspacing="0" border="0" align="center" style="width:270px;margin:0 auto;">
+                      <tr>
+                        <td align="center" bgcolor="#5865F2" style="background-color:#5865F2;border-radius:28px;text-align:center;">
+                          <a href="{discord_url}" target="_blank"
+                            style="display:block;width:268px;padding:16px 0;border:1px solid #5865F2;border-radius:28px;background-color:#5865F2;color:#ffffff !important;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:20px;font-weight:700;text-decoration:none;text-align:center;">
+                            Join {brand_name} on Discord &rarr;
+                          </a>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
               </table>
-            </td>
-          </tr>
-
-          <!-- ── Footer ── -->
-          <tr>
-            <td style="padding:20px 40px 28px;text-align:center;">
-              <p style="margin:0 0 6px;font-size:12px;color:#aaaaaa;line-height:1.8;">
-                You received this email because you signed up for {settings.RESEND_FROM_NAME}.
-                <a href="{frontend_url}/unsubscribe" style="color:#aaaaaa;text-decoration:underline;">Unsubscribe</a>
-              </p>
             </td>
           </tr>
 

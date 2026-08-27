@@ -151,6 +151,14 @@ async def signup(
                 "Failed to send welcome email to %s", user.email, exc_info=True
             )
 
+        # Add to Resend audience (non-blocking — failure must not affect signup response)
+        try:
+            await EmailService.add_user_to_audience(email=user.email, name=user.name)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to add %s to Resend audience", user.email, exc_info=True
+            )
+
         return api_success(
             AuthResponse(
                 user=user_data,
@@ -489,6 +497,14 @@ async def google_auth(
         except Exception:
             logger.warning(
                 "Failed to send welcome email to %s", user.email, exc_info=True
+            )
+
+        # Add to Resend audience (non-blocking — failure must not affect the response)
+        try:
+            await EmailService.add_user_to_audience(email=user.email, name=user.name)
+        except Exception:
+            logger.warning(
+                "Failed to add %s to Resend audience", user.email, exc_info=True
             )
 
     return api_success(
