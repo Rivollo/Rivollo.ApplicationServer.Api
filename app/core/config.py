@@ -79,6 +79,16 @@ class Settings(BaseSettings):
 	RESEND_API_KEY: str = Field(default="")
 	RESEND_FROM_EMAIL: str = Field(default="noreply@rivollomail.com")
 	RESEND_FROM_NAME: str = Field(default="Rivollo")
+	# Resend Audience new signups are added to as a contact. Requires
+	# RESEND_API_KEY to have "Full access" permission — a "Sending access"
+	# key can send emails but is rejected (401) on the contacts/audiences
+	# endpoints. Empty skips adding contacts entirely (see EmailService).
+	RESEND_AUDIENCE_ID: str = Field(default="")
+	# Public HTTPS URL of the Rivollo logo image, used in the welcome/signup-OTP
+	# email banner. Must be a real public URL — email clients cannot load a
+	# local file path or a data: URI. Empty falls back to a text wordmark.
+	RESEND_LOGO_URL: str = Field(default="")
+	DISCORD_INVITE_URL: str = Field(default="https://discord.gg/cHwWTSFN5")
 	SUPPORT_EMAIL: str = Field(default="")
 	# Comma-separated addresses CC'd on the welcome email sent at signup.
 	WELCOME_EMAIL_CC: str = Field(default="contact@rivollo.com")
