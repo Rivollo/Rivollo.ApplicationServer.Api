@@ -12,6 +12,7 @@ from app.schemas.auth import (
     AppTokenRequest,
     AppTokenResponse,
     AuthResponse,
+    DENIED_DOMAIN_MESSAGE,
     ForgotPasswordRequest,
     GoogleAuthRequest,
     LoginRequest,
@@ -28,7 +29,7 @@ from app.services.account_service import AccountService
 from app.services.activity_service import ActivityService
 from app.services.auth_service import AuthService
 from app.services.email_service import EmailService
-from app.utils.email_domain_check import check_email
+from app.utils.email_domain_check import MESSAGES, Verdict, check_email, is_denied_email, is_disposable
 from app.utils.envelopes import api_success
 from app.core.config import settings
 
@@ -426,6 +427,24 @@ async def google_auth(
 
     display_name = token_info.get("name")
     avatar_url = token_info.get("picture")
+
+    # Google Workspace lets anyone put Sign-In on a custom domain, so the
+    # disposable-domain rules apply here too. Existing accounts are only
+    # refused for the operator denylist (same policy as /auth/login); brand
+    # new accounts are refused for the upstream list as well.
+    email_domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+    if is_denied_email(email):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=DENIED_DOMAIN_MESSAGE,
+        )
+    if settings.EMAIL_DOMAIN_CHECK_ENABLED and email_domain and is_disposable(email_domain):
+        existing = await AuthService.get_user_by_email(db, email)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=MESSAGES[Verdict.DISPOSABLE],
+            )
 
     user, is_new_user = await AuthService.get_or_create_google_user(
         db=db,
