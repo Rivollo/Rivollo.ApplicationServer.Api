@@ -38,6 +38,7 @@ from app.api.routes.pricing import router as pricing_router
 from app.api.routes.payments import router as payments_router
 from app.api.routes.ai import router as ai_router
 from app.api.routes.notifications import router as notifications_router
+from app.api.routes.login_otp import router as login_otp_router
 from app.utils.envelopes import api_success, api_error
 from app.core.db import init_engine_and_session, token_refresh_loop, dispose_engine
 from app.middleware.cdn import BlobToCdnMiddleware
@@ -243,6 +244,7 @@ app.include_router(pricing_router, prefix=_api_prefix)
 app.include_router(payments_router, prefix=_api_prefix)
 app.include_router(ai_router, prefix=_api_prefix)
 app.include_router(notifications_router, prefix=_api_prefix)
+app.include_router(login_otp_router, prefix=_api_prefix)
 
 
 
