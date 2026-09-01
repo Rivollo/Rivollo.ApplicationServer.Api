@@ -4,8 +4,8 @@ Authenticates an EXISTING user who proves control of their mailbox. This flow
 never creates a user — signup remains the only way an account comes into
 existence — and it never modifies the existing signup, password-login,
 Google-login or password-reset implementations. It calls two of their building
-blocks (AuthService.get_user_by_email and AuthService.generate_token) without
-changing either.
+blocks (AuthService's email lookups and AuthService.generate_token) without
+changing either, and reuses AccountService.restore_on_sign_in unchanged.
 
 THE SERIES MODEL
 ----------------
@@ -31,6 +31,19 @@ attempts already spent).
 
 The ceiling is therefore 3 codes x 5 attempts = 15 guesses per address per 30
 minutes, against a space of 10^6.
+
+SIGNING IN HERE RESTORES AN ACCOUNT PENDING DELETION
+----------------------------------------------------
+A correct code inside the 30-day recovery window brings a deleted account back,
+exactly as a correct password does on /auth/login. With passwordless sign-in
+this flow is the ONLY way back for most accounts: an OTP-only user has no
+password for /auth/login and no Google identity for /auth/google, and
+/auth/account/restore accepts nothing else - so without this the recovery
+window would exist with no door.
+
+Two lookups therefore have to see deleted rows - request, to decide whether to
+send, and verify, to find the account afterwards - which is why both call
+get_user_by_email_including_deleted rather than get_user_by_email.
 
 WHY SERIES ROWS EXIST FOR UNREGISTERED ADDRESSES
 ------------------------------------------------
@@ -58,6 +71,7 @@ from app.core.security import hash_token
 from app.database.login_otp_repo import LoginOtpRepository
 from app.models.models import User
 from app.schemas.auth import AuthResponse, UserResponse
+from app.services.account_service import AccountRestoreResult, AccountService
 from app.services.activity_service import ActivityService
 from app.services.auth_service import AuthService
 
@@ -252,12 +266,24 @@ class LoginOtpService:
         # Only NOW does account existence enter the picture, and only to decide
         # whether mail goes out. Everything above ran identically for an
         # unregistered address, which is what keeps the responses symmetric.
-        # get_user_by_email filters deleted_at IS NULL, so an account pending
-        # deletion receives no code and must use password login, Google login
-        # or /auth/account/restore — the OTP flow stays out of the deletion
-        # lifecycle entirely.
-        user = await AuthService.get_user_by_email(db, normalized)
-        deliver = user is not None and user.is_active
+        #
+        # The lookup deliberately INCLUDES accounts pending deletion: signing in
+        # inside the recovery window is how an account comes back, and this flow
+        # is the only way left to do it for an account with no password and no
+        # Google identity. Filtering here would leave those users a recovery
+        # window with no door. This joins authenticate_email and
+        # get_or_create_google_user on the short list of lookups that must see
+        # deleted rows — see tests/test_sign_in_lookups_see_deleted_accounts.py.
+        user = await AuthService.get_user_by_email_including_deleted(db, normalized)
+
+        # is_active is false for two unrelated reasons: an account pending
+        # deletion, which we want to reach so it can be restored, and one we
+        # deactivated, which we do not. deleted_at is what tells them apart.
+        #
+        # Past the recovery window a code still goes out and verify answers with
+        # the honest 403 — the same thing password sign-in does today, and
+        # better than silence the user cannot distinguish from broken mail.
+        deliver = user is not None and (user.is_active or user.deleted_at is not None)
 
         return OtpRequestResult(
             locked=False,
@@ -328,11 +354,38 @@ class LoginOtpService:
             raise LoginOtpService._invalid()
         await db.commit()
 
-        user = await AuthService.get_user_by_email(db, normalized)
+        user = await AuthService.get_user_by_email_including_deleted(db, normalized)
         if user is None:
-            # Reachable only if the account was deleted between request and
+            # Reachable only if the account was purged between request and
             # verify. Generic, so it cannot be used to probe addresses.
             raise LoginOtpService._invalid()
+
+        # A correct code inside the recovery window brings a deleted account
+        # back, and sign-in then continues exactly as it would for anyone else.
+        # Control of the mailbox is the same proof /auth/account/restore asks
+        # for, so demanding a second, separate step would only strand people who
+        # deleted an account they turned out to still want.
+        #
+        # Placed after the code check so it cannot be used to probe which
+        # addresses have deleted accounts, and before the is_active check
+        # because deletion sets is_active = false — reaching that check first
+        # would answer "contact support" for something the user can undo
+        # themselves. Raises 403 past the window.
+        restored = await AccountService.restore_on_sign_in(db, user)
+        if restored is not None:
+            await ActivityService.log_auth_action(
+                db=db,
+                action="user.account.restored",
+                user_id=user.id,
+                request=request,
+                metadata={
+                    "products_restored": restored.products_restored,
+                    "via": "otp",
+                },
+            )
+            # _apply_restore wrote through Core UPDATE, so the ORM object still
+            # carries the pre-restore is_active = false.
+            await db.refresh(user)
 
         # Ordered after the code check for the same reason /auth/login orders
         # it after the password check: it discloses account state only to
@@ -357,17 +410,23 @@ class LoginOtpService:
             metadata={"method": "email_otp"},
         )
 
-        return LoginOtpService._build_auth_response(user, token)
+        return LoginOtpService._build_auth_response(user, token, restored)
 
     @staticmethod
-    def _build_auth_response(user: User, token: str) -> AuthResponse:
+    def _build_auth_response(
+        user: User,
+        token: str,
+        restored: Optional[AccountRestoreResult] = None,
+    ) -> AuthResponse:
         """Construct exactly the body /auth/login returns.
 
-        account_restored and products_restored are left at their defaults: this
-        flow does not participate in the account-deletion lifecycle, so it has
-        nothing to report there. Leaving them defaulted keeps the response
-        key-for-key identical to the password-login response, which is what
-        lets a client handle both with no new code.
+        account_restored and products_restored are reported here the same way
+        the password and Google paths report them, so a client can say "welcome
+        back, your account has been restored" instead of dropping the user into
+        an account they had asked us to delete with no acknowledgement that
+        anything happened. Both stay at their defaults on an ordinary sign-in,
+        which keeps the body key-for-key identical to the password-login
+        response — a client can still handle both with no new code.
         """
         return AuthResponse(
             user=UserResponse(
@@ -379,4 +438,6 @@ class LoginOtpService:
                 updated_at=user.updated_at,
             ),
             token=token,
+            account_restored=restored is not None,
+            products_restored=restored.products_restored if restored else None,
         )

@@ -69,13 +69,12 @@ async def delete_account_endpoint(
     The account and all its data are deactivated immediately but retained for 30
     days, during which the account can still be restored. Nothing is erased here.
 
-    Email/password users: send { "password": "current_password" }
-    Google OAuth users:   send { "confirmation": "DELETE MY ACCOUNT" }
+    Every account, however it signs in, sends the same body:
+    { "confirmation": "confirm" }
     """
     result = await AccountService.delete_account(
         db=db,
         user=current_user,
-        password=payload.password,
         confirmation=payload.confirmation,
     )
     # "has been deleted" was accurate when deletion was immediate and is not any

@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 # code change and without this value having to stay stable forever.
 ACCOUNT_RETENTION_DAYS = 30
 
+# What the user types to confirm a deletion. A constant rather than a literal
+# because it appears in the check, in the error message the client shows, and in
+# the tests — three places that must never disagree about what we accept.
+DELETE_CONFIRMATION_PHRASE = "confirm"
+
 
 @dataclass(frozen=True)
 class AccountDeletionResult:
@@ -60,14 +65,18 @@ class AccountService:
     async def delete_account(
         db: AsyncSession,
         user: User,
-        password: Optional[str],
         confirmation: Optional[str],
     ) -> AccountDeletionResult:
         """Schedule an account for deletion, recoverable for 30 days.
 
-        Identity verification rules:
-        - Email/password users must supply their current password.
-        - Google OAuth users (password_hash is None) must supply confirmation = "DELETE MY ACCOUNT".
+        Every account, however it signs in, supplies the same
+        confirmation = "confirm" (DELETE_CONFIRMATION_PHRASE).
+
+        This is a check of INTENT, not of ownership. Sign-in moved to email OTP,
+        so there is no password left to re-ask for here and an OTP-only account
+        has no second credential to present. Ownership is established once, at
+        sign-in; the bearer of a valid token is taken to be the owner. The typed
+        phrase is here to stop an accidental or mis-clicked deletion.
 
         Refused with 409 while a paid subscription is still running — the customer
         cancels first and deletes once the billing period ends. Nothing here talks
@@ -75,7 +84,7 @@ class AccountService:
         records, which stay with the gateway for financial compliance.
 
         What this does:
-        1. Verifies identity.
+        1. Verifies the typed confirmation.
         2. Refuses if a gateway-backed subscription is still running.
         3. Marks the user pending deletion: is_active = false (access kill-switch),
            deleted_at = now, purge_after = now + ACCOUNT_RETENTION_DAYS.
@@ -94,7 +103,7 @@ class AccountService:
         - The email stays claimed, so it cannot be re-registered while the original
           account is still restorable.
         """
-        _verify_identity(user, password, confirmation)
+        _verify_confirmation(confirmation)
 
         # A running paid subscription blocks deletion outright. The customer
         # cancels first, keeps the period they paid for, and deletes once it ends.
@@ -103,8 +112,9 @@ class AccountService:
         # calling the API directly — the frontend greying out the button is a
         # convenience, not the control.
         #
-        # Checked after identity verification so a wrong password is answered with
-        # "incorrect password" instead of disclosing the account's billing state.
+        # Checked after the confirmation so a caller who has not typed the phrase
+        # is answered with the confirmation error rather than with the account's
+        # billing state.
         blocking = await get_blocking_subscription(db, user.id)
         if blocking is not None:
             logger.info(
@@ -427,7 +437,7 @@ async def _verify_restore_identity(
 ) -> None:
     """Raise HTTP 401 unless the caller proves they own this account.
 
-    Deletion asks for proof of *intent* ("type DELETE MY ACCOUNT"); restore asks
+    Deletion asks for proof of *intent* (typing the confirmation phrase); restore asks
     for proof of *ownership*. A typed phrase is worthless here — anyone who knows
     a deleted address could otherwise resurrect a stranger's account, along with
     every product it publishes.
@@ -462,28 +472,26 @@ async def _verify_restore_identity(
         raise unauthorized
 
 
-def _verify_identity(
-    user: User,
-    password: Optional[str],
-    confirmation: Optional[str],
-) -> None:
-    """Raise HTTP 400 if the caller cannot prove they own this account."""
-    if user.password_hash:
-        # Email / password account
-        if not password:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Your current password is required to delete your account.",
-            )
-        if not verify_password(password, user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Incorrect password.",
-            )
-    else:
-        # Google OAuth account — no password, require explicit typed confirmation
-        if not confirmation or confirmation.strip().upper() != "DELETE MY ACCOUNT":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Please type "DELETE MY ACCOUNT" to confirm.',
-            )
+def _verify_confirmation(confirmation: Optional[str]) -> None:
+    """Raise HTTP 400 unless the caller typed the confirmation phrase.
+
+    One rule for every account. The old branch on ``password_hash`` is gone:
+    with passwordless sign-in an OTP-only account has no password to check, so
+    that branch would have silently handed exactly those users the weaker of
+    the two gates while password holders kept the stronger one — a difference
+    in security that nothing in the request would have explained.
+
+    Compared after stripping and case-folding so a phone keyboard's
+    autocapitalisation or a trailing space cannot block a deletion the user
+    plainly meant. The phrase still has to be typed in full.
+
+    Note this proves intent, not ownership — see delete_account.
+    """
+    if (
+        not confirmation
+        or confirmation.strip().casefold() != DELETE_CONFIRMATION_PHRASE.casefold()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Please type "{DELETE_CONFIRMATION_PHRASE}" to delete your account.',
+        )
