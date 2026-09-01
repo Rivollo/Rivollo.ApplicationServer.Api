@@ -3,21 +3,18 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 
 class DeleteAccountRequest(BaseModel):
-    # Email/password users: supply current password
-    password: Optional[str] = None
-    # Google OAuth users (no password): type exactly "DELETE MY ACCOUNT"
+    # Every account types the same phrase; there is no password branch any more.
+    #
+    # Left optional and unvalidated here on purpose. AccountService is the single
+    # gate, so a missing phrase and a mistyped one both come back as one 400
+    # carrying the same actionable message. Validating the text here as well
+    # would answer a mistyped phrase with a 422 and a missing one with a 400,
+    # for what is the same user mistake.
     confirmation: Optional[str] = None
-
-    @field_validator("confirmation")
-    @classmethod
-    def _validate_confirmation(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and v.strip().upper() != "DELETE MY ACCOUNT":
-            raise ValueError('confirmation must be exactly "DELETE MY ACCOUNT"')
-        return v
 
 
 class DeleteAccountResponse(BaseModel):

@@ -77,6 +77,10 @@ async def request_login_otp(
     Answers 200 with an identical body whether or not the address belongs to an
     account, so it cannot be used to discover who has one. It never creates a
     user — signup remains the only way an account is created.
+
+    A code IS sent to an account pending deletion: signing in inside the
+    recovery window is how such an account comes back, and for an account with
+    no password and no Google identity this is the only way back.
     """
     _require_enabled()
     ip = client_ip(request)
@@ -137,9 +141,13 @@ async def verify_login_otp(
     — so a client that can handle a password login can handle this with no new
     response handling.
 
+    A correct code inside the recovery window also RESTORES an account that is
+    pending deletion, reporting it as account_restored / products_restored in
+    the same body — the same thing a password sign-in does on /auth/login.
+
     Every failure mode answers 400 with one identical message. 403 if the
-    account is deactivated; 429 if the address is locked or the caller is
-    rate-limited.
+    account is deactivated, or if it was deleted and its recovery period has
+    already ended; 429 if the address is locked or the caller is rate-limited.
     """
     _require_enabled()
     verify_limiter.check(client_ip(request))
