@@ -243,7 +243,8 @@ class PartOptionCreate(BaseModel):
     # No `set_as_default`. `is_default` is only valid on an isactive+completed
     # option and a new one is always `pending`, so there is nothing a create-time
     # flag could legitimately set — and no column records a deferred intent.
-    # A part gets its default from the first bake that completes (api-spec 7.4).
+    # Nor does a bake assign one: a part with no default starts on the model's
+    # Original appearance until the seller PATCHes a choice (api-spec 7.4).
 
     @field_validator("name")
     @classmethod

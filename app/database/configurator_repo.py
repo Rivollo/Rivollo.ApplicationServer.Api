@@ -367,48 +367,6 @@ class ConfiguratorRepository:
         return int(result.scalar() or 0)
 
     @staticmethod
-    async def get_default_option(
-        db: AsyncSession,
-        part_id: uuid.UUID,
-    ) -> Optional[PartOption]:
-        """The part's default option, if it has one.
-
-        At most one row can match — ux_part_options_one_default is a partial
-        unique index, so this is a database guarantee rather than a convention.
-        """
-        result = await db.execute(
-            select(PartOption).where(
-                PartOption.part_id == part_id,
-                PartOption.is_default.is_(True),
-            )
-        )
-        return result.scalar_one_or_none()
-
-    @staticmethod
-    async def get_default_promotion_candidate(
-        db: AsyncSession,
-        part_id: uuid.UUID,
-        *,
-        exclude_id: Optional[uuid.UUID] = None,
-    ) -> Optional[PartOption]:
-        """The option that should become default when the current one goes.
-
-        Lowest order_index among options that are active AND completed — an
-        option with no baked texture cannot be the look a shopper loads first.
-        """
-        stmt = select(PartOption).where(
-            PartOption.part_id == part_id,
-            PartOption.isactive.is_(True),
-            PartOption.bake_status == "completed",
-        )
-        if exclude_id is not None:
-            stmt = stmt.where(PartOption.id != exclude_id)
-        result = await db.execute(
-            stmt.order_by(PartOption.order_index.asc(), PartOption.created_date.asc()).limit(1)
-        )
-        return result.scalar_one_or_none()
-
-    @staticmethod
     async def clear_default(
         db: AsyncSession,
         part_id: uuid.UUID,

@@ -114,9 +114,10 @@ class OptionService:
             )
 
         # No set_as_default here by design: a new option is always `pending`, and
-        # is_default is only valid on a completed one. The part gets its default
-        # from the first bake that completes — see promote_default_if_absent and
-        # api-spec.md 7.4.
+        # is_default is only valid on a completed one. Nor is a default assigned
+        # when the bake completes — a part with no default shows the model's
+        # Original appearance, and only an explicit PATCH picks a starting option.
+        # See api-spec.md 7.4.
         mesh = await material_service.get_mesh_context(db, part.product_id)
         PartService.require_current_glb(part, mesh)
 
@@ -218,22 +219,21 @@ class OptionService:
             option.order_index = payload.order_index
 
         if payload.isactive is not None:
+            # Hiding the default drops the part back to its Original appearance.
+            # A hidden option cannot be the default, and with Original as the
+            # fallback there is no longer any need to make the seller name a
+            # replacement first.
             if option.is_default and not payload.isactive:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        "The default option cannot be hidden. Set another "
-                        "option as default first."
-                    ),
-                )
+                option.is_default = False
             option.isactive = payload.isactive
 
-        # Only `true` is in the contract (api-spec.md section 7). `false` is
-        # ignored rather than errored: there is no documented operation that
-        # removes a default without naming its replacement, and inventing one
-        # here would be a rule nobody specified.
+        # `true` makes this option the part's starting look. `false` returns the
+        # part to its Original appearance when this option is the default, and is
+        # a no-op otherwise — it cannot un-default a different option.
         if payload.set_as_default is True:
             await OptionService._promote_to_default(db, option)
+        elif payload.set_as_default is False and option.is_default:
+            option.is_default = False
 
         option.updated_by = user_id
         await db.commit()
@@ -253,22 +253,17 @@ class OptionService:
         option_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> None:
-        """Delete an option, purging its blobs first and promoting a new default."""
+        """Delete an option, purging its blobs first.
+
+        Deleting the default does NOT promote another option: the part falls back
+        to its Original appearance until the seller explicitly picks a new
+        starting option. Choosing one silently would report a choice the seller
+        never made.
+        """
         option = await OptionService._require_owned_option(db, option_id, user_id)
-        was_default = option.is_default
-        part_id = option.part_id
 
         await OptionService.purge_option_blobs(db, option)
         await repo.delete(db, option)
-        await db.flush()
-
-        if was_default:
-            replacement = await repo.get_default_promotion_candidate(
-                db, part_id, exclude_id=option_id
-            )
-            if replacement is not None:
-                replacement.is_default = True
-
         await db.commit()
 
     @staticmethod
@@ -417,37 +412,6 @@ class OptionService:
     # ------------------------------------------------------------------ #
     # Defaults
     # ------------------------------------------------------------------ #
-    @staticmethod
-    async def promote_default_if_absent(
-        db: AsyncSession,
-        option: PartOption,
-    ) -> bool:
-        """First-baked-wins: give the part a default if it has none.
-
-        Called by the bake pipeline when an option reaches ``completed``. This is
-        what lets a part acquire a working default without the seller making a
-        second API call, and it is why ``set_as_default`` is not accepted on
-        create (api-spec.md 7.4).
-
-        **Never replaces an existing default.** Promotion fills a vacancy; it
-        does not compete for an occupied slot. A seller who wants a different
-        default asks for one explicitly via PATCH.
-
-        Returns True if this call made the option the default. Does not commit —
-        the caller owns the transaction.
-        """
-        if option.is_default:
-            return False
-        if not option.isactive or option.bake_status != _DEFAULTABLE_BAKE_STATUS:
-            return False
-
-        existing = await repo.get_default_option(db, option.part_id)
-        if existing is not None:
-            return False
-
-        option.is_default = True
-        return True
-
     @staticmethod
     async def _promote_to_default(db: AsyncSession, option: PartOption) -> None:
         if not option.isactive:

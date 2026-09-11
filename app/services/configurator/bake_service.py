@@ -126,7 +126,6 @@ class BakeCompletion:
     """
 
     applied: bool
-    promoted_default: bool
     orphaned_urls: list[str] = field(default_factory=list)
 
 
@@ -362,13 +361,13 @@ class BakeService:
         option = await repo.get_option_for_bake(db, option_id)
         if option is None:
             logger.warning("Completion for missing option %s", option_id)
-            return BakeCompletion(applied=False, promoted_default=False)
+            return BakeCompletion(applied=False)
 
         if option.recipe_hash != recipe_hash:
             logger.info(
                 "Discarding superseded bake result for option %s", option_id
             )
-            return BakeCompletion(applied=False, promoted_default=False)
+            return BakeCompletion(applied=False)
 
         for item in stored_textures:
             BakeService._upsert_texture(db, option, item)
@@ -379,23 +378,19 @@ class BakeService:
         option.bake_error = None
         option.bake_completed_at = datetime.now(timezone.utc)
 
-        # Only now, after a genuinely successful bake, may this option become the
-        # part's default — and only if the part has none (api-spec §7.4).
-        promoted = await OptionService.promote_default_if_absent(db, option)
+        # Deliberately NOT made the part's default. A part with no default shows
+        # the model's Original appearance; only an explicit PATCH picks a
+        # starting option (api-spec §7.4).
 
         await db.commit()
 
         logger.info(
-            "Bake completed for option %s: %d texture(s), %d orphaned, "
-            "promoted_default=%s",
+            "Bake completed for option %s: %d texture(s), %d orphaned",
             option_id,
             len(stored_textures),
             len(orphaned),
-            promoted,
         )
-        return BakeCompletion(
-            applied=True, promoted_default=promoted, orphaned_urls=orphaned
-        )
+        return BakeCompletion(applied=True, orphaned_urls=orphaned)
 
     @staticmethod
     async def fail_bake(

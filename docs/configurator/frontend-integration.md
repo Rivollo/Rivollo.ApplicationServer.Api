@@ -285,12 +285,16 @@ never "stale, needs a re-bake". Drive the editor off `bake_status` alone.
 
 | Situation | Behaviour |
 |---|---|
-| On create | not accepted |
-| First Option to reach `completed` | becomes the default; a later bake never displaces it |
-| Moving the default | `PATCH set_as_default: true` on the **new** Option — only once it is `isactive` and `completed`, else `400` |
-| `set_as_default: false` | **ignored**, not an error |
-| Hiding the default | `400` — promote a replacement first |
-| Deleting the default | next eligible Option is promoted, else `default_option_id: null` |
+| No default set | the Part starts on **Original** — the model as uploaded. The normal state. |
+| On create | `set_as_default` not accepted |
+| A bake completing | does **not** make the Option the default |
+| Choosing a starting Option | `PATCH set_as_default: true` — only once it is `isactive` and `completed`, else `400` |
+| Back to Original | `PATCH set_as_default: false` on the current default |
+| Hiding the default | allowed; clears it → Original |
+| Deleting the default | no replacement is promoted → Original |
+
+Show an **Original** entry at the top of each Part's Option list, starred whenever
+`default_option_id` is `null`.
 
 ### 5.5 Image Options
 
@@ -524,18 +528,27 @@ base-colour image at all — both are coloured through `baseColorFactor` instead
 Use the §6.4 fallback: apply `option.swatch_hex` via `setBaseColorFactor` to every
 index in `part.material_indices`. Never show an error; never skip the Option.
 
-### 6.7 Default Option
+### 6.7 Default Option — and Original
+
+`default_option_id: null` means **start on Original**: the model exactly as uploaded,
+with no Option applied. That is the normal state for a Part whose seller hasn't picked
+a starting colour, so render an **Original** swatch first in every Part's row.
 
 ```ts
 const initial = part.default_option_id
-  ? part.options.find(o => o.id === part.default_option_id) ?? part.options[0]
-  : part.options[0];   // our deliberate fallback, not the seller's choice
+  ? part.options.find(o => o.id === part.default_option_id) ?? null
+  : null;                                     // null -> Original
+
+if (initial) applyOption(mv, part, initial);  // otherwise apply nothing - it already is Original
 ```
 
-`default_option_id` is computed over the **surviving** Options and deliberately
-**not** substituted when the seller's configured default was filtered out (still
-baking, or hidden). `null` means *no visible seller-configured default* — not *use
-the first one*. Don't assume `options[0]` is what the seller chose.
+Selecting Original later means restoring the Part's materials to how they loaded: on
+the `load` event, snapshot each material's `baseColorTexture.texture` and
+`baseColorFactor`, and write them back on Original. No API call, no texture. Restore
+from that snapshot before applying any Option, too — otherwise a `factor` Option
+tints the *previous* Option's texture instead of the original artwork.
+
+Never substitute `options[0]` for a `null` default: the seller did not choose it.
 
 ---
 
@@ -625,7 +638,7 @@ export interface OptionCreate {
 export interface OptionUpdate {
   name?: string; swatch_hex?: HexColor; recipe?: Recipe;
   order_index?: number; isactive?: boolean;
-  set_as_default?: true;                         // `false` is ignored server-side
+  set_as_default?: boolean;                      // false on the default -> back to Original
 }
 
 // ---- bake ----
@@ -655,7 +668,7 @@ export interface PublicPartOption {
 export interface PublicProductPart {
   id: UUID; name: string; slug: string;
   material_indices: number[]; order_index: number;
-  default_option_id: UUID | null;                // null != "use options[0]"
+  default_option_id: UUID | null;                // null -> start on Original
   options: PublicPartOption[];
 }
 export interface PublicConfiguratorResponse {
@@ -758,8 +771,10 @@ So the public payload returns one Part with two Options, and
 curl -s http://127.0.0.1:8000/public/products/11efbbf1-cf13-4164-8710-07614a1114af/configurator
 ```
 
-Note Black became the default automatically — it was simply the first bake to
-reach `completed` (§5.4). Nobody set it.
+Black holds `is_default` because it was set under the **old** first-baked-wins
+rule. Under the current rule nothing is auto-promoted, so a fresh product starts
+with `default_option_id: null` — Original. This row keeps Black until someone
+clears it with `PATCH set_as_default: false`.
 
 If this ever stops working: `404` → unpublished or soft-deleted; `parts: []` → the
 Part failed one of §6.1's filters, most often because a re-upload changed

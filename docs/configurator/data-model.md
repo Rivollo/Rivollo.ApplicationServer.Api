@@ -261,25 +261,23 @@ handful of rows — which makes the reaper sweep in §8.2 effectively free.
 
 ### Default-option rules
 
-- `is_default` may only be `true` on an option that is `isactive` **and**
+- **A part with no default shows the model's Original appearance.** That is the intended
+  starting state: `default_option_id: null` means "start on Original", and nothing assigns a
+  default on the seller's behalf.
+- `is_default` may only be **set** on an option that is `isactive` **and**
   `bake_status = 'completed'`. There is no column recording a *deferred* intent to become the
-  default, and none is wanted — see the two setters below.
-- **Automatic, first-baked-wins.** When an option's bake reaches `completed`, if the owning
-  part has no default, that option becomes the default. This is how a part gets a working
-  default without a second API call, and it is why `set_as_default` is not accepted on
-  create. **If the part already has a default, a completing bake never replaces it** —
-  promotion fills a vacancy, it does not compete for an occupied slot.
-- **Explicit,** via `PATCH /options/{id}` with `set_as_default: true`, once the option is
-  active and completed.
-- Setting a new default clears the previous one in the same transaction, mirroring
-  `repo.clear_default` / `color_variant_service.py:197-204`.
-- Deactivating the current default is rejected with `400` — set another default first,
-  mirroring `color_variant_service.py:189-195`.
-- Deleting the current default promotes the next suitable option — lowest `order_index` among
-  options that are `isactive` and `completed` — mirroring
-  `color_variant_service.delete_variant` (`color_variant_service.py:250-263`). If no option
-  qualifies, the part is left with no default and the shopper payload omits it (§9 of
-  [api-spec.md](api-spec.md#9-shopper-api)).
+  default, which is why `set_as_default` is not accepted on create.
+- **The only setter is explicit:** `PATCH /options/{id}` with `set_as_default: true`. A
+  completing bake never makes an option the default.
+- Setting a new default clears the previous one in the same transaction, via
+  `repo.clear_default`.
+- **Returning to Original:** `set_as_default: false` on the current default clears it; hiding
+  the default (`isactive: false`) clears it; deleting the default does **not** promote another
+  option. This deliberately diverges from `color_variant_service.py:189-195, 250-263`, which
+  rejects hiding the default and auto-promotes on delete.
+- A default whose recipe changes keeps the flag while it re-bakes. The shopper payload filters
+  it out meanwhile (§9 of [api-spec.md](api-spec.md#9-shopper-api)), so shoppers see Original
+  until the bake completes.
 - **API responses continue to expose `default_option_id` on the part.** It is a *computed*
   field — `next((o.id for o in part.options if o.is_default), None)` — never a stored column.
   In the shopper payload it is computed over the SURVIVING options and returns `null` when the
