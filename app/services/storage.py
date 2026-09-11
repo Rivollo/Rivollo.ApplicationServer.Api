@@ -3,18 +3,34 @@ import os
 import re
 from datetime import datetime, timedelta
 from typing import Optional, BinaryIO, List, Dict
+from urllib.parse import urlparse
 
 from app.core.config import settings
 
 try:
 	from azure.storage.blob import BlobServiceClient, ContentSettings
 	from azure.core.credentials import AzureNamedKeyCredential
+	from azure.core.exceptions import ResourceExistsError
 	_AZURE_AVAILABLE = True
 except Exception:
 	_AZURE_AVAILABLE = False
 	BlobServiceClient = None  # type: ignore
 	ContentSettings = None  # type: ignore
 	AzureNamedKeyCredential = None  # type: ignore
+	ResourceExistsError = Exception  # type: ignore
+
+
+# Configurator textures: the ONLY content types tbl_part_option_textures allows
+# (ck_option_texture_mime), mapped to the extension each one is stored under.
+# The extension is derived from this map rather than taken from the caller, so
+# no caller can contribute a raw path component.
+_CONFIGURATOR_TEXTURE_EXTENSIONS = {
+	"image/png": "png",
+	"image/jpeg": "jpg",
+}
+
+# Longest side of a single path token. Generous for a UUID or a sha256 hex.
+_CONFIGURATOR_TOKEN_MAX = 64
 
 
 class StorageService:
@@ -188,37 +204,101 @@ class StorageService:
 		blob_url = blob_client.url
 		return cdn_url, blob_url
 
-	def download_upload_blob_bytes(self, file_url: str) -> tuple[bytes, Optional[str], str]:
-		"""Download a blob addressed via a CDN URL.
+	# Raw blob URLs look like https://{account}.blob.core.windows.net/...
+	_BLOB_HOST_SUFFIX = ".blob.core.windows.net"
 
-		The CDN URL has the form:
+	@staticmethod
+	def _credentialed_account() -> Optional[str]:
+		"""The ONE storage account this service can authenticate against.
+
+		Mirrors _get_blob_service_client's precedence exactly — connection string
+		first, then AZURE_STORAGE_ACCOUNT — so acceptance can never drift from
+		what the client is actually bound to.
+
+		Deliberately NOT settings.all_blob_base_urls(): that list drives the
+		response-body CDN rewrite and may name accounts we hold no key for.
+		Accepting one of those here would turn a clear error into a 403 at read.
+		"""
+		for part in (settings.AZURE_STORAGE_CONN_STRING or "").split(";"):
+			if part.startswith("AccountName="):
+				account = part[len("AccountName="):].strip()
+				if account:
+					return account
+		return (settings.AZURE_STORAGE_ACCOUNT or "").strip() or None
+
+	@staticmethod
+	def _split_container_and_path(remainder: str, file_url: str) -> tuple[str, str]:
+		"""Split "{container}/{blob_path}"."""
+		slash = remainder.find("/")
+		if slash == -1:
+			raise RuntimeError(f"file_url has no blob path after container: {file_url}")
+		return remainder[:slash], remainder[slash + 1:]
+
+	def resolve_blob_location(self, file_url: str) -> tuple[str, str]:
+		"""(container, blob_path) for a URL this service can actually read.
+
+		Two accepted forms, and only two:
+
+		  1. ``{CDN_BASE_URL}/{container}/{blob_path}`` — parsed exactly as before,
+		     including its treatment of any query string, so existing callers are
+		     bit-for-bit unaffected.
+		  2. ``https://{account}.blob.core.windows.net/{container}/{blob_path}``
+		     where ``{account}`` is the account this service holds credentials for.
+
+		A blob URL on ANY OTHER account raises, naming both accounts. That is the
+		point: roughly two thirds of this database's mesh URLs live on storage
+		accounts this application has no key for, and silently accepting them
+		would turn a configuration problem into an authentication failure much
+		further down the call stack. No host is ever rewritten to another host.
+		"""
+		if not file_url:
+			raise RuntimeError("file_url is empty; cannot infer blob path")
+
+		cdn_base = (settings.CDN_BASE_URL or "").rstrip("/")
+		if cdn_base and file_url.startswith(f"{cdn_base}/"):
+			return self._split_container_and_path(
+				file_url[len(cdn_base) + 1:], file_url
+			)
+
+		parsed = urlparse(file_url)
+		host = (parsed.netloc or "").lower()
+		if host.endswith(self._BLOB_HOST_SUFFIX):
+			account = host[: -len(self._BLOB_HOST_SUFFIX)]
+			expected = self._credentialed_account()
+			if expected and account == expected.lower():
+				# parsed.path drops any query string and is not percent-decoded,
+				# matching how these paths were written.
+				return self._split_container_and_path(
+					parsed.path.lstrip("/"), file_url
+				)
+			raise RuntimeError(
+				f"file_url is on storage account {account!r}, but this application "
+				f"holds credentials only for {expected!r}; it cannot be read. "
+				f"Serve it through CDN_BASE_URL or configure that account."
+			)
+
+		if not cdn_base:
+			raise RuntimeError("CDN_BASE_URL is not configured")
+		raise RuntimeError(
+			f"file_url is neither a {cdn_base} URL nor a blob URL on the "
+			f"configured storage account; cannot infer blob path"
+		)
+	def download_upload_blob_bytes(self, file_url: str) -> tuple[bytes, Optional[str], str]:
+		"""Download a blob addressed via a CDN URL or a same-account blob URL.
+
+		Accepted forms are defined by resolve_blob_location:
 		    {CDN_BASE_URL}/{container}/{blob_path}
+		    https://{configured account}.blob.core.windows.net/{container}/{path}
 
 		The container is parsed directly from the URL — this correctly handles
 		both uploads (STORAGE_CONTAINER_UPLOADS) and media/product images
 		(STORAGE_CONTAINER_MEDIA) without hardcoding either.
 
 		Returns (content_bytes, content_type, filename).
-		Raises RuntimeError if CDN_BASE_URL is not set or the URL doesn't match.
+		Raises RuntimeError when the URL is on another storage account, or is
+		neither form.
 		"""
-		cdn_base = (settings.CDN_BASE_URL or "").rstrip("/")
-		if not cdn_base:
-			raise RuntimeError("CDN_BASE_URL is not configured")
-
-		cdn_prefix = f"{cdn_base}/"
-		if not file_url.startswith(cdn_prefix):
-			raise RuntimeError(
-				f"file_url does not start with CDN_BASE_URL ({cdn_base}); cannot infer blob path"
-			)
-
-		# Remainder is "{container}/{blob_path}"
-		remainder = file_url[len(cdn_prefix):]
-		slash = remainder.find("/")
-		if slash == -1:
-			raise RuntimeError(f"file_url has no blob path after container: {file_url}")
-
-		container = remainder[:slash]
-		blob_path = remainder[slash + 1:]
+		container, blob_path = self.resolve_blob_location(file_url)
 
 		client = self._get_blob_service_client()
 		blob_client = client.get_blob_client(container=container, blob=blob_path)
@@ -336,22 +416,130 @@ class StorageService:
 		blob_client.upload_blob(stream, overwrite=True, content_settings=settings_obj)
 		return self._cdn_url(container, blob_path), blob_client.url
 
-	def delete_blob_by_cdn_url(self, file_url: str) -> bool:
-		"""Delete a blob addressed by its CDN URL. Returns False if not found.
+	@staticmethod
+	def _configurator_path_token(value: str, label: str) -> str:
+		"""Validate one path segment and return it in a blob-safe form.
 
-		Used to purge superseded variant bakes. Never raises on a missing blob —
-		a purge that finds nothing to delete has already achieved its goal.
+		Rejects rather than scrubs: every token here is server-generated (a UUID,
+		a glb_version, a recipe hash), so anything unexpected is a bug upstream,
+		not user input to be tidied up. Silently rewriting it would hide that and
+		could collapse two distinct artifacts onto one path.
+
+		The one rewrite is ':' -> '-', because glb_version is prefix-discriminated
+		("asset:<uuid>" / "sha256:<hex>", ADR-006) and a colon in a URL path is
+		legal but reliably awkward in tooling. The mapping stays injective: the
+		prefixes differ, so no two versions can collide.
 		"""
-		cdn_base = (settings.CDN_BASE_URL or "").rstrip("/")
-		if not cdn_base or not file_url.startswith(f"{cdn_base}/"):
+		raw = (value or "").strip()
+		if not raw:
+			raise ValueError(f"Configurator texture {label} is empty")
+		if len(raw) > _CONFIGURATOR_TOKEN_MAX:
+			raise ValueError(
+				f"Configurator texture {label} is too long "
+				f"({len(raw)} > {_CONFIGURATOR_TOKEN_MAX})"
+			)
+		if ".." in raw:
+			raise ValueError(f"Configurator texture {label} must not contain '..'")
+		if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", raw):
+			raise ValueError(
+				f"Configurator texture {label} has characters that are not "
+				f"allowed in a blob path: {raw!r}"
+			)
+		return raw.replace(":", "-")
+
+	def upload_configurator_texture(
+		self,
+		*,
+		product_id: str,
+		glb_version: str,
+		option_id: str,
+		material_index: int,
+		recipe_hash: str,
+		content_type: str,
+		stream: BinaryIO,
+	) -> tuple[str, str]:
+		"""Upload one baked Configurator texture. Returns (cdn_url, blob_url).
+
+		The path is content-addressed, so the same recipe over the same model
+		always lands on the same blob:
+
+		    {container}/configurator/{product_id}/{glb_version}/{option_id}/{material_index}-{recipe_hash}.{ext}
+
+		Every component is server-generated and validated. The extension is
+		DERIVED from content_type (png / jpg) rather than supplied, because
+		tbl_part_option_textures.ck_option_texture_mime permits only image/png and
+		image/jpeg — accepting an extension would let the two disagree and would
+		hand the caller a raw path component.
+
+		Unlike every other upload in this service, this one passes
+		``overwrite=False``. The path already identifies the bytes, so an existing
+		blob IS the artifact we were about to write; treating that as success is
+		idempotent AND makes it impossible to clobber a different artifact. The
+		caller's bytes are written verbatim — no re-encoding, no resizing.
+		"""
+		extension = _CONFIGURATOR_TEXTURE_EXTENSIONS.get(content_type)
+		if extension is None:
+			raise ValueError(
+				f"Unsupported Configurator texture content type {content_type!r}. "
+				f"Expected one of "
+				f"{', '.join(sorted(_CONFIGURATOR_TEXTURE_EXTENSIONS))}."
+			)
+
+		if not isinstance(material_index, int) or isinstance(material_index, bool):
+			raise ValueError("Configurator texture material_index must be an int")
+		if material_index < 0:
+			raise ValueError(
+				f"Configurator texture material_index must be >= 0, got {material_index}"
+			)
+
+		product_token = self._configurator_path_token(product_id, "product_id")
+		version_token = self._configurator_path_token(glb_version, "glb_version")
+		option_token = self._configurator_path_token(option_id, "option_id")
+		hash_token = self._configurator_path_token(recipe_hash, "recipe_hash")
+
+		blob_path = (
+			f"configurator/{product_token}/{version_token}/{option_token}"
+			f"/{material_index}-{hash_token}.{extension}"
+		)
+
+		client = self._get_blob_service_client()
+		container = settings.STORAGE_CONTAINER_UPLOADS or "uploads"
+		blob_client = client.get_blob_client(container=container, blob=blob_path)
+		settings_obj = ContentSettings(  # type: ignore
+			content_type=content_type,
+			# Immutable: recipe_hash in the path changes whenever the bytes would.
+			cache_control="public, max-age=31536000, immutable",
+		)
+		try:
+			blob_client.upload_blob(
+				stream, overwrite=False, content_settings=settings_obj
+			)
+		except ResourceExistsError:
+			# Already stored by an earlier bake of this exact recipe. Nothing to
+			# do, and deliberately NOT an error: re-baking must be idempotent.
+			pass
+
+		return self._cdn_url(container, blob_path), blob_client.url
+
+	def delete_blob_by_cdn_url(self, file_url: str) -> bool:
+		"""Delete a blob by CDN or same-account blob URL. False if not deleted.
+
+		Used to purge superseded variant bakes and superseded Configurator
+		textures. Never raises: on a missing blob, or a URL this service cannot
+		resolve, it reports False. A purge that finds nothing to delete has
+		already achieved its goal.
+
+		Routed through resolve_blob_location so a same-account raw blob URL is
+		now purgeable too; previously it was silently skipped.
+		"""
+		try:
+			container, blob_path = self.resolve_blob_location(file_url)
+		except RuntimeError:
+			# Unreadable URL — nothing this service can delete. Returning False
+			# rather than raising is the long-standing contract here: callers
+			# purge best-effort and must not fail a delete over a stray URL.
 			return False
 
-		remainder = file_url[len(cdn_base) + 1:]
-		slash = remainder.find("/")
-		if slash == -1:
-			return False
-
-		container, blob_path = remainder[:slash], remainder[slash + 1:]
 		try:
 			client = self._get_blob_service_client()
 			client.get_blob_client(container=container, blob=blob_path).delete_blob()

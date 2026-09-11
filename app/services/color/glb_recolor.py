@@ -30,6 +30,7 @@ bufferViews by index (not absolute offset), so geometry stays valid.
 from __future__ import annotations
 
 import io
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,7 +38,9 @@ import numpy as np
 from PIL import Image as PILImage
 from pygltflib import GLTF2, BufferView, Image, Texture, TextureInfo
 
-from app.services.color import colors
+from app.services.color import colors, texture
+
+logger = logging.getLogger(__name__)
 
 # --- thresholds for automatic method selection -----------------------------
 _NEAR_WHITE_BRIGHTNESS = 0.82   # >= this and low saturation -> neutral -> factor
@@ -48,9 +51,6 @@ _NEAR_BLACK_BRIGHTNESS = 0.16   # <= this -> very dark -> remap
 # as the SAME visual part (AI mesh tools like Tripo split one part into many
 # materials). Materials sharing a base-colour image are always grouped.
 _GROUP_COLOR_DISTANCE = 42.0
-
-_REC709 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-
 
 # --------------------------------------------------------------------------- #
 # Data returned to the API layer
@@ -114,6 +114,31 @@ def _texture_source(tex) -> int | None:
         node = extensions.get(name)
         if isinstance(node, dict) and node.get("source") is not None:
             return node["source"]
+    return None
+
+
+# Formats this module can already recognise. glTF REQUIRES image.mimeType when
+# the image comes from a bufferView, so sniffing is a fallback for files that
+# bend the spec — not the primary path. Nothing new is invented here: PNG and
+# JPEG are what _load_pil_from_image already falls back to, and WEBP is already
+# expected via EXT_texture_webp.
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC = b"\xff\xd8\xff"
+
+
+def _sniff_image_mime(data: bytes) -> str | None:
+    """Best-effort MIME from magic bytes. None when unrecognised.
+
+    Deliberately does NOT decode the image — extraction hands back the original
+    encoded bytes, and opening a 4K texture just to name its format would undo
+    the point of that.
+    """
+    if data.startswith(_PNG_MAGIC):
+        return "image/png"
+    if data.startswith(_JPEG_MAGIC):
+        return "image/jpeg"
+    if len(data) >= 12 and data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
     return None
 
 
@@ -224,6 +249,118 @@ def inspect(path: Path) -> list[PartInfo]:
         part.group_id = gid
         part.center = centers.get(part.material_index)
     return parts
+
+
+# --------------------------------------------------------------------------- #
+# Source texture extraction — read-only, for texture-level bakers
+# --------------------------------------------------------------------------- #
+def extract_base_color_images(path: Path) -> dict[int, tuple[bytes, str]]:
+    """``material_index -> (original encoded image bytes, mime)``.
+
+    The read-only counterpart to ``recolor``: it pulls each material's
+    base-colour image straight out of the GLB's binary buffer and hands the bytes
+    back untouched. The GLB is never modified and never rewritten — the
+    Configurator bakes textures, not models (ADR-003), so it needs the pixels
+    without the container.
+
+    The bytes are the file's OWN encoded bytes, lifted from the bufferView. No
+    PIL decode and no re-encode happens here, which keeps the original quality
+    and keeps the cost proportional to the texture's size rather than its
+    resolution.
+
+    Materials absent from the result are materials with no usable source image.
+    That is the expected signal, not an error — the caller maps it to ``None``,
+    and ``texture_baker`` then produces no texture for that material (the same
+    outcome ``recolor`` reaches by downgrading it to ``factor``). A material is
+    omitted when:
+
+      * it has no ``baseColorTexture``;
+      * its image lives outside the GLB (an external ``uri``, so no
+        ``bufferView``);
+      * its bufferView or image index does not resolve;
+      * the bufferView is empty; or
+      * the MIME type cannot be established.
+
+    One bad material never costs the others: each is resolved independently and
+    failures are logged and skipped.
+    """
+    gltf = GLTF2().load(str(path))
+    blob = gltf.binary_blob() or b""
+
+    # Several materials routinely share one image (AI mesh tools split a part
+    # across materials). Read each image once and hand the same bytes to every
+    # material that references it.
+    by_image: dict[int, tuple[bytes, str] | None] = {}
+    extracted: dict[int, tuple[bytes, str]] = {}
+
+    for material_index in range(len(gltf.materials or [])):
+        try:
+            image_index = _base_color_image_index(gltf, material_index)
+        except Exception:  # noqa: BLE001 - a broken material must not stop the rest
+            logger.debug(
+                "Material %s: base-colour texture could not be resolved",
+                material_index,
+                exc_info=True,
+            )
+            continue
+
+        if image_index is None:
+            continue
+
+        if image_index not in by_image:
+            by_image[image_index] = _read_embedded_image(gltf, blob, image_index)
+
+        source = by_image[image_index]
+        if source is not None:
+            extracted[material_index] = source
+
+    return extracted
+
+
+def _read_embedded_image(
+    gltf: GLTF2, blob: bytes, image_index: int
+) -> tuple[bytes, str] | None:
+    """One image's encoded bytes + MIME, or None when it is not usable."""
+    try:
+        img = gltf.images[image_index]
+    except (IndexError, TypeError):
+        logger.debug("Image index %s does not resolve", image_index)
+        return None
+
+    if img.bufferView is None:
+        # An external uri or a data: uri. _load_pil_from_image rejects these too;
+        # extraction reports it as "no source" rather than raising, so one
+        # externally-referenced texture cannot fail a whole bake.
+        logger.debug(
+            "Image %s is not embedded in the GLB buffer (external uri)", image_index
+        )
+        return None
+
+    try:
+        data = _bufferview_bytes(gltf, blob, img.bufferView)
+    except (IndexError, TypeError):
+        logger.debug(
+            "Image %s references bufferView %s, which does not resolve",
+            image_index,
+            img.bufferView,
+        )
+        return None
+
+    if not data:
+        logger.debug("Image %s resolves to an empty bufferView", image_index)
+        return None
+
+    # glTF requires mimeType for a bufferView-backed image, so this is normally
+    # just a read. The sniff covers files that omit it.
+    mime = img.mimeType or _sniff_image_mime(data)
+    if not mime:
+        logger.debug(
+            "Image %s has no mimeType and an unrecognised format; skipping",
+            image_index,
+        )
+        return None
+
+    return data, mime
 
 
 # --------------------------------------------------------------------------- #
@@ -362,50 +499,15 @@ def _compute_groups(
 # Pixel recolour (luminance / remap)
 # --------------------------------------------------------------------------- #
 def _recolor_pixels(pil: PILImage.Image, hex_color: str, remap: bool) -> tuple[bytes, str]:
-    target = np.array(colors.hex_to_rgb(hex_color), dtype=np.float32) / 255.0
+    """Backwards-compatible alias for ``texture.recolor_pixels``.
 
-    has_alpha = pil.mode in ("RGBA", "LA", "P") and "A" in pil.getbands()
-    rgba = pil.convert("RGBA")
-    arr = np.asarray(rgba, dtype=np.float32) / 255.0
-    rgb, alpha = arr[..., :3], arr[..., 3:]
-
-    lum = rgb @ _REC709  # HxW brightness in 0..1
-
-    # The key idea: we don't multiply the target by the RAW brightness (that
-    # makes dark textures come out dark/muddy — the "merging" bug). Instead we
-    # build a "detail" map centred on 1.0 that captures only the *relative*
-    # light/dark variation (weave, shadows, stitching). Multiplying the target
-    # by a detail map centred on 1.0 means the AVERAGE pixel equals the target
-    # colour exactly, while highlights/shadows still read as highlights/shadows.
-    if remap:
-        # Near-black parts: spread the tiny brightness range out first, then
-        # centre it so the target colour is fully visible.
-        lo, hi = np.percentile(lum, 2), np.percentile(lum, 98)
-        if hi - lo < 1e-4:
-            hi = lo + 1e-4
-        norm = np.clip((lum - lo) / (hi - lo), 0.0, 1.0)  # 0..1
-        detail = 0.55 + 0.9 * norm  # centred a bit under 1, range ~0.55..1.45
-    else:
-        mean = float(lum.mean())
-        if mean < 1e-3:
-            mean = 1e-3
-        detail = np.clip(lum / mean, 0.35, 1.8)  # centred on 1.0
-
-    recolored = np.clip(detail[..., None] * target[None, None, :], 0.0, 1.0)
-    out = np.concatenate([recolored, alpha], axis=-1)
-    out_img = PILImage.fromarray((out * 255).astype(np.uint8), mode="RGBA")
-
-    buf = io.BytesIO()
-    if has_alpha:
-        # compress_level=1 rather than optimize=True: on a 2K texture the
-        # exhaustive filter search costs seconds for a few percent of size, and
-        # this file is transferred once to a CDN that serves it compressed.
-        out_img.save(buf, format="PNG", compress_level=1)
-        mime = "image/png"
-    else:
-        out_img.convert("RGB").save(buf, format="JPEG", quality=92, subsampling=0)
-        mime = "image/jpeg"
-    return buf.getvalue(), mime
+    The implementation moved to ``app/services/color/texture.py`` so the
+    Configurator's texture baker can reuse it without dragging in this module's
+    glTF container logic. Behaviour is unchanged — a test asserts both entry
+    points return byte-identical output. Kept under the old private name
+    because ``recolor()`` below calls it.
+    """
+    return texture.recolor_pixels(pil, hex_color, remap)
 
 
 # --------------------------------------------------------------------------- #

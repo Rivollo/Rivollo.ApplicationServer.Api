@@ -28,6 +28,7 @@ from app.api.routes.search import router as search_router
 from app.api.routes.health import router as health_router
 from app.api.routes.hotspots import router as hotspots_router
 from app.api.routes.color_variants import router as color_variants_router
+from app.api.routes.configurator import router as configurator_router, public_router as configurator_public_router
 from app.api.routes.dimensions import router as dimensions_router
 from app.api.routes.product_links import router as product_links_router
 from app.api.routes.support import router as support_router
@@ -85,6 +86,58 @@ async def _deactivation_loop() -> None:
             _bg_logger.exception("Deactivation loop outer error (will retry): %s", exc)
 
 
+# ---------------------------------------------------------------------------
+# Background task: Configurator stale-bake recovery
+# ---------------------------------------------------------------------------
+# A Configurator bake commits bake_status='baking' and then spends tens of
+# seconds on network and CPU. If this replica is recycled in that window the row
+# stays 'baking' forever and the seller sees a permanent spinner. The sweep moves
+# those rows back to 'pending' and re-enqueues them, or fails them once the
+# automatic attempt cap is reached.
+#
+# Deliberately the SAME shape as _deactivation_loop above rather than a second
+# scheduler: one startup pass, then a periodic loop, each with its own session.
+
+
+async def _run_configurator_bake_sweep(label: str) -> None:
+    """One sweep pass. Never raises."""
+    from app.core.db import get_db
+    from app.services.configurator.bake_service import BakeService
+
+    _bake_logger = logging.getLogger("rivollo.configurator_bake_sweep")
+    try:
+        async for db in get_db():
+            report = await BakeService.recover_stale_bakes(db)
+            if report.acted:
+                _bake_logger.info(
+                    "%s: examined=%d requeued=%d exhausted=%d skipped=%d",
+                    label,
+                    report.examined,
+                    len(report.requeued),
+                    len(report.exhausted),
+                    len(report.skipped),
+                )
+            break
+    except Exception as exc:
+        _bake_logger.exception("%s failed (will retry next interval): %s", label, exc)
+
+
+async def _configurator_bake_sweep_loop() -> None:
+    """Periodic stale-bake recovery, mirroring _deactivation_loop's contract.
+
+    - Waits one interval before the first run; the startup pass in lifespan has
+      already handled anything left over from the previous process.
+    - Opens its own DB session per run.
+    - Never raises.
+    """
+    interval = settings.CONFIGURATOR_BAKE_SWEEP_INTERVAL_SECONDS
+    _bake_logger = logging.getLogger("rivollo.configurator_bake_sweep")
+    _bake_logger.info("Configurator stale-bake sweep started (interval=%ds).", interval)
+    while True:
+        await asyncio.sleep(interval)
+        await _run_configurator_bake_sweep("periodic stale-bake sweep")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan — runs startup logic, yields, then shutdown logic."""
@@ -101,6 +154,15 @@ async def lifespan(app: FastAPI):
     deactivation_task = asyncio.create_task(_deactivation_loop())
     _logger.info("Background subscription deactivation task started.")
 
+    # Reclaim any bake the previous process abandoned mid-flight, before serving
+    # traffic. Awaited rather than spawned: it is one indexed query over the
+    # handful of rows in flight, and a seller polling immediately after a deploy
+    # should not be told "baking" about work that died with the old replica.
+    await _run_configurator_bake_sweep("startup stale-bake sweep")
+
+    bake_sweep_task = asyncio.create_task(_configurator_bake_sweep_loop())
+    _logger.info("Configurator stale-bake sweep task started.")
+
     yield  # <-- app is live here
 
     # --- Shutdown ---
@@ -108,6 +170,11 @@ async def lifespan(app: FastAPI):
     with suppress(asyncio.CancelledError):
         await deactivation_task
     _logger.info("Background subscription deactivation task stopped.")
+
+    bake_sweep_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await bake_sweep_task
+    _logger.info("Configurator stale-bake sweep task stopped.")
 
     if _token_task is not None:
         _token_task.cancel()
@@ -234,6 +301,8 @@ app.include_router(jobs_router, prefix=_api_prefix)
 app.include_router(assets_router, prefix=_api_prefix)
 app.include_router(hotspots_router, prefix=_api_prefix)
 app.include_router(color_variants_router, prefix=_api_prefix)
+app.include_router(configurator_router, prefix=_api_prefix)
+app.include_router(configurator_public_router, prefix=_api_prefix)
 app.include_router(dimensions_router, prefix=_api_prefix)
 app.include_router(product_links_router, prefix=_api_prefix)
 app.include_router(support_router, prefix=_api_prefix)
