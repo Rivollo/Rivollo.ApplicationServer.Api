@@ -289,6 +289,32 @@ class Settings(BaseSettings):
 	# toolchain (scripts/glb_compress). Runs after the GLB is downloaded from fal
 	# and before it is uploaded to Azure. On failure the original GLB is uploaded
 	# instead, so disabling this only stops compression from being attempted.
+	# --- Product Configurator baking -------------------------------------
+	# A bake commits bake_status='baking' and then spends tens of seconds on
+	# network and CPU. If the replica is recycled in that window the row stays
+	# 'baking' forever, so a sweep reclaims anything older than this.
+	# 15 minutes per docs/configurator/baking.md section 4.3.
+	CONFIGURATOR_BAKE_STALE_AFTER_SECONDS: int = Field(
+		default=15 * 60,
+		description="A bake still in `baking` after this long is treated as lost.",
+	)
+	# Same cadence as the subscription deactivation loop.
+	CONFIGURATOR_BAKE_SWEEP_INTERVAL_SECONDS: int = Field(
+		default=5 * 60,
+		description="How often the stale-bake sweep runs.",
+	)
+	# Rows reclaimed per sweep, so one sweep cannot flood the single-slot runner.
+	CONFIGURATOR_BAKE_SWEEP_BATCH: int = Field(
+		default=20,
+		description="Maximum stale bakes reclaimed per sweep.",
+	)
+	# AUTOMATIC recovery attempts only. An explicit seller-requested bake is
+	# never blocked by this. 3 per docs/configurator/baking.md section 4.5.
+	CONFIGURATOR_MAX_AUTOMATIC_BAKE_ATTEMPTS: int = Field(
+		default=3,
+		description="Automatic bake attempts before recovery gives up and fails the row.",
+	)
+
 	ENABLE_DRACO_COMPRESSION: bool = Field(default=True, description="Compress generated GLBs with Draco before upload to Azure.")
 
 	# Draco-compressed glTF package (model.gltf + model.bin + textures) stored as
