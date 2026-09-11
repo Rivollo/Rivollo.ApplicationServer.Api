@@ -106,8 +106,8 @@ Written as a specification rather than a script. Values in `price_inr` are
 |---|---|---|---|---|---|---|
 | pro | monthly | USD | 20 | 2000 | 1200 | `plan_TQ2m22UBRutnZu` |
 | pro | yearly | USD | 200 | 24000 | 100 | `plan_TQ8SZe3nf6a0d3` |
-| free | monthly | USD | 0 | 100 | 0 | NULL |
-| free | yearly | USD | 0 | 100 | 0 | NULL |
+| free | monthly | USD | 0 | 0 | 0 | NULL |
+| free | yearly | USD | 0 | 0 | 0 | NULL |
 
 Notes on the numbers, because several of them are load-bearing:
 
@@ -118,6 +118,11 @@ Notes on the numbers, because several of them are load-bearing:
   does through the `FIRST2MONTHS` offer.)
 - **`ai_credit_limit` decides what a USD customer receives.** Copy it from the
   matching INR row so entitlements are identical — 2000 monthly, 24000 yearly.
+- **Free is `0` credits.** Product creation is paid-only: every AI creation path
+  spends credits, and only `/createProductFromGlb` is free. On the price rows
+  this number is display only — what a signup actually receives is the free
+  plan's `max_ai_credits_month` row in `tbl_plan_features`, which must also be
+  `0`. Keep the two in step, or `/pricing` advertises credits nobody gets.
 - **`total_count`** is billing cycles before the subscription ends. 1200 months
   is a century; for annual keep it near 100, never 1200, which Razorpay can
   reject outright at checkout.

@@ -306,10 +306,13 @@ class LicensingService:
             # If we created it now, it won't have features. 
             # In a real environment, it should exist with features.
 
-        # Default limits for safety if features missing
+        # Default limits for safety if features missing. AI credits default to 0:
+        # product creation is paid-only (every AI creation path is gated on
+        # credits; only /createProductFromGlb is free), so a missing or deleted
+        # free-plan feature row must never hand a new signup free credits.
         limits = {
             "max_products": 2,
-            "max_ai_credits_month": 50,
+            "max_ai_credits_month": 0,
             "max_public_views": 1000,
             "max_galleries": 0,
         }

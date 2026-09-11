@@ -152,9 +152,10 @@ class SubscriptionService:
         """
         from app.database.subscription_repo import SubscriptionRepository
 
-        # Safety defaults — used only if free plan is missing from DB
+        # Safety defaults — used only if free plan is missing from DB. AI credits
+        # match LicensingService.create_free_plan_license: free signups get none.
         limits = {
-            "max_ai_credits_month": 50,
+            "max_ai_credits_month": 0,
             "max_public_views": 1000,
             "max_products": 2,
             "max_galleries": 0,
