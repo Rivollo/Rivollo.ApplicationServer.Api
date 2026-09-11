@@ -461,24 +461,29 @@ WHERE is_default`.
 
 API responses continue to expose `default_option_id` on the part as a **computed** field.
 
-**Two setters, and no third.** `set_as_default` is **not** accepted on create — a new option
-is always `pending`, `is_default` is only valid on a completed one, and no column records a
-deferred intent. Instead:
+**One setter — explicit.** *(Revised 2026-09-11; previously also first-baked-wins.)*
+A part with **no default shows the model's Original appearance**, and that is the intended
+starting state. `is_default` is set only by `PATCH /options/{id}` with
+`set_as_default: true`, once the option is active and completed. `set_as_default` is **not**
+accepted on create — a new option is always `pending`, and no column records a deferred intent.
 
-1. **Automatic, first-baked-wins** — the first option whose bake reaches `completed` becomes
-   the part's default *if the part has none*. It never displaces an existing default.
-2. **Explicit** — `PATCH /options/{id}` with `set_as_default: true`, once active and completed.
+Returning to Original is explicit too: `set_as_default: false` on the current default clears
+it, and hiding or deleting the default clears it without promoting a replacement.
 
-`set_as_default: false` is not part of the contract and is ignored: no documented operation
-removes a default without naming its replacement. This resolved a direct contradiction between
-api-spec.md (which had create "record" the intent and later apply it, needing a column that
-does not exist, plus a `400` that could not be delivered after `201`) and data-model.md §4.
+**Why the revision.** The original rule auto-promoted the first option whose bake completed,
+and on deleting the default promoted the next suitable option. Both made a choice on the
+seller's behalf — which option a shopper sees first — and left the seller's untouched model
+unreachable as a starting state once any option existed. With Original as the fallback,
+`default_option_id` means exactly one thing: a starting colour the seller deliberately chose.
+`set_as_default: false`, previously ignored because no operation removed a default without
+naming a replacement, now has one: Original.
 
 **Consequences.** No circular FK, no deferrable constraint, no two-step migration, and
 "at most one default per part" becomes a database guarantee instead of a service convention.
-The service still owns the *rules* — only an `isactive`, `completed` option may be the
-default; deactivating the default is rejected; deleting it promotes the next suitable option —
-all mirroring `color_variant_service.py:189-204, 250-263`. Also removes one FK from the
+The service still owns the *rules* — only an `isactive`, `completed` option may become the
+default; hiding or deleting the default returns the part to Original rather than choosing a
+replacement. This deliberately diverges from `color_variant_service.py:189-204, 250-263`,
+which rejects hiding the default and auto-promotes on delete. Also removes one FK from the
 surface ADR-010 has to coordinate.
 
 ---

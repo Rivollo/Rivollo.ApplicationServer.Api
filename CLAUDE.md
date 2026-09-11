@@ -88,9 +88,11 @@ required for image options. Sellers upload via the existing `POST /uploads/conte
 **The default option lives on the option.** `is_default BOOLEAN` + partial unique index
 `ux_part_options_one_default ON (part_id) WHERE is_default` — mirroring
 `ux_color_variants_one_default`. There is **no `default_option_id` column**; the API exposes
-it as a computed field. `set_as_default` is **not** accepted on create; a part's default comes
-from the first bake that reaches `completed` (never displacing an existing default), or from
-an explicit `PATCH`. `set_as_default: false` is ignored. ADR-011.
+it as a computed field. **A part with no default shows the model's Original appearance** —
+that is the intended starting state, not a gap. Nothing assigns a default automatically: not a
+completing bake, not deleting the old default. Only `PATCH set_as_default: true` sets one;
+`set_as_default: false`, hiding the default, or deleting it returns the part to Original.
+`set_as_default` is **not** accepted on create. ADR-011.
 
 **`auto` ambiguity is an error, not a guess.** When a part's materials suggest different
 methods there is no specified tie-break, so the write is rejected with `400` naming the

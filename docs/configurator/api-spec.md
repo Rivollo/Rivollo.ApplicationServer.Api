@@ -436,9 +436,8 @@ is `isactive` and `completed` ([data-model.md §4](data-model.md#4-tbl_part_opti
 and a newly created option is always `pending` — so there is nothing a create-time flag could
 legitimately set. There is deliberately no column recording a deferred intent.
 
-A part still acquires a default without a second call, by the rule in §7.4: **the first option
-whose bake reaches `completed` becomes the part's default if the part has none.** Explicit
-changes are made through `PATCH /options/{id}` once the option is active and completed.
+A part does **not** acquire a default automatically. Until the seller chooses one with
+`PATCH /options/{id}` (§7.4), the part starts on the model's Original appearance.
 
 **Method-specific field handling**
 
@@ -507,22 +506,22 @@ POST /parts/{part_id}/options    → recipe.method = "image", recipe.image_url =
 
 ### 7.4 How a part acquires its default option
 
-`is_default` is only ever `true` on an option that is `isactive` **and**
-`bake_status = "completed"`. Two things set it, and nothing else:
+**A part with no default shows the model's Original appearance.** That is the intended
+starting state, not a gap, and it is what a part has until the seller chooses otherwise.
 
-1. **Automatic, first-baked-wins.** When an option's bake reaches `completed`, if the owning
-   part has **no** default option, that option becomes the default. This is what gives a part
-   a working default without the seller making a second call.
-2. **Explicit, via `PATCH /options/{id}`** with `set_as_default: true`, once the option is
-   active and completed.
+`is_default` is set by exactly one thing: **`PATCH /options/{id}` with
+`set_as_default: true`**, once the option is `isactive` and `bake_status = "completed"`.
+Nothing sets it automatically — a completing bake does not, and deleting the current default
+does not promote a replacement.
 
-**If the part already has a default, a completing bake never replaces it.** Automatic
-promotion fills a vacancy; it does not compete for an occupied slot. A seller who wants a
-different default asks for one explicitly.
+A part returns to Original when its default is cleared: `set_as_default: false` on the default
+option, hiding it (`isactive: false`), or deleting it.
 
-A part legitimately has no default while none of its options has finished baking. The
-computed `default_option_id` is `null` then, and the shopper payload omits the part entirely
-(§9 — a part with zero surviving options is filtered out).
+> **Revised 2026-09-11.** This section previously specified *first-baked-wins*: the first
+> option to finish baking became the default automatically, and deleting the default promoted
+> the next suitable option. Both were removed so that the untouched model is the starting state
+> and `default_option_id` only ever reflects a choice the seller made. See
+> [ADR-011](decisions.md#adr-011).
 
 ### `GET /options/{option_id}` · `PATCH /options/{option_id}` · `DELETE /options/{option_id}`
 
@@ -535,16 +534,12 @@ computed `default_option_id` is `null` then, and the shopper payload omits the p
   `bake_status == "completed"`; otherwise `400`. Setting it clears the previous default in
   the same transaction (`repo.clear_default`, `color_variant_service.py:197-204`), and the
   partial unique index `ux_part_options_one_default` is the backstop.
-- `set_as_default: false` is **not** part of the contract and is ignored. There is no
-  operation that removes a default without naming its replacement: a part's default changes by
-  promoting another option, or disappears when the default option is deleted (below).
-- Deactivating the current default is `400` — set another default first, mirroring
-  `color_variant_service.py:189-195`.
-- `DELETE` purges blobs before rows. Deleting the current default promotes the next suitable
-  option — lowest `order_index` among options that are `isactive` and `completed` — mirroring
-  `color_variant_service.delete_variant` (`color_variant_service.py:250-263`). If none
-  qualifies the part is left with no default, and the computed `default_option_id` becomes
-  `null`.
+- `set_as_default: false` on the current default **clears it**, returning the part to
+  Original. On an option that is not the default it is a no-op.
+- Deactivating the current default is allowed and **clears the default**, returning the part
+  to Original — a hidden option cannot be the default.
+- `DELETE` purges blobs before rows. Deleting the current default does **not** promote another
+  option: the part returns to Original and `default_option_id` becomes `null`.
 
 ---
 
@@ -696,15 +691,15 @@ Read-only. Returns only what the viewer renders.
 exactly as in §6. The raw `is_default` flag is not exposed — the shopper needs to know which
 option to load first, not the internal representation of that fact.
 
-**It is `null` when the configured default did not survive filtering** — because it is still
-baking, or was hidden. It is NEVER substituted with another option. `default_option_id` means
-"the option this seller configured as the default"; the first surviving option is merely the
-first, and returning it would report a choice the seller never made, indistinguishable from a
-real one. A viewer that receives `null` applies its own fallback knowingly.
+**`null` means "start on Original"** — show the model as uploaded, with no option applied.
+That is the case when the seller has not chosen a default, and also when their chosen default
+did not survive filtering (it is re-baking after a recipe change). It is NEVER substituted with
+another option: `default_option_id` means "the option this seller deliberately chose", and
+returning the first surviving option would report a choice the seller never made.
 
 A part whose only options are unbaked is dropped entirely (a part with zero surviving options
-is filtered out), so `null` here means "this part has visible options but no configured
-default among them", not "this part is unusable".
+is filtered out), so a part that *is* present with `null` has visible options — the shopper
+simply starts on Original and can pick one.
 
 Note that `recipe.image_url` being excluded is deliberate: it points into the seller's own
 upload namespace. The shopper receives only the **copied** texture URLs under

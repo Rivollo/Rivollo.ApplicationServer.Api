@@ -124,12 +124,11 @@ class ShopperService:
         # Computed over the SURVIVING options only, and NOT substituted when the
         # configured default is filtered out.
         #
-        # `default_option_id` means "the default this seller configured". If that
-        # option is still baking or has been hidden, the honest answer is null —
-        # the first surviving option is merely the first, and returning it would
-        # tell the viewer a seller made a choice they did not make. A null lets
-        # the viewer apply its own documented fallback knowingly; a substituted
-        # id is indistinguishable from a real configuration.
+        # `default_option_id` means "the starting option this seller chose". When
+        # the seller has chosen none - or their choice is re-baking after a recipe
+        # change - the honest answer is null, which the viewer renders as Original:
+        # the model as uploaded. The first surviving option is merely the first;
+        # returning it would tell the viewer a seller made a choice they did not make.
         default_option_id = next(
             (v.option.id for v in options if v.option.is_default), None
         )
