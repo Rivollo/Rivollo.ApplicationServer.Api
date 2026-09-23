@@ -438,6 +438,11 @@ class ModelVariantService:
             )
             # No ProductAssetMapping, on purpose: see the module docstring.
             repo.add(db, asset)
+            # The asset row must exist before the variant's FK names it. The
+            # unit of work cannot work that out: glb_asset_id is a plain column
+            # with no relationship(), so without this flush the variant can be
+            # inserted first and fk_model_variants_glb_asset fails.
+            await repo.flush(db)
             repo.add(db, variant)
             await db.commit()
             await db.refresh(variant)
