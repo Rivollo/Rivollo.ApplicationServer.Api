@@ -638,6 +638,16 @@ class ConfiguratorRepository:
         db.add_all(list(instances))
 
     @staticmethod
+    async def flush(db: AsyncSession) -> None:
+        """Send pending inserts without committing.
+
+        Needed when a row references another added in the same transaction by
+        plain id: the unit of work orders inserts from ``relationship()``
+        links, and a bare ForeignKey column gives it nothing to sort by.
+        """
+        await db.flush()
+
+    @staticmethod
     async def delete(db: AsyncSession, instance: object) -> None:
         """Delete one row. Cascades to children via ON DELETE CASCADE.
 

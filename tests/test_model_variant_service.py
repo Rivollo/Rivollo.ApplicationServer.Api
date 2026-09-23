@@ -59,6 +59,7 @@ class FakeRepo:
     def __init__(self):
         self.product = SimpleNamespace(id=PRODUCT, created_by=OWNER)
         self.added = []
+        self.flushed = []
         self.next_order = 1
 
     async def get_owned_product(self, db, product_id, user_id, *, for_update=False):
@@ -71,6 +72,12 @@ class FakeRepo:
 
     def add(self, db, instance):
         self.added.append(instance)
+
+    async def flush(self, db):
+        # Records WHAT had been added when the flush happened: the asset row
+        # must already be in, or its FK from the variant has nothing to point
+        # at (the real session inserts in relationship order, not add order).
+        self.flushed.append(tuple(type(i).__name__ for i in self.added))
 
 
 class FakeStorage:
@@ -171,6 +178,21 @@ async def test_creates_one_asset_and_one_variant_and_no_mapping(env):
     assert variant.order_index == 1
     assert variant.created_by == OWNER
     assert created.variant is variant
+
+
+async def test_the_asset_row_is_flushed_before_the_variant_references_it(env):
+    """Regression: the variant's FK failed in dev because the asset went second.
+
+    glb_asset_id is a plain FK column with no relationship(), so SQLAlchemy's
+    unit of work has nothing to order the two inserts by and can send the
+    variant first - fk_model_variants_glb_asset then fails.
+    """
+    await create(db=FakeSession())
+
+    assert env.repo.flushed == [("ProductAsset",)], (
+        "the asset must be flushed on its own, before the variant is added"
+    )
+    assert [type(o).__name__ for o in env.repo.added] == ["ProductAsset", "ProductModelVariant"]
 
 
 async def test_compressed_upload_records_sizes_and_keeps_the_original(env):
