@@ -28,7 +28,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.configurator_repo import configurator_repository as repo
-from app.models.models import PartOption, PartOptionTexture, ProductPart
+from app.models.configurator import PartOption, PartOptionTexture, ProductPart
 from app.schemas.configurator import (
     MAX_OPTIONS_PER_PART,
     PartOptionCreate,
@@ -118,7 +118,7 @@ class OptionService:
         # when the bake completes — a part with no default shows the model's
         # Original appearance, and only an explicit PATCH picks a starting option.
         # See api-spec.md 7.4.
-        mesh = await material_service.get_mesh_context(db, part.product_id)
+        mesh = await material_service.get_mesh_context(db, part.product_id, part.variant_id)
         PartService.require_current_glb(part, mesh)
 
         stored_recipe = await OptionService._prepare_recipe(
@@ -175,7 +175,7 @@ class OptionService:
         needs_rebake = False
 
         if payload.recipe is not None:
-            mesh = await material_service.get_mesh_context(db, part.product_id)
+            mesh = await material_service.get_mesh_context(db, part.product_id, part.variant_id)
             PartService.require_current_glb(part, mesh)
 
             # Stored-state rule: switching an EXISTING option to an image recipe

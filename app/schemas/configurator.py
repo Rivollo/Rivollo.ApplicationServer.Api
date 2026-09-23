@@ -343,6 +343,8 @@ class ProductPartResponse(BaseModel):
 
     id: uuid.UUID
     product_id: uuid.UUID
+    # None = the product's original model; otherwise its model variant (ADR-014).
+    variant_id: Optional[uuid.UUID] = None
     name: str
     slug: str
     material_indices: list[int]
@@ -469,9 +471,90 @@ class BakeStatusResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 # Shopper payload envelope
 # --------------------------------------------------------------------------- #
+class PublicModelVariant(BaseModel):
+    """One shape of the product for the shopper (ADR-014).
+
+    ``id`` is "original" for the product's own model. A separate shopper
+    contract: never carries compression state, original-upload URLs, blob URLs
+    or audit columns.
+    """
+
+    id: str
+    name: str
+    glb_url: str
+    usdz_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    is_default: bool
+    order_index: int
+    # Bounding box in metres for true-to-scale display; None when unmeasured
+    # (always, for the original model).
+    width_m: Optional[float] = None
+    depth_m: Optional[float] = None
+    height_m: Optional[float] = None
+    parts: list[PublicProductPart] = Field(default_factory=list)
+
+
 class PublicConfiguratorResponse(BaseModel):
     product_id: uuid.UUID
     product_name: str
+    # Always the ORIGINAL model — unchanged for clients that predate variants.
     model_url: Optional[str] = None
     ar_model_url: Optional[str] = None
     parts: list[PublicProductPart] = Field(default_factory=list)
+    # Present only when the product has extra model variants; the route drops
+    # the key otherwise, so a single-model product's payload is unchanged.
+    variants: Optional[list[PublicModelVariant]] = None
+
+
+# --------------------------------------------------------------------------- #
+# Model variants (ADR-014) — seller contracts
+#
+# An extra variant is one more shape of the product, with its own GLB. The
+# product's original model is not a row; list endpoints present it with
+# ``is_original = true``. Shopper payloads get their own schema (step e) and
+# never carry the compression or original-upload fields below.
+# --------------------------------------------------------------------------- #
+CompressionStatus = Literal["compressed", "fallback_original"]
+
+MODEL_VARIANT_NAME_MAX = 100
+
+
+class ModelVariantResponse(BaseModel):
+    # "original" for the product's original model, which has no row; otherwise
+    # the variant's UUID. The same token addresses both in the variant-scoped
+    # parts and materials routes.
+    id: str
+    product_id: uuid.UUID
+    name: str
+    glb_url: Optional[str]
+    usdz_url: Optional[str] = None
+    thumbnail_url: Optional[str]
+    order_index: int
+    is_original: bool = False
+    isactive: bool = True
+    # The fields below are None for the original model: it was not uploaded
+    # through this pipeline.
+    compression_status: Optional[CompressionStatus] = None
+    compression_error: Optional[str] = None
+    original_size_bytes: Optional[int] = None
+    compressed_size_bytes: Optional[int] = None
+    width_m: Optional[float] = None
+    depth_m: Optional[float] = None
+    height_m: Optional[float] = None
+    created_at: Optional[datetime] = None
+
+
+class ModelVariantCreateResponse(ModelVariantResponse):
+    # Advisory only — the upload succeeded. E.g. implausible dimensions, or
+    # compression falling back to the original file.
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ModelVariantUpdate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=MODEL_VARIANT_NAME_MAX)
+
+
+class ModelVariantReorder(BaseModel):
+    # Every live extra variant of the product, in the new order. The original
+    # model is always first and is not listed.
+    variant_ids: list[uuid.UUID] = Field(default_factory=list, max_length=200)

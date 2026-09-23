@@ -1,16 +1,17 @@
 # Product Configurator — Data Model
 
-> Status: **FINALIZED design, not implemented.** No table, column, ORM model, or migration
-> described here exists yet. Facts about the *existing* schema are tagged **CONFIRMED**;
-> design choices are **PROPOSED**; anything that cannot be settled from this repository is
-> **NEEDS VERIFICATION**.
+> Status: **implemented** by revisions `c7a4e0d51b83` (parts, options, textures) and
+> `e3b9c6a1d27f` (model variants, §14). Sections still headed PROPOSED record the design as
+> it was agreed; the models in `app/models/configurator.py` and the migrations are authoritative.
+> Facts about the *existing* schema are tagged **CONFIRMED**; anything that cannot be settled
+> from this repository is **NEEDS VERIFICATION**.
 
 See [architecture.md](architecture.md) for context and [decisions.md](decisions.md) for the
 ADRs and open questions this document depends on.
 
-**Phase-1 shape: exactly three tables.** `tbl_product_parts`, `tbl_part_options`,
-`tbl_part_option_textures`. No normalized material table, no separate texture-option table,
-no `option_type` / `source_type` discriminator column.
+**Shape: four tables.** `tbl_product_model_variants` (§14, [ADR-014](decisions.md#adr-014)),
+`tbl_product_parts`, `tbl_part_options`, `tbl_part_option_textures`. No normalized material
+table, no separate texture-option table, no `option_type` / `source_type` discriminator column.
 
 ---
 
@@ -122,6 +123,12 @@ order. Recorded as [ADR-010](decisions.md#adr-010).
         │ 1
         │                           ON DELETE CASCADE
         │ N
+   tbl_product_model_variants       EXTRA shapes — "3 Seater", "Corner" (§14)
+        │  · glb_asset_id / usdz_asset_id → tbl_product_assets (SET NULL)
+        │  · the original model has no row; parts with variant_id NULL are its
+        │ 1
+        │                           ON DELETE CASCADE
+        │ N
    tbl_product_parts                "Seat", "Backrest", "Legs"
         │  · owns a set of glTF material indices (JSONB)
         │  · pinned to a specific GLB version
@@ -150,9 +157,10 @@ A seller-defined, persisted, configurable region of a product.
 | Column | Type | Null | Default | Notes |
 |---|---|---|---|---|
 | `id` | `UUID` | no | `gen_random_uuid()` | PK |
-| `product_id` | `UUID` | no | — | FK → `tbl_products(id)` `ON DELETE CASCADE` — **the only new FK to `tbl_products`**, see §1.4 |
+| `product_id` | `UUID` | no | — | FK → `tbl_products(id)` `ON DELETE CASCADE` — a new FK to `tbl_products`, see §1.4 (the other is `tbl_product_model_variants.product_id`, §14) |
+| `variant_id` | `UUID` | **yes** | `NULL` | FK → `tbl_product_model_variants(id)` `ON DELETE CASCADE`. **NULL = the product's original model**; otherwise an extra variant of the same product. Added by `e3b9c6a1d27f` |
 | `name` | `TEXT` | no | — | seller-facing, 1-100 chars (enforced in the schema layer) |
-| `slug` | `TEXT` | no | — | URL-safe, unique per product, derived server-side |
+| `slug` | `TEXT` | no | — | URL-safe, unique per product, derived server-side (suffixed when two models share a part name) |
 | `material_indices` | `JSONB` | no | `'[]'::jsonb` | array of non-negative ints — the glTF material indices this part owns. **Validated in `PartService`, not by a CHECK.** See §9 |
 | `material_type` | `TEXT` | yes | `NULL` | `'fabric' \| 'wood' \| 'metal' \| 'leather' \| 'plastic'` — informational, drives editor defaults |
 | `order_index` | `INTEGER` | no | `0` | display order in editor and viewer |
@@ -170,7 +178,7 @@ guaranteed by a partial unique index — see §4 and [ADR-011](decisions.md#adr-
 ### Constraints
 
 ```sql
-CONSTRAINT uq_parts_product_slug  UNIQUE (product_id, slug)
+CONSTRAINT uq_parts_product_slug  UNIQUE (product_id, slug)   -- unchanged by e3b9c6a1d27f
 CONSTRAINT ck_parts_material_type CHECK (material_type IS NULL OR material_type IN
                                     ('fabric','wood','metal','leather','plastic'))
 ```
@@ -186,6 +194,7 @@ wrong, matching the precedent of `ck_variant_swatch_hex`.
 
 ```sql
 CREATE INDEX ix_parts_product_order  ON tbl_product_parts (product_id, order_index);
+CREATE INDEX ix_parts_variant_order  ON tbl_product_parts (variant_id, order_index);
 CREATE INDEX ix_parts_product_active ON tbl_product_parts (product_id)
     WHERE isactive AND shopper_selectable;
 ```
@@ -611,8 +620,10 @@ that the staleness rule in §6 depends on.
 
 ## 9. Material-index uniqueness: JSONB + a row lock
 
-**The invariant.** Within a product, a given `material_index` belongs to **at most one**
-active part. Two parts claiming material 3 means two options could paint the same mesh with
+**The invariant.** Within one **model** — the original (`variant_id IS NULL`) or one extra
+model variant — a given `material_index` belongs to **at most one** active part
+([ADR-014](decisions.md#adr-014); indices are only meaningful against one GLB). The row lock
+stays on the product. Two parts claiming material 3 means two options could paint the same mesh with
 conflicting textures, and the viewer would show whichever loaded last. No business reason to
 allow overlap has been identified, so overlap is forbidden.
 
@@ -674,9 +685,12 @@ tbl_users
    │ created_by  — plain UUID on Configurator tables, NO FK (§1.4)
    ▼
 tbl_products ──── created_by is the ownership anchor
-   │ ON DELETE CASCADE          ← the one new FK to tbl_products
+   │ ON DELETE CASCADE          ← new FK to tbl_products (§14)
    ▼
-tbl_product_parts
+tbl_product_model_variants ──── glb_asset_id / usdz_asset_id → tbl_product_assets (SET NULL)
+   │ ON DELETE CASCADE
+   ▼
+tbl_product_parts ──── product_id → tbl_products CASCADE (the original new FK)
    │ ON DELETE CASCADE
    ▼
 tbl_part_options
@@ -709,8 +723,8 @@ touches a seller's own upload.
 
 ## 11. ORM sketch (PROPOSED)
 
-Place in `app/models/models.py` beside the existing colour-variant models, following their
-style exactly.
+Implemented in `app/models/configurator.py` (moved out of `app/models/models.py`), following the
+colour-variant models' style.
 
 ```python
 class ProductPart(UUIDMixin, AuditMixin, Base):
@@ -820,6 +834,93 @@ Per §1.4 and `ACCOUNT_PURGE_JOB_HANDOFF.md` §25, `Rivollo.AccountPurge.Job` mu
    during *product* teardown rather than by user-prefix enumeration.
 5. Confirm the job's own prefix-enumeration handles the extra path depth
    (`{glb_version}/{option_id}/`).
+6. **Model variants (`e3b9c6a1d27f`, §14)** — add `tbl_product_model_variants` to the
+   inventory and cascade list; allow-list `tbl_product_model_variants.product_id →
+   tbl_products` in assertion 9; record that `glb_asset_id` / `usdz_asset_id → tbl_product_assets`
+   are `ON DELETE SET NULL`, so its existing step order (assets before products) keeps working;
+   inventory `thumbnail_blob_url` and `original_glb_blob_url` in Phase 0.
 
 **Sequencing:** open this with the purge-job owner as soon as implementation starts. It is
 cross-repository and is the longest-lead item in the plan.
+
+---
+
+## 14. `tbl_product_model_variants` — extra model variants (implemented, `e3b9c6a1d27f`)
+
+One row per **extra shape** of a product ("3 Seater", "Corner"), each its own GLB. The
+product's original model — the GLB mapped to it today — has **no row**: it stays the
+product's model and its permanent default. See [ADR-014](decisions.md#adr-014).
+
+| Column | Type | Null | Default | Notes |
+|---|---|---|---|---|
+| `id` | `UUID` | no | `gen_random_uuid()` | PK |
+| `product_id` | `UUID` | no | — | FK → `tbl_products(id)` `ON DELETE CASCADE` — new FK, purge assertion A14 |
+| `name` | `TEXT` | no | — | seller-facing, 1-100 chars |
+| `glb_asset_id` | `UUID` | yes\* | — | FK → `tbl_product_assets(id)` `ON DELETE SET NULL` — the served GLB, **unmapped**; `glb_version = 'asset:' \|\| glb_asset_id` |
+| `usdz_asset_id` | `UUID` | yes | — | FK → `tbl_product_assets(id)` `ON DELETE SET NULL` — per-variant USDZ for iOS AR |
+| `thumbnail_url`, `thumbnail_blob_url` | `TEXT` | yes | — | captured in the editor with `toBlob()`; derived, so columns rather than an asset row |
+| `original_glb_url`, `original_glb_blob_url` | `TEXT` | yes | — | the seller's untouched upload when it differs from the served file; **never** an asset row. NULL when the served file IS the upload (fallback, or already Draco) |
+| `original_size_bytes` | `BIGINT` | yes | — | size of the upload |
+| `compressed_size_bytes` | `BIGINT` | yes | — | size of the served file when compressed; NULL on fallback |
+| `compression_status` | `TEXT` | no | — | `compressed` \| `fallback_original` |
+| `compression_error` | `TEXT` | yes | — | why compression fell back |
+| `width_m`, `depth_m`, `height_m` | `FLOAT` | yes | — | bounding box in metres, glTF Y-up: width = X, height = Y, depth = Z |
+| `order_index` | `INTEGER` | no | `1` | the original model is implicitly 0 |
+| `isactive` | `BOOLEAN` | no | `true` | soft delete |
+| audit columns | | | | `created_by` / `updated_by` plain UUIDs, **no FK** |
+
+\* Nullable only because of `ON DELETE SET NULL`: the purge deletes `tbl_product_assets` before
+`tbl_products`. The service always writes it.
+
+```sql
+CONSTRAINT ck_model_variants_compression_status
+    CHECK (compression_status IN ('compressed', 'fallback_original'))
+CONSTRAINT ck_model_variants_dimensions  CHECK (each of width_m/depth_m/height_m IS NULL OR >= 0)
+-- Full (not partial) indexes: they serve the account purge's product -> variant
+-- CASCADE and the asset -> variant SET NULL lookups, which ignore isactive.
+CREATE INDEX ix_model_variants_product_order ON tbl_product_model_variants (product_id, order_index);
+CREATE INDEX ix_model_variants_glb_asset     ON tbl_product_model_variants (glb_asset_id);
+CREATE INDEX ix_model_variants_usdz_asset    ON tbl_product_model_variants (usdz_asset_id);
+-- and on tbl_product_parts:
+CREATE INDEX ix_parts_variant_order ON tbl_product_parts (variant_id, order_index);
+```
+
+### 14.1 Why nothing existing changes
+
+Every reader of a product's files — product lists and thumbnails, `GET /products/{id}` and
+`/assets`, the Configurator, colour variants, `Rivollo.Viewer.Api`, the USDZ job — joins
+through `tbl_product_asset_mapping`. A variant's GLB row has **no mapping row**, so none of
+them can see it. Variants create no `tbl_products` rows, so product lists are unchanged.
+
+### 14.2 The migration is purely additive
+
+`e3b9c6a1d27f` creates the table and its indexes, and adds the nullable
+`tbl_product_parts.variant_id` with its FK and index. It writes **no data**, drops **nothing**,
+and does not touch `tbl_products`, `tbl_product_assets` or `tbl_product_asset_mapping`.
+`downgrade()` drops them again; parts of extra variants then read as stale original-model
+parts (their `glb_version` names another GLB), and variant blobs are orphaned, not deleted.
+
+### 14.3 Verifying it on a database (read-only)
+
+After `alembic upgrade head`, all of these must hold:
+
+```sql
+SELECT count(*) FROM tbl_product_model_variants;                 -- 0: nothing is backfilled
+SELECT count(*) FROM tbl_product_parts WHERE variant_id IS NOT NULL;  -- 0: no part rewritten
+-- Unchanged from before the upgrade (take both counts before and after):
+SELECT count(*) FROM tbl_product_asset_mapping;
+SELECT count(*) FROM tbl_product_assets;
+```
+
+After uploading a variant through `POST /products/{id}/configurator/model-variants`:
+
+```sql
+SELECT v.id, v.name, v.compression_status, v.original_size_bytes, v.compressed_size_bytes,
+       v.width_m, v.depth_m, v.height_m, a.asset_id, a.image
+  FROM tbl_product_model_variants v
+  JOIN tbl_product_assets a ON a.id = v.glb_asset_id
+ WHERE v.product_id = :product_id;
+-- The variant's asset must have NO mapping row (this must return 0):
+SELECT count(*) FROM tbl_product_asset_mapping m
+  JOIN tbl_product_model_variants v ON v.glb_asset_id = m.product_asset_id;
+```

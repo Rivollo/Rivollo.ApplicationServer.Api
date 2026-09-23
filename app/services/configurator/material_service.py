@@ -22,6 +22,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,8 +68,15 @@ class MaterialService:
         return f"asset:{asset_id}"
 
     @staticmethod
-    async def get_mesh_context(db: AsyncSession, product_id: uuid.UUID) -> MeshContext:
-        """Resolve and inspect the product's current GLB.
+    async def get_mesh_context(
+        db: AsyncSession,
+        product_id: uuid.UUID,
+        variant_id: Optional[uuid.UUID] = None,
+    ) -> MeshContext:
+        """Resolve and inspect one model's GLB.
+
+        ``variant_id=None`` is the product's original model, resolved as it
+        always was; otherwise the live model variant's own GLB (ADR-014).
 
         Caller must already have established ownership of ``product_id`` — this
         does not check it, and calling it first would let an attacker probe
@@ -78,7 +86,7 @@ class MaterialService:
         meshes are 40-80 MB). ``model_cache`` makes the second and subsequent
         calls for the same model cheap.
         """
-        asset = await repo.get_product_mesh_asset(db, product_id)
+        asset = await repo.get_model_mesh_asset(db, product_id, variant_id)
         if asset is None or not asset.image:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=NO_MODEL_DETAIL
@@ -109,6 +117,7 @@ class MaterialService:
     async def list_materials(
         db: AsyncSession,
         product_id: uuid.UUID,
+        variant_id: Optional[uuid.UUID] = None,
     ) -> tuple[str, str, list[dict]]:
         """(glb_version, model_url, materials) for the Part Editor.
 
@@ -116,7 +125,7 @@ class MaterialService:
         the route layer owns serialisation; ``assigned_part_id`` is filled in by
         the caller, which is the layer that knows about parts.
         """
-        asset = await repo.get_product_mesh_asset(db, product_id)
+        asset = await repo.get_model_mesh_asset(db, product_id, variant_id)
         if asset is None or not asset.image:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=NO_MODEL_DETAIL

@@ -721,6 +721,129 @@ and separately immutable-cached, so a short TTL on the manifest is enough.
 
 ---
 
+## 9a. Model variants ([ADR-014](decisions.md#adr-014))
+
+An extra model variant is another **shape** of a product with its own GLB. The product's
+original model stays its model and permanent default; it has no variant row. Every route here
+answers **404** while `ENABLE_MODEL_VARIANTS` is `false`; it is **on by default**, so an
+environment on this build needs migration `e3b9c6a1d27f` applied.
+
+### `POST /products/{product_id}/configurator/model-variants` → `201`
+
+`multipart/form-data`, the same style as `POST /createProductFromGlb`:
+
+| Field | Type | Required | Rules |
+|---|---|---|---|
+| `name` | text | yes | trimmed, 1–100 chars |
+| `glb` | file | yes | `.glb`, binary glTF 2.0 with at least one mesh, at most `MAX_VARIANT_GLB_BYTES` (default 150 MB) |
+| `thumbnail` | file | no | PNG / JPEG / WebP, at most `MAX_VARIANT_THUMBNAIL_BYTES` (default 5 MB). Usually sent later, after the editor captures `toBlob()` |
+
+What the server does, in order: ownership (404) → file checks → read material/mesh names and
+the bounding box → Draco-compress with `glb_compression_service` (skipped if the upload is
+already Draco) → re-read the compressed file and require identical material and mesh names in
+the same order → upload to `{user_id}/{product_id}/model-variants/{variant_id}/` → insert one
+`tbl_product_assets` row (asset 9, **no mapping row**) and one variant row. If compression
+fails or changes a name, the original file is served, `compression_status` is
+`fallback_original`, a warning is logged and returned.
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "7f3c…",
+    "product_id": "…",
+    "name": "Corner",
+    "glb_url": "https://cdn…/dev/{user}/{product}/model-variants/7f3c…/model3f2a1.glb",
+    "thumbnail_url": null,
+    "order_index": 1,
+    "is_original": false,
+    "isactive": true,
+    "compression_status": "compressed",
+    "compression_error": null,
+    "original_size_bytes": 48211000,
+    "compressed_size_bytes": 9120000,
+    "width_m": 2.9, "depth_m": 2.1, "height_m": 0.8,
+    "created_at": "2026-09-22T10:15:00Z",
+    "warnings": []
+  }
+}
+```
+
+`width_m` / `height_m` / `depth_m` are the model's bounding box in metres (glTF is Y-up:
+width = X, height = Y, depth = Z). `warnings` is advisory — the variant was created. It
+flags a largest side under 0.1 m or over 10 m (usually a units problem), an unmeasurable
+model, or a compression fallback.
+
+| Status | When |
+|---|---|
+| 400 | bad `productId`, empty or over-long `name`, not `.glb`, empty file, not a glTF 2.0 GLB, no meshes, bad thumbnail type |
+| 404 | feature off; product missing, deleted, or not the caller's |
+| 413 | GLB or thumbnail over its limit |
+| 422 | `name` or `glb` missing from the form |
+| 502 | blob storage failed (anything already uploaded is deleted) |
+
+`usdz_url` is `null`: per-variant iOS AR is **off by default**. With
+`ENABLE_VARIANT_USDZ` set, the upload requests a conversion after the commit (fire-and-forget,
+never fails the upload): the converter job is started with `--model-variant-id`, writes the
+USDZ to the variant's folder and sets `usdz_asset_id`, with **no** product mapping, and
+`usdz_url` fills in once it finishes. While the flag is off nothing is requested, and the
+viewer hides AR for that shape.
+
+### Managing variants
+
+Every route resolves ownership (404, never 403) and answers 404 while the feature is off.
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/products/{id}/configurator/model-variants` | — | list; the original model first (`"id": "original"`, `is_original: true`), then live variants by `order_index` |
+| PATCH | `/configurator/model-variants/{variant_id}` | `{"name": "L-Shape"}` | the variant |
+| POST | `/products/{id}/configurator/model-variants/reorder` | `{"variant_ids": [...]}` — every live variant exactly once, else `400` | the new list |
+| PUT | `/configurator/model-variants/{variant_id}/thumbnail` | multipart `thumbnail` (PNG/JPEG/WebP) | `{id, thumbnail_url}`; the previous file is deleted |
+| DELETE | `/configurator/model-variants/{variant_id}` | — | soft delete (`isactive = false`); its parts become unreachable. The original model cannot be deleted |
+
+The original model is the permanent default: there is no "set default". Its entry reads the
+product's mapped GLB, USDZ and thumbnail — the same rows the product list and `/assets` use —
+and carries no compression or dimension fields.
+
+### Parts and materials of one model
+
+`{model}` is `original` or a variant id (a variant of **this** product, else 404).
+
+| Method | Path |
+|---|---|
+| GET | `/products/{id}/configurator/model-variants/{model}/materials` |
+| GET | `/products/{id}/configurator/model-variants/{model}/parts` |
+| POST | `/products/{id}/configurator/model-variants/{model}/parts` |
+
+Same shapes as §5 and §6; parts gain `variant_id` (`null` for the original model). The
+material-index overlap rule applies within one model only. Part slugs stay unique per product,
+so a second "Seat" in another model is `seat-2`. The product-level routes (§5, §6) are
+unchanged and mean the original model. Routes that take a part or option id work for parts of
+any live model; a soft-deleted variant's parts answer 404.
+
+### Shopper payload
+
+`GET /public/products/{id}/configurator` (§9) gains a `variants` array **only** when the
+feature is on and the product has at least one live variant with a GLB. The key is omitted
+otherwise, so a single-model product's payload is unchanged. Top-level `model_url`,
+`ar_model_url` and `parts` always stay the original model's.
+
+```json
+"variants": [
+  { "id": "original", "name": "Default", "glb_url": "…", "usdz_url": "…",
+    "thumbnail_url": "…", "is_default": true, "order_index": 0,
+    "width_m": null, "depth_m": null, "height_m": null, "parts": [ /* as top-level */ ] },
+  { "id": "7f3c…", "name": "Corner", "glb_url": "…", "usdz_url": null,
+    "thumbnail_url": "…", "is_default": false, "order_index": 1,
+    "width_m": 2.9, "depth_m": 2.1, "height_m": 0.8, "parts": [ /* Corner's own */ ] }
+]
+```
+
+Each variant's parts pass the §9 filters against **that variant's** GLB. `Rivollo.Viewer.Api`
+mirrors this behind `Configurator:EnableModelVariants`.
+
+---
+
 ## 10. Error reference
 
 | Status | When | Body |
@@ -759,6 +882,15 @@ As implemented in `app/api/routes/configurator.py` (Phase 3).
 | POST | `/configurator/options/{id}/bake` | bearer | ✅ via option | **501** | see below |
 | GET | `/configurator/options/{id}/bake-status` | bearer | ✅ via option | 200 | poll target |
 | GET | `/public/products/{id}/configurator` | Basic | — | 200 | filtered payload |
+| POST | `/products/{id}/configurator/model-variants` | bearer | ✅ | **201** | multipart; Draco-compressed; behind `ENABLE_MODEL_VARIANTS` (§9a) |
+| GET | `/products/{id}/configurator/model-variants` | bearer | ✅ | 200 | original first (§9a) |
+| PATCH | `/configurator/model-variants/{id}` | bearer | ✅ via variant | 200 | rename |
+| POST | `/products/{id}/configurator/model-variants/reorder` | bearer | ✅ | 200 | |
+| PUT | `/configurator/model-variants/{id}/thumbnail` | bearer | ✅ via variant | 200 | multipart |
+| DELETE | `/configurator/model-variants/{id}` | bearer | ✅ via variant | 200 | soft delete |
+| GET | `/products/{id}/configurator/model-variants/{model}/materials` | bearer | ✅ | 200 | `original` or variant id |
+| GET | `/products/{id}/configurator/model-variants/{model}/parts` | bearer | ✅ | 200 | |
+| POST | `/products/{id}/configurator/model-variants/{model}/parts` | bearer | ✅ | **201** | |
 
 **`POST .../bake` returns `501 Not Implemented` until Phase 4.** The `202 Accepted` contract in
 §8 stands as the target, but no runner exists yet: answering `202` would leave the option at
@@ -771,6 +903,7 @@ uploaded-texture options. **CONFIRMED** it accepts `.png/.jpg/.jpeg/.webp`, stor
 never touches `tbl_product_asset_mapping` — so it cannot pollute
 `GET /products/{id}/assets`.
 
-**There is no Configurator upload endpoint and none is required.** An uploaded texture reaches
+**Textures have no Configurator upload endpoint and need none.** (Model-variant GLBs do —
+§9a — because they are compressed and inspected server-side.) An uploaded texture reaches
 the Configurator as `recipe.method = "image"` on the ordinary option-creation endpoint —
 see §7.3. Do not build a second upload mechanism.

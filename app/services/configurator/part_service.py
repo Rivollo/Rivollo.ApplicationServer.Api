@@ -4,9 +4,13 @@ Owns the invariants that keep a product's configuration coherent:
 
   * a part belongs to a product the CALLER owns, resolved from the part's own
     foreign key — never from a client-supplied product_id
-  * every material index exists on the product's current GLB
-  * no material index is claimed by two active parts of the same product
+  * every material index exists on its model's current GLB
+  * no material index is claimed by two active parts of the same model
   * a part is pinned to the GLB it was authored against
+
+A "model" is the product's original GLB (``variant_id`` NULL) or one of its
+live extra model variants (ADR-014). The product-level routes pass no
+``variant_id`` and behave exactly as before model variants existed.
 
 Ownership failures raise 404, never 403: a 403 confirms the resource exists and
 belongs to someone else, which is an enumeration oracle over every seller's
@@ -26,7 +30,8 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.configurator_repo import configurator_repository as repo
-from app.models.models import Product, ProductPart
+from app.models.configurator import ProductPart
+from app.models.models import Product
 from app.schemas.configurator import ProductPartCreate, ProductPartUpdate
 from app.services.configurator.material_service import MeshContext, material_service
 
@@ -34,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 PRODUCT_NOT_FOUND = "Product not found"
 PART_NOT_FOUND = "Part not found"
+MODEL_VARIANT_NOT_FOUND = "Model variant not found"
 
 
 
@@ -53,17 +59,20 @@ class PartService:
         db: AsyncSession,
         product_id: uuid.UUID,
         user_id: uuid.UUID,
+        *,
+        variant_id: Optional[uuid.UUID] = None,
     ) -> tuple[list[ProductPart], Optional[str]]:
-        """Every part of a product, plus the product's current glb_version.
+        """Every part of one model, plus that model's current glb_version.
 
         The version is returned so the caller can compute ``glb_stale`` per part
-        without re-resolving the mesh. It is None when the product has no model
+        without re-resolving the mesh. It is None when the model has no GLB
         yet — a product can legitimately have no GLB and therefore no parts.
         """
         await PartService._require_owned_product(db, product_id, user_id)
-        parts = await repo.get_parts_for_product(db, product_id)
+        await PartService.require_model(db, product_id, variant_id, user_id)
+        parts = await repo.get_parts_for_product(db, product_id, variant_id=variant_id)
 
-        asset = await repo.get_product_mesh_asset(db, product_id)
+        asset = await repo.get_model_mesh_asset(db, product_id, variant_id)
         current_version = (
             material_service.build_glb_version(asset.id)
             if asset is not None and asset.image
@@ -97,13 +106,14 @@ class PartService:
     async def current_glb_version(
         db: AsyncSession,
         product_id: uuid.UUID,
+        variant_id: Optional[uuid.UUID] = None,
     ) -> Optional[str]:
-        """The product's current glb_version, or None when it has no model.
+        """One model's current glb_version, or None when it has no GLB.
 
         Cheap — one indexed lookup, no GLB download. Used to compute `glb_stale`
         on a single part without paying for inspection.
         """
-        asset = await repo.get_product_mesh_asset(db, product_id)
+        asset = await repo.get_model_mesh_asset(db, product_id, variant_id)
         if asset is None or not asset.image:
             return None
         return material_service.build_glb_version(asset.id)
@@ -117,15 +127,19 @@ class PartService:
         product_id: uuid.UUID,
         user_id: uuid.UUID,
         payload: ProductPartCreate,
+        *,
+        variant_id: Optional[uuid.UUID] = None,
     ) -> ProductPart:
         # 1. Ownership WITHOUT a lock, so an unauthorised caller never reaches
-        #    the expensive step below.
+        #    the expensive step below. A variant must be a live variant of THIS
+        #    product — never trusted from the path alone.
         await PartService._require_owned_product(db, product_id, user_id)
+        await PartService.require_model(db, product_id, variant_id, user_id)
 
         # 2. Inspect the GLB before taking the lock. Inspection downloads tens
         #    of megabytes; holding a row lock across that would serialise every
         #    write to the product behind a network transfer.
-        mesh = await material_service.get_mesh_context(db, product_id)
+        mesh = await material_service.get_mesh_context(db, product_id, variant_id)
         PartService._validate_material_indices(payload.material_indices, mesh)
 
         # 3. Now the short critical section: re-read the product FOR UPDATE, so
@@ -134,7 +148,7 @@ class PartService:
         #    constraint backing this rule).
         await PartService._require_owned_product(db, product_id, user_id, lock=True)
 
-        siblings = await repo.get_sibling_parts(db, product_id)
+        siblings = await repo.get_sibling_parts(db, product_id, variant_id=variant_id)
         PartService._reject_material_overlap(payload.material_indices, siblings)
 
         slug = await PartService._unique_slug(db, product_id, payload.name)
@@ -146,6 +160,7 @@ class PartService:
 
         part = ProductPart(
             product_id=product_id,
+            variant_id=variant_id,
             name=payload.name,
             slug=slug,
             material_indices=list(payload.material_indices),
@@ -188,7 +203,9 @@ class PartService:
 
         if materials_changed:
             assert payload.material_indices is not None
-            mesh = await material_service.get_mesh_context(db, part.product_id)
+            mesh = await material_service.get_mesh_context(
+                db, part.product_id, part.variant_id
+            )
             PartService.require_current_glb(part, mesh)
             PartService._validate_material_indices(payload.material_indices, mesh)
 
@@ -196,7 +213,7 @@ class PartService:
                 db, part.product_id, user_id, lock=True
             )
             siblings = await repo.get_sibling_parts(
-                db, part.product_id, exclude_id=part.id
+                db, part.product_id, variant_id=part.variant_id, exclude_id=part.id
             )
             PartService._reject_material_overlap(payload.material_indices, siblings)
 
@@ -270,6 +287,23 @@ class PartService:
         return product
 
     @staticmethod
+    async def require_model(
+        db: AsyncSession,
+        product_id: uuid.UUID,
+        variant_id: Optional[uuid.UUID],
+        user_id: uuid.UUID,
+    ) -> None:
+        """``variant_id`` is None (the original model) or a live variant of
+        ``product_id`` owned by ``user_id``. Anything else is 404 (ADR-008)."""
+        if variant_id is None:
+            return
+        variant = await repo.get_owned_model_variant(db, variant_id, user_id)
+        if variant is None or variant.product_id != product_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=MODEL_VARIANT_NOT_FOUND
+            )
+
+    @staticmethod
     async def require_owned_part(
         db: AsyncSession,
         part_id: uuid.UUID,
@@ -303,7 +337,7 @@ class PartService:
         indices: list[int],
         siblings: list[ProductPart],
     ) -> None:
-        """No material index may belong to two active parts of one product.
+        """No material index may belong to two active parts of one model.
 
         Two parts claiming material 3 would let two options paint the same mesh
         with conflicting textures, and the viewer would show whichever loaded

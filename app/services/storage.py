@@ -563,6 +563,45 @@ class StorageService:
 		blob_url = blob_client.url
 		return cdn_url, blob_url
 
+	def upload_model_variant_file(
+		self,
+		*,
+		user_id: str,
+		product_id: str,
+		variant_id: str,
+		filename: str,
+		content_type: Optional[str],
+		stream: BinaryIO,
+	) -> tuple[str, str]:
+		"""Upload one Configurator model-variant file. Returns (cdn_url, blob_url).
+
+		    {media container}/{user_id}/{product_id}/model-variants/{variant_id}/{file}
+
+		Under the seller's own {user_id}/ prefix on purpose: the account purge job
+		sweeps that prefix, so a variant's GLB, original upload and thumbnail need no
+		new purge rule (ADR-014). The three ids are server-generated UUIDs and are
+		validated as such; the filename gets the usual random suffix, so a
+		re-upload never overwrites a URL a viewer may have cached.
+		"""
+		tokens = []
+		for label, value in (("user_id", user_id), ("product_id", product_id), ("variant_id", variant_id)):
+			try:
+				tokens.append(str(uuid.UUID(str(value))))
+			except ValueError as exc:
+				raise ValueError(f"Model variant {label} is not a UUID: {value!r}") from exc
+		user_token, product_token, variant_token = tokens
+
+		client = self._get_blob_service_client()
+		container = self._media_container()
+		blob_path = (
+			f"{user_token}/{product_token}/model-variants/{variant_token}/"
+			f"{self._sanitize_filename(filename)}"
+		)
+		blob_client = client.get_blob_client(container=container, blob=blob_path)
+		settings_obj = ContentSettings(content_type=content_type or "application/octet-stream")  # type: ignore
+		blob_client.upload_blob(stream, overwrite=False, content_settings=settings_obj)
+		return self._cdn_url(container, blob_path), blob_client.url
+
 	def upload_background_image(self, user_id: str, product_id: str, filename: str, content_type: Optional[str], stream: BinaryIO) -> tuple[str, str]:
 		"""Upload background image. Returns (cdn_url, blob_url)."""
 		client = self._get_blob_service_client()
