@@ -16,8 +16,13 @@ app/api/routes/<domain>.py   thin: parse ids, call service, return api_success(.
 app/schemas/<domain>.py      Pydantic v2 contracts
 app/services/<domain>_service.py   business rules; raise HTTPException here
 app/database/<domain>_repo.py      SQLAlchemy statements only
-app/models/models.py               ORM tables
+app/models/<domain>.py             ORM tables for the domain (e.g. configurator.py, plan.py)
 ```
+
+- New domains put their ORM models in their own `app/models/<domain>.py`, importing `Base` from
+  `app/models/base.py` and the mixins from `app/models/models.py`, and register the module in
+  `app/models/__init__.py`. `models.py` holds the shared mixins and the older tables — do not
+  add new domains to it.
 
 - Repositories live in `app/database/*_repo.py`. (`app/repositories/` holds one legacy module —
   do not add to it.)
@@ -37,7 +42,8 @@ app/models/models.py               ORM tables
 
 ## Product Configurator
 
-A new domain, currently **specified but not implemented**. If you are asked to work on it:
+Implemented: parts, options and textures (revision `c7a4e0d51b83`), and **model variants**
+(`e3b9c6a1d27f`, ADR-014) — being built out step by step. If you are asked to work on it:
 
 ### Read first, in order
 
@@ -70,9 +76,29 @@ what the existing colour-variant feature does and what this design replaces. ADR
 recomputed, unstable heuristic — surface it as `similarity_group_hint`, never store it as a
 part identity. ADR-004.
 
-**Exactly three tables.** `tbl_product_parts`, `tbl_part_options`,
+**Exactly four tables.** `tbl_product_model_variants`, `tbl_product_parts`, `tbl_part_options`,
 `tbl_part_option_textures`. No `tbl_product_part_materials`, no separate texture-option table,
 no `option_type` / `source_type` column.
+
+**Model variants are additive — the existing system must not change.** A model variant is an
+EXTRA shape of a product (its own GLB). The product's original model has no row, stays the
+product's model, and is its **permanent default**: no `is_default`, no "set as default".
+`tbl_product_parts.variant_id` is nullable and **NULL means the original model**; slugs stay
+unique per product; the overlap rule is per model (the lock is still the product row). The
+migration writes no data and alters no existing core table. Variant routes are behind
+`ENABLE_MODEL_VARIANTS` (off by default). Legacy colour variants stay untouched. "Model variant"
+in code, "Variants" in UI — never plain "variant", which already means a colour variant here.
+ADR-014.
+
+**🔴 A variant's GLB is never mapped.** Every reader of "the product's model" (product lists,
+thumbnails, `/assets`, AR, the configurator, colour variants, Viewer.Api) joins through
+`tbl_product_asset_mapping`. A variant writes a `tbl_product_assets` row and **never** a
+mapping row — that is what keeps it invisible to them. Variant asset FKs are
+`ON DELETE SET NULL` because the purge deletes assets before products — do not change that to
+RESTRICT or CASCADE. Always set `created_by` on variant asset rows. Store variant blobs under
+`{user_id}/{product_id}/model-variants/…` so the purge's user prefix sweeps them. Every
+variant GLB is Draco-compressed with `glb_compression_service`, and the material/mesh names
+and order are re-checked afterwards; a mismatch serves the original. ADR-014.
 
 **Material-index uniqueness is service-enforced, not DB-enforced.** `material_indices` stays
 JSONB. No trigger, no GIN index, no JSONB CHECK constraints. `PartService` takes a
@@ -158,10 +184,9 @@ seller schema with fields omitted, and never exposes `recipe`, `bake_*`, `glb_ve
 | Q4 | Are triangle counts readable from a Draco-compressed GLB? Unverified. | materials response |
 | ~~Q5~~ | ~~Trigger or child table for material-index uniqueness?~~ ✅ resolved by ADR-012 | — |
 | Q6 | Fate of the existing colour-variant feature — and the `/products/{id}/materials` path collision. | routing |
-| **Q7** | 🔴 **Can the viewer swap textures by glTF material index at runtime?** ADR-003 rests on it entirely. | **the whole texture-baking approach** |
-| **Q8** | 🔴 **Has `Rivollo.AccountPurge.Job` been updated?** ADR-010. | **production deployment** |
+| ~~Q7~~ | ~~Can the viewer swap textures by glTF material index at runtime?~~ ✅ answered **yes** (product decision 2026-09-21) | — |
+| **Q8** | 🔴 **Has `Rivollo.AccountPurge.Job` been updated?** ADR-010, and ADR-014 for `tbl_product_model_variants`. Change written on its branch `model-variants-purge/supriya` (D10) — not merged or deployed. Deploy it in the same window as `e3b9c6a1d27f`. | **production deployment** |
 
-Ask **Q7 before writing any Configurator code** — a negative answer invalidates ADR-003.
 Open **Q8 on day one** — it is cross-repository and has the longest lead time.
 
 **Never describe ADR-005 or ADR-006 as Accepted.** Both are Proposed / Needs Verification.

@@ -19,15 +19,22 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
 from app.api.deps import CurrentUser, DB, get_current_user
-from app.models.models import PartOption, ProductPart
+from app.core.config import settings
+from app.models.configurator import PartOption, ProductPart
 from app.schemas.configurator import (
     BakeProgress,
     BakeStatusResponse,
     MaterialResponse,
     MaterialsResponse,
+    ModelVariantCreateResponse,
+    ModelVariantReorder,
+    ModelVariantResponse,
+    ModelVariantUpdate,
     PartOptionCreate,
     PartOptionResponse,
     PartOptionTextureResponse,
@@ -37,12 +44,18 @@ from app.schemas.configurator import (
     ProductPartUpdate,
     ProductPartUpdateResponse,
     PublicConfiguratorResponse,
+    PublicModelVariant,
     PublicOptionTexture,
     PublicPartOption,
     PublicProductPart,
 )
 from app.services.configurator.bake_service import bake_service
 from app.services.configurator.material_service import material_service
+from app.services.configurator.model_variant_service import (
+    ModelEntry,
+    UploadedFile,
+    model_variant_service,
+)
 from app.services.configurator.option_service import OptionService, option_service
 from app.services.configurator.part_service import PartService, part_service
 from app.services.configurator.shopper_service import shopper_service
@@ -119,6 +132,7 @@ def _part_response(
     return ProductPartResponse(
         id=part.id,
         product_id=part.product_id,
+        variant_id=part.variant_id,
         name=part.name,
         slug=part.slug,
         material_indices=list(part.material_indices or []),
@@ -137,6 +151,286 @@ def _part_response(
 
 
 # --------------------------------------------------------------------------- #
+# Model variants (ADR-014)
+# --------------------------------------------------------------------------- #
+_READ_CHUNK = 1024 * 1024
+
+
+async def _read_upload(upload: UploadFile, limit: int) -> UploadedFile:
+    """Read at most ``limit + 1`` bytes, so an oversized upload is never held whole.
+
+    The size RULE is the service's; reading one byte past it is what lets the
+    service see that the limit was exceeded.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        chunk = await upload.read(min(_READ_CHUNK, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return UploadedFile(
+        filename=upload.filename or "",
+        content_type=upload.content_type,
+        data=b"".join(chunks),
+    )
+
+
+@router.post(
+    "/products/{product_id}/configurator/model-variants",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_model_variant(
+    product_id: str,
+    current_user: CurrentUser,
+    db: DB,
+    name: str = Form(...),
+    glb: UploadFile = File(..., description="The variant's .glb model"),
+    thumbnail: Optional[UploadFile] = File(
+        None, description="Optional poster image (PNG, JPEG or WebP)"
+    ),
+):
+    """Add an extra model variant (another shape) to a product.
+
+    The product's original model is untouched and stays its default. The GLB is
+    Draco-compressed server-side; see ModelVariantService for the pipeline.
+    """
+    model_variant_service.require_enabled()
+    prod_uuid = _parse_uuid(product_id, "productId")
+
+    glb_file = await _read_upload(glb, settings.MAX_VARIANT_GLB_BYTES)
+    thumb_file = (
+        await _read_upload(thumbnail, settings.MAX_VARIANT_THUMBNAIL_BYTES)
+        if thumbnail is not None and thumbnail.filename
+        else None
+    )
+
+    created = await model_variant_service.create_variant(
+        db,
+        prod_uuid,
+        current_user.id,
+        name=name,
+        glb=glb_file,
+        thumbnail=thumb_file,
+    )
+    variant = created.variant
+    payload = ModelVariantCreateResponse(
+        id=str(variant.id),
+        product_id=variant.product_id,
+        name=variant.name,
+        glb_url=created.glb_url,
+        usdz_url=None,
+        thumbnail_url=variant.thumbnail_url,
+        order_index=variant.order_index,
+        is_original=False,
+        isactive=variant.isactive,
+        compression_status=variant.compression_status,
+        compression_error=variant.compression_error,
+        original_size_bytes=variant.original_size_bytes,
+        compressed_size_bytes=variant.compressed_size_bytes,
+        width_m=variant.width_m,
+        depth_m=variant.depth_m,
+        height_m=variant.height_m,
+        created_at=variant.created_date,
+        warnings=created.warnings,
+    )
+    return api_success(payload.model_dump(mode="json"))
+
+def _variant_response(variant, *, glb_url, usdz_url=None) -> ModelVariantResponse:
+    return ModelVariantResponse(
+        id=str(variant.id),
+        product_id=variant.product_id,
+        name=variant.name,
+        glb_url=glb_url,
+        usdz_url=usdz_url,
+        thumbnail_url=variant.thumbnail_url,
+        order_index=variant.order_index,
+        is_original=False,
+        isactive=variant.isactive,
+        compression_status=variant.compression_status,
+        compression_error=variant.compression_error,
+        original_size_bytes=variant.original_size_bytes,
+        compressed_size_bytes=variant.compressed_size_bytes,
+        width_m=variant.width_m,
+        depth_m=variant.depth_m,
+        height_m=variant.height_m,
+        created_at=variant.created_date,
+    )
+
+
+def _entry_response(entry: ModelEntry) -> ModelVariantResponse:
+    if entry.variant is not None:
+        return _variant_response(entry.variant, glb_url=entry.glb_url, usdz_url=entry.usdz_url)
+    return ModelVariantResponse(
+        id="original",
+        product_id=entry.product_id,
+        name=entry.name,
+        glb_url=entry.glb_url,
+        usdz_url=entry.usdz_url,
+        thumbnail_url=entry.thumbnail_url,
+        order_index=entry.order_index,
+        is_original=True,
+    )
+
+
+@router.get("/products/{product_id}/configurator/model-variants", response_model=dict)
+async def list_model_variants(
+    product_id: str,
+    current_user: CurrentUser,
+    db: DB,
+):
+    """The original model (always first, always the default) and the extra variants."""
+    model_variant_service.require_enabled()
+    prod_uuid = _parse_uuid(product_id, "productId")
+    entries = await model_variant_service.list_models(db, prod_uuid, current_user.id)
+    return api_success([_entry_response(e).model_dump(mode="json") for e in entries])
+
+
+@router.patch("/configurator/model-variants/{variant_id}", response_model=dict)
+async def rename_model_variant(
+    variant_id: str,
+    payload: ModelVariantUpdate,
+    current_user: CurrentUser,
+    db: DB,
+):
+    model_variant_service.require_enabled()
+    var_uuid = _parse_uuid(variant_id, "variantId")
+    variant = await model_variant_service.rename(db, var_uuid, current_user.id, payload.name)
+    return api_success(
+        _variant_response(variant, glb_url=None).model_dump(mode="json", exclude={"glb_url"})
+    )
+
+
+@router.post("/products/{product_id}/configurator/model-variants/reorder", response_model=dict)
+async def reorder_model_variants(
+    product_id: str,
+    payload: ModelVariantReorder,
+    current_user: CurrentUser,
+    db: DB,
+):
+    model_variant_service.require_enabled()
+    prod_uuid = _parse_uuid(product_id, "productId")
+    await model_variant_service.reorder(db, prod_uuid, current_user.id, payload.variant_ids)
+    entries = await model_variant_service.list_models(db, prod_uuid, current_user.id)
+    return api_success([_entry_response(e).model_dump(mode="json") for e in entries])
+
+
+@router.put("/configurator/model-variants/{variant_id}/thumbnail", response_model=dict)
+async def set_model_variant_thumbnail(
+    variant_id: str,
+    current_user: CurrentUser,
+    db: DB,
+    thumbnail: UploadFile = File(..., description="PNG, JPEG or WebP, e.g. model-viewer toBlob()"),
+):
+    model_variant_service.require_enabled()
+    var_uuid = _parse_uuid(variant_id, "variantId")
+    thumb_file = await _read_upload(thumbnail, settings.MAX_VARIANT_THUMBNAIL_BYTES)
+    variant = await model_variant_service.set_thumbnail(db, var_uuid, current_user.id, thumb_file)
+    return api_success({"id": str(variant.id), "thumbnail_url": variant.thumbnail_url})
+
+
+@router.delete("/configurator/model-variants/{variant_id}", response_model=dict)
+async def delete_model_variant(
+    variant_id: str,
+    current_user: CurrentUser,
+    db: DB,
+):
+    """Soft delete. The original model is not a variant and cannot be deleted."""
+    model_variant_service.require_enabled()
+    var_uuid = _parse_uuid(variant_id, "variantId")
+    await model_variant_service.delete(db, var_uuid, current_user.id)
+    return api_success({"message": "Model variant deleted successfully"})
+
+
+@router.get(
+    "/products/{product_id}/configurator/model-variants/{model}/materials",
+    response_model=dict,
+)
+async def list_model_variant_materials(
+    product_id: str,
+    model: str,
+    current_user: CurrentUser,
+    db: DB,
+):
+    """Materials of one model's GLB. ``model`` is ``original`` or a variant id."""
+    prod_uuid = _parse_uuid(product_id, "productId")
+    variant_id = await model_variant_service.resolve_model(db, prod_uuid, model, current_user.id)
+    return api_success(
+        await _materials_payload(db, prod_uuid, current_user.id, variant_id)
+    )
+
+
+@router.get(
+    "/products/{product_id}/configurator/model-variants/{model}/parts",
+    response_model=dict,
+)
+async def list_model_variant_parts(
+    product_id: str,
+    model: str,
+    current_user: CurrentUser,
+    db: DB,
+):
+    prod_uuid = _parse_uuid(product_id, "productId")
+    variant_id = await model_variant_service.resolve_model(db, prod_uuid, model, current_user.id)
+    parts, current_glb_version = await part_service.list_parts(
+        db, prod_uuid, current_user.id, variant_id=variant_id
+    )
+    return api_success(
+        [_part_response(p, current_glb_version).model_dump(mode="json") for p in parts]
+    )
+
+
+@router.post(
+    "/products/{product_id}/configurator/model-variants/{model}/parts",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_model_variant_part(
+    product_id: str,
+    model: str,
+    payload: ProductPartCreate,
+    current_user: CurrentUser,
+    db: DB,
+):
+    prod_uuid = _parse_uuid(product_id, "productId")
+    variant_id = await model_variant_service.resolve_model(db, prod_uuid, model, current_user.id)
+    part = await part_service.create_part(
+        db, prod_uuid, current_user.id, payload, variant_id=variant_id
+    )
+    return api_success(_part_response(part, part.glb_version).model_dump(mode="json"))
+
+
+async def _materials_payload(db, prod_uuid, user_id, variant_id) -> dict:
+    """The Part Editor's materials view for one model — shared by both routes."""
+    glb_version, model_url, materials = await material_service.list_materials(
+        db, prod_uuid, variant_id
+    )
+    parts, _ = await part_service.list_parts(db, prod_uuid, user_id, variant_id=variant_id)
+    claimed: dict[int, uuid.UUID] = {
+        index: part.id
+        for part in parts
+        if part.isactive
+        for index in (part.material_indices or [])
+    }
+    payload = MaterialsResponse(
+        glb_version=glb_version,
+        model_url=model_url,
+        material_count=len(materials),
+        materials=[
+            MaterialResponse(
+                **material,
+                assigned_part_id=claimed.get(material["material_index"]),
+                eligible_for_part=material["material_index"] not in claimed,
+            )
+            for material in materials
+        ],
+    )
+    return payload.model_dump(mode="json")
+
+
+# --------------------------------------------------------------------------- #
 # Materials
 # --------------------------------------------------------------------------- #
 @router.get("/products/{product_id}/configurator/materials", response_model=dict)
@@ -152,33 +446,8 @@ async def list_product_materials(
     """
     prod_uuid = _parse_uuid(product_id, "productId")
     await PartService.require_owned_product_for_read(db, prod_uuid, current_user.id)
-
-    glb_version, model_url, materials = await material_service.list_materials(
-        db, prod_uuid
-    )
-
-    parts, _ = await part_service.list_parts(db, prod_uuid, current_user.id)
-    claimed: dict[int, uuid.UUID] = {
-        index: part.id
-        for part in parts
-        if part.isactive
-        for index in (part.material_indices or [])
-    }
-
-    payload = MaterialsResponse(
-        glb_version=glb_version,
-        model_url=model_url,
-        material_count=len(materials),
-        materials=[
-            MaterialResponse(
-                **material,
-                assigned_part_id=claimed.get(material["material_index"]),
-                eligible_for_part=material["material_index"] not in claimed,
-            )
-            for material in materials
-        ],
-    )
-    return api_success(payload.model_dump(mode="json"))
+    # The product's original model — unchanged behaviour (ADR-014).
+    return api_success(await _materials_payload(db, prod_uuid, current_user.id, None))
 
 
 # --------------------------------------------------------------------------- #
@@ -223,7 +492,7 @@ async def get_part(
 ):
     part_uuid = _parse_uuid(part_id, "partId")
     part = await part_service.get_part(db, part_uuid, current_user.id)
-    current = await part_service.current_glb_version(db, part.product_id)
+    current = await part_service.current_glb_version(db, part.product_id, part.variant_id)
     return api_success(_part_response(part, current).model_dump(mode="json"))
 
 
@@ -238,7 +507,7 @@ async def update_part(
     part, invalidated = await part_service.update_part(
         db, part_uuid, current_user.id, payload
     )
-    current = await part_service.current_glb_version(db, part.product_id)
+    current = await part_service.current_glb_version(db, part.product_id, part.variant_id)
     body = ProductPartUpdateResponse(
         **_part_response(part, current).model_dump(),
         invalidated_option_ids=invalidated,
@@ -410,29 +679,57 @@ async def get_public_configurator(
         product_name=view.product_name,
         model_url=view.model_url,
         ar_model_url=view.ar_model_url,
-        parts=[
-            PublicProductPart(
-                id=p.part.id,
-                name=p.part.name,
-                slug=p.part.slug,
-                material_indices=list(p.part.material_indices or []),
-                order_index=p.part.order_index,
-                default_option_id=p.default_option_id,
-                options=[
-                    PublicPartOption(
-                        id=o.option.id,
-                        name=o.option.name,
-                        slug=o.option.slug,
-                        swatch_hex=o.option.swatch_hex,
-                        order_index=o.option.order_index,
-                        textures=[
-                            PublicOptionTexture.model_validate(t) for t in o.textures
-                        ],
-                    )
-                    for o in p.options
-                ],
-            )
-            for p in view.parts
-        ],
+        parts=_public_parts(view.parts),
+        variants=(
+            [
+                PublicModelVariant(
+                    id=v.id,
+                    name=v.name,
+                    glb_url=v.glb_url,
+                    usdz_url=v.usdz_url,
+                    thumbnail_url=v.thumbnail_url,
+                    is_default=v.is_default,
+                    order_index=v.order_index,
+                    width_m=v.width_m,
+                    depth_m=v.depth_m,
+                    height_m=v.height_m,
+                    parts=_public_parts(v.parts),
+                )
+                for v in view.variants
+            ]
+            if view.variants
+            else None
+        ),
     )
-    return api_success(payload.model_dump(mode="json"))
+    body = payload.model_dump(mode="json")
+    if body.get("variants") is None:
+        # Single-model product: the payload stays exactly as it was before
+        # model variants existed (ADR-014).
+        body.pop("variants", None)
+    return api_success(body)
+
+
+def _public_parts(parts) -> list[PublicProductPart]:
+    return [
+        PublicProductPart(
+            id=p.part.id,
+            name=p.part.name,
+            slug=p.part.slug,
+            material_indices=list(p.part.material_indices or []),
+            order_index=p.part.order_index,
+            default_option_id=p.default_option_id,
+            options=[
+                PublicPartOption(
+                    id=o.option.id,
+                    name=o.option.name,
+                    slug=o.option.slug,
+                    swatch_hex=o.option.swatch_hex,
+                    order_index=o.option.order_index,
+                    textures=[PublicOptionTexture.model_validate(t) for t in o.textures],
+                )
+                for o in p.options
+            ],
+        )
+        for p in parts
+    ]
+

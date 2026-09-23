@@ -20,6 +20,7 @@ Verification** until someone checks.
 | [011](#adr-011) | `is_default` on the option, not `default_option_id` on the part | **Accepted** |
 | [012](#adr-012) | Material-index uniqueness: JSONB + row lock, no trigger, no child table | **Accepted** |
 | [013](#adr-013) | Uploaded textures are `recipe.method = "image"`, not an option type | **Accepted** |
+| [014](#adr-014) | Model variants: extra shapes, added without changing the existing system | **Accepted** (with a **deployment blocker**, Q8) |
 
 ---
 
@@ -172,7 +173,9 @@ name, a slug, an explicit `material_indices` array, an order, a visibility flag,
 precisely so no client mistakes it for identity — to pre-populate the editor's suggestions.
 It is never stored on a part.
 
-**Invariant:** within one product, a material index belongs to **at most one** part. No
+**Invariant:** within one product, a material index belongs to **at most one** part.
+*Amended by [ADR-014](#adr-014):* within one **model** — the original (`variant_id IS NULL`)
+or one extra model variant. Material indices are only meaningful against one GLB. No
 business reason to allow overlap has been identified; overlap would let two options paint the
 same mesh with conflicting textures, and the viewer would show whichever loaded last.
 Enforced in the service (for the error message) *and* in the database (as the backstop) — see
@@ -278,6 +281,11 @@ exists one asset kind over.
 - Whether any planned "replace model" feature will mutate `ProductAsset.image` in place, the
   way `PUT /products/{id}/original-image` already does for images. If so, `asset:<uuid>` is
   insufficient and the strategy must move to `sha256:<bytes>`.
+
+**Amended by [ADR-014](#adr-014).** A part of the original model (`variant_id IS NULL`)
+resolves its GLB exactly as before; a part of an extra model variant resolves it from the
+variant's `glb_asset_id`. Either way `glb_version` stays `asset:<ProductAsset.id>`. The value
+semantics are as unsettled as before; this ADR stays **Proposed / Needs Verification**.
 
 **Consequences.** If a seller re-uploads a model, their parts go stale and must be re-mapped.
 That is honest: the material indices genuinely may not mean the same thing. A future
@@ -522,6 +530,11 @@ useful error message a constraint never could — *"Material index 3 already bel
 `ix_parts_product_order`, so the lock is held for microseconds. Also allows dropping the GIN
 index and both JSONB CHECK constraints.
 
+*Amended by [ADR-014](#adr-014):* the overlap rule is scoped to one **model** (siblings =
+active parts with the same `variant_id`, NULL meaning the original). The lock is still the
+**product** row: one lock per product serialises every model's writes, which costs nothing at
+single-digit parts and keeps a single lock order.
+
 **Accepted cost:** there is no database-level backstop. If a second writer appears — an import
 job, a bulk editor — or bulk material→part querying is needed, revisit the normalized table.
 
@@ -569,6 +582,100 @@ dispute in [ADR-005](#adr-005), so they can ship even while that stays open.
 
 **Revisit** only if a concrete requirement emerges to query options by kind without opening
 the JSONB. None exists today.
+
+---
+
+## ADR-014
+
+### Model variants: extra shapes, added without changing the existing system
+
+**Status: Accepted** — the decision is settled; like ADR-010 it carries a **deployment
+blocker** (Q8).
+
+**Context.** A product can come in several shapes — "2 Seater", "3 Seater", "6 Seater
+Corner" — each a separate GLB. Configurator parts are bound to glTF material indices, and
+those differ between GLBs (Tripo names and orders materials per generation), so a part
+must belong to exactly one GLB.
+
+Every reader of "the product's model" — the product list and its thumbnails
+(`ProductRepository.get_primary_assets_for_products`), `GET /products/{id}` and
+`/assets`, `ConfiguratorRepository.get_product_mesh_asset`, colour variants,
+`Rivollo.Viewer.Api` `/assets` and `/configurator`, the editor's `getGlbUrl`, the USDZ
+job — resolves it through `tbl_product_asset_mapping`: the newest **active mapped** row of
+the wanted format (CONFIRMED, every one). That fact is what lets this feature be additive.
+
+**Requirement (product decision, 2026-09-22): the existing system must not change.** The
+product's original model stays its model and its **permanent default**.
+
+**Decision.**
+
+1. **The original model has no row.** The GLB created with the product
+   (`createProductFromGlb` or AI generation) is the product's model, as today, and is always
+   the default. There is no `is_default` column and no "set as default" action.
+2. **`tbl_product_model_variants` holds the EXTRA shapes only**: `name`,
+   `glb_asset_id → tbl_product_assets`, `usdz_asset_id → tbl_product_assets`, thumbnail,
+   original-upload columns, compression sizes and status, bounding-box dimensions in metres,
+   `order_index` (the original is implicitly 0), `isactive`, audit columns.
+3. **A variant's GLB is a `tbl_product_assets` row with NO mapping row.** Unmapped, it is
+   invisible to every reader above, so product lists, thumbnails, `/assets`, AR and colour
+   variants are untouched. Referencing an asset row (rather than storing a URL) keeps the
+   Configurator's GLB identity `asset:<id>` (ADR-006) for variants too.
+4. **`tbl_product_parts.variant_id` is NULLABLE.** `NULL` means the original model, so every
+   existing part keeps its meaning and no row is rewritten. Part slugs stay unique per
+   product (`uq_parts_product_slug` unchanged); the service suffixes a clashing slug.
+5. **Options and textures are unchanged** — they reach the variant through the part.
+6. **The migration is purely additive** (`e3b9c6a1d27f`): one table, one nullable column,
+   indexes. No data written, nothing dropped, no change to `tbl_products`,
+   `tbl_product_assets` or `tbl_product_asset_mapping`.
+7. **Off by default.** `ENABLE_MODEL_VARIANTS` makes every variant route answer 404 until an
+   environment opts in.
+8. **Every variant GLB is Draco-compressed on upload**, reusing
+   `glb_compression_service.compress()` (gltf-transform, in-process Node) off the event loop.
+   The compressed file is re-inspected and must have identical material and mesh names in
+   the same order — parts attach to material indices. On any failure or mismatch the
+   original is served and `compression_status = 'fallback_original'`. The untouched upload is
+   kept in `original_glb_*` columns (never an asset row) when it differs from the served file.
+9. **Legacy colour variants are untouched.** `tbl_product_color_variants` and its routes stay
+   product-level (Q6 is still open for them).
+10. **AR per variant, behind its own flag.** `ENABLE_VARIANT_USDZ` is **off by default**
+    (product decision, 2026-09-23): a variant has no USDZ, `usdz_url` stays `null` and the
+    viewer hides AR for that shape. With it on, an upload starts the existing converter job
+    with `--model-variant-id`; the job writes the USDZ to the variant's folder, inserts an
+    asset row with **no** mapping, sets `usdz_asset_id`, and leaves the product status alone.
+    Without the argument the job behaves exactly as before. Deploy the converter image that
+    accepts it **before** switching the flag on — an older image rejects the unknown argument.
+    Turning it on later converts variants uploaded from then on; earlier ones need a re-upload
+    or a manual job run.
+11. **Shopper payload.** `variants[]` appears only when a product has live extra variants;
+    top-level fields stay the original model's. `Rivollo.Viewer.Api` mirrors it behind
+    `Configurator:EnableModelVariants`, and never reads the variants table while that is off.
+
+**Foreign keys — chosen for `Rivollo.AccountPurge.Job`:**
+
+| FK | Rule | Why |
+|---|---|---|
+| `product_id → tbl_products` | CASCADE | a **new** FK to `tbl_products`; assertion A14 must allow-list it (Q8) |
+| `glb_asset_id`, `usdz_asset_id → tbl_product_assets` | **SET NULL** (hence nullable) | the purge deletes `tbl_product_assets` (step 4) **before** `tbl_products` (step 6); RESTRICT would abort that step, CASCADE would let a stray asset delete wipe a variant's configuration |
+| `tbl_product_parts.variant_id → variants` | CASCADE | only a hard delete reaches it; the app soft-deletes variants |
+| `created_by`, `updated_by` | **no FK** | as ADR-010 |
+
+Full indexes on `product_id`, `glb_asset_id` and `usdz_asset_id` serve the purge's CASCADE
+and SET NULL lookups. Variant blobs live under `{user_id}/{product_id}/model-variants/…`,
+which the purge's existing user prefix already sweeps.
+
+**Consequences.**
+
+- `CLAUDE.md`'s "exactly three tables" rule becomes four. The spirit is unchanged: no
+  normalised material table, no texture-option table, no type discriminator column.
+- Code that lists a product's parts must now say *which* model: `variant_id IS NULL` for the
+  original, `= :id` for an extra variant. Until the variant-scoped part routes land (step d),
+  only original-model parts exist.
+- Legacy consumers always show the original model. A seller cannot make an extra shape the
+  product's main model; that would need a mapping re-point, which this design rules out.
+- Unmapped variant asset rows are found by the purge through `created_by` and through the
+  variant's own FK (job decision D10) — so the service always sets `created_by`.
+- A variant with `glb_asset_id IS NULL` can exist after an out-of-band asset delete; services
+  treat it as unusable rather than failing.
 
 ---
 
@@ -645,7 +752,12 @@ One concrete conflict must be resolved regardless:
 Configurator uses `/products/{id}/configurator/materials`; the colour-variant route is
 retired; or one shared handler serves both. Deprecation timing is a product decision.
 
-### Q7 — Can the viewer swap textures by glTF material index at runtime? · 🔴 **blocks ADR-003** · Frontend
+### Q7 — Can the viewer swap textures by glTF material index at runtime? · ✅ **ANSWERED: yes** (product decision, 2026-09-21) · Frontend
+
+Answered yes. Supporting evidence: `Rivollo.Web.Portal` `components/shared/preview/ThreeViewer.tsx`
+already replaces base-colour textures at runtime on a loaded `<model-viewer>` with
+`mv.createTexture()` + `baseColorTexture.setTexture()` across `model.materials`. The public viewer
+applies option textures per material index the same way. The original question is kept below.
 
 **[ADR-003](#adr-003) rests entirely on this** and it has never been verified. The whole
 texture-baking design assumes the 3D viewer can replace `material.map` for a specific glTF
@@ -664,10 +776,22 @@ here except Q8.
 Tracked by [ADR-010](#adr-010). The decision is settled; the coordination is not done. Until
 `Rivollo.AccountPurge.Job` allow-lists the new `tbl_product_parts.product_id → tbl_products`
 FK in assertion 9 and adds the three tables plus the `configurator/{product_id}/…` blob prefix
-to its inventory and deletion order, **the migration must not be deployed to production** —
+to its inventory and deletion order, **and** (ADR-014) allow-lists
+`tbl_product_model_variants.product_id → tbl_products` and inventories that table's
+`thumbnail_blob_url` / `original_glb_blob_url` blobs, **the migration must not be deployed to production** —
 the contract check aborts every purge run on an unrecognised FK.
 
 This does not block writing the migration, the ORM, or any service code. It blocks the deploy.
+
+**Status 2026-09-22 — change written, not merged or deployed.** `Rivollo.AccountPurge.Job` branch
+`model-variants-purge/supriya` (its decision D10) allow-lists both product FKs, adds assertions
+A20 (configurator cascade tree) and A21 (every FK into `tbl_product_assets` is SET NULL), the
+`configurator/{product_id}/` blob prefix, and a UNION branch for unmapped model-variant assets.
+
+**CONFIRMED on dev:** `tbl_product_parts.product_id → tbl_products` already exists there, so the
+deployed job's contract check rejects it — dev purge runs are aborting today, until that branch
+ships. **Deploy it together with `e3b9c6a1d27f`, between two nightly (00:00 UTC) runs:** either
+side alone makes the contract check abort the run — safely, before anything is deleted.
 
 ---
 

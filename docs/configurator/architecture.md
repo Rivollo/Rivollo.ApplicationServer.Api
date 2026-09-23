@@ -81,7 +81,7 @@ app/services/<domain>_service.py   business rules, HTTPException on rule violati
         |
 app/database/<domain>_repo.py      SQLAlchemy statements only
         |
-app/models/models.py               ORM tables
+app/models/configurator.py         ORM tables (the domain's own module)
 ```
 
 Note two competing repository locations exist: `app/database/*_repo.py` (11 modules, used by

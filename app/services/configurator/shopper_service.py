@@ -19,15 +19,19 @@ from typing import Optional
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.database.configurator_repo import USDZ_ASSET_ID
 from app.database.configurator_repo import configurator_repository as repo
-from app.models.models import PartOption, ProductPart
+from app.models.configurator import PartOption, ProductPart
 from app.services.configurator.material_service import material_service
 from app.services.configurator.option_service import OptionService
 
 logger = logging.getLogger(__name__)
 
 PRODUCT_NOT_FOUND = "Product not found"
+THUMBNAIL_ASSET_ID = 1
+ORIGINAL_TOKEN = "original"
+ORIGINAL_NAME = "Default"
 
 # Only a completed bake has a texture a shopper can be shown.
 _VISIBLE_BAKE_STATUS = "completed"
@@ -47,12 +51,32 @@ class PublicPartView:
 
 
 @dataclass(frozen=True)
+class PublicVariantView:
+    """One shape: the original model (id "original") or an extra variant."""
+
+    id: str
+    name: str
+    glb_url: str
+    usdz_url: Optional[str]
+    thumbnail_url: Optional[str]
+    is_default: bool
+    order_index: int
+    width_m: Optional[float]
+    depth_m: Optional[float]
+    height_m: Optional[float]
+    parts: list[PublicPartView]
+
+
+@dataclass(frozen=True)
 class PublicConfiguratorView:
     product_id: uuid.UUID
     product_name: str
     model_url: Optional[str]
     ar_model_url: Optional[str]
     parts: list[PublicPartView]
+    # None unless the product has extra model variants (ADR-014), so a
+    # single-model product's payload is exactly what it was before.
+    variants: Optional[list[PublicVariantView]] = None
 
 
 class ShopperService:
@@ -83,19 +107,99 @@ class ShopperService:
             else None
         )
 
-        parts: list[PublicPartView] = []
-        for part in await repo.get_parts_for_product(db, product_id):
-            view = ShopperService._filter_part(part, current_glb_version)
-            if view is not None:
-                parts.append(view)
+        # The ORIGINAL model's parts (variant_id NULL) — unchanged behaviour.
+        parts = await ShopperService._visible_parts(db, product_id, None, current_glb_version)
+        model_url = mesh_asset.image if mesh_asset is not None else None
+        ar_model_url = usdz_asset.image if usdz_asset is not None else None
 
         return PublicConfiguratorView(
             product_id=product.id,
             product_name=product.name,
-            model_url=mesh_asset.image if mesh_asset is not None else None,
-            ar_model_url=usdz_asset.image if usdz_asset is not None else None,
+            model_url=model_url,
+            ar_model_url=ar_model_url,
             parts=parts,
+            variants=await ShopperService._variants(
+                db, product_id, model_url, ar_model_url, parts
+            ),
         )
+
+    @staticmethod
+    async def _visible_parts(
+        db: AsyncSession,
+        product_id: uuid.UUID,
+        variant_id: Optional[uuid.UUID],
+        current_glb_version: Optional[str],
+    ) -> list[PublicPartView]:
+        parts: list[PublicPartView] = []
+        for part in await repo.get_parts_for_product(db, product_id, variant_id=variant_id):
+            view = ShopperService._filter_part(part, current_glb_version)
+            if view is not None:
+                parts.append(view)
+        return parts
+
+    @staticmethod
+    async def _variants(
+        db: AsyncSession,
+        product_id: uuid.UUID,
+        model_url: Optional[str],
+        ar_model_url: Optional[str],
+        original_parts: list[PublicPartView],
+    ) -> Optional[list[PublicVariantView]]:
+        """The original model first, then each extra variant with its own parts.
+
+        None — the key is then omitted — when the feature is off, when the
+        product has no extra variants, or when the original has no GLB.
+        """
+        if not settings.ENABLE_MODEL_VARIANTS or not model_url:
+            return None
+        rows = await repo.get_model_variants(db, product_id)
+        if not rows:
+            return None
+
+        assets = await repo.get_assets_by_ids(
+            db, [a for v in rows for a in (v.glb_asset_id, v.usdz_asset_id)]
+        )
+        thumbnail = await repo.get_product_asset(db, product_id, THUMBNAIL_ASSET_ID)
+        views = [
+            PublicVariantView(
+                id=ORIGINAL_TOKEN,
+                name=ORIGINAL_NAME,
+                glb_url=model_url,
+                usdz_url=ar_model_url,
+                thumbnail_url=thumbnail.image if thumbnail is not None else None,
+                is_default=True,
+                order_index=0,
+                width_m=None,
+                depth_m=None,
+                height_m=None,
+                parts=original_parts,
+            )
+        ]
+        for variant in rows:
+            glb = assets.get(variant.glb_asset_id)
+            if glb is None or not glb.image:
+                # A variant whose GLB is gone cannot be shown.
+                continue
+            usdz = assets.get(variant.usdz_asset_id)
+            views.append(
+                PublicVariantView(
+                    id=str(variant.id),
+                    name=variant.name,
+                    glb_url=glb.image,
+                    usdz_url=usdz.image if usdz is not None else None,
+                    thumbnail_url=variant.thumbnail_url,
+                    is_default=False,
+                    order_index=variant.order_index,
+                    width_m=variant.width_m,
+                    depth_m=variant.depth_m,
+                    height_m=variant.height_m,
+                    parts=await ShopperService._visible_parts(
+                        db, product_id, variant.id,
+                        material_service.build_glb_version(glb.id),
+                    ),
+                )
+            )
+        return views if len(views) > 1 else None
 
     @staticmethod
     def _filter_part(

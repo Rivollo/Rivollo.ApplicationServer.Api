@@ -216,13 +216,14 @@ async def _build_plan(db, option) -> _Plan:
             "save it again."
         ) from exc
 
-    current = await PartService.current_glb_version(db, part.product_id)
+    current = await PartService.current_glb_version(db, part.product_id, part.variant_id)
     if current is None:
         raise BakeFailure(NO_MODEL)
     if part.glb_version != current:
         raise BakeFailure(STALE_GLB)
 
-    asset = await repo.get_product_mesh_asset(db, part.product_id)
+    # The part's own model: the original GLB, or its model variant's (ADR-014).
+    asset = await repo.get_model_mesh_asset(db, part.product_id, part.variant_id)
     if asset is None or not asset.image:
         raise BakeFailure(NO_MODEL)
 

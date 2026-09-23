@@ -59,8 +59,23 @@ class USDZTriggerService:
         product_name: str,
         output_blob_name: str,
         job_id: str,
+        model_variant_id: Optional[str] = None,
     ) -> None:
         last_error: Optional[Exception] = None
+
+        args = [
+            f"--job-id={job_id}",
+            f"--glb-blob-url={glb_blob_url}",
+            f"--output-blob-name={output_blob_name}",
+            f"--product-id={product_id}",
+            f"--user-id={user_id}",
+            f"--product-name={product_name}",
+        ]
+        if model_variant_id:
+            # Configurator model variant (ADR-014): the job stores the USDZ on the
+            # variant, with no product mapping. Needs the converter image that
+            # understands this flag — an older image rejects the unknown arg.
+            args.append(f"--model-variant-id={model_variant_id}")
 
         url = (
             f"https://management.azure.com/subscriptions/{settings.AZURE_SUBSCRIPTION_ID}"
@@ -79,14 +94,7 @@ class USDZTriggerService:
                     # which OOM-kills the conversion. On the Consumption profile
                     # memory must be exactly 2x cpu.
                     "resources": {"cpu": 4.0, "memory": "8Gi"},
-                    "args": [
-                        f"--job-id={job_id}",
-                        f"--glb-blob-url={glb_blob_url}",
-                        f"--output-blob-name={output_blob_name}",
-                        f"--product-id={product_id}",
-                        f"--user-id={user_id}",
-                        f"--product-name={product_name}",
-                    ],
+                    "args": args,
                     "env": [
                         {"name": "STORAGE_CONTAINER",          "secretRef": "storagecontainer"},
                         {"name": "AZURE_BLOB_BASE_URL",        "secretRef": "azureblobbaseurl"},
@@ -140,6 +148,7 @@ class USDZTriggerService:
         user_id: str,
         product_name: Optional[str] = None,
         output_blob_name: str = "model.usdz",
+        model_variant_id: Optional[str] = None,
     ) -> None:
         """Fire-and-forget: schedules the Azure job trigger and returns immediately."""
         if not self._is_configured():
@@ -161,6 +170,7 @@ class USDZTriggerService:
             product_name=safe_name,
             output_blob_name=output_blob_name,
             job_id=job_id,
+            model_variant_id=model_variant_id,
         )
         loop.run_in_executor(None, sync_call)
         logger.info(

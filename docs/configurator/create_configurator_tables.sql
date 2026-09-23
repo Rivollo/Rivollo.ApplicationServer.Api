@@ -3,6 +3,10 @@
 --
 --  🔴 THIS FILE IS NOT THE DEPLOYMENT MECHANISM. DO NOT RUN IT BY HAND.
 --
+--  🔴 OUT OF DATE: this is revision c7a4e0d51b83 only. It does not include
+--  e3b9c6a1d27f (tbl_product_model_variants, tbl_product_parts.variant_id,
+--  uq_parts_variant_slug). A database built from it is missing model variants.
+--
 --  Alembic owns all Configurator DDL (ADR-009). This file exists only so
 --  the schema can be READ and REVIEWED without running Alembic — for a
 --  design review, a DBA read-through, or the Rivollo.AccountPurge.Job

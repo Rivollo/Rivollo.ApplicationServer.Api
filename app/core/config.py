@@ -315,6 +315,31 @@ class Settings(BaseSettings):
 		description="Automatic bake attempts before recovery gives up and fails the row.",
 	)
 
+	# --- Product Configurator model variants (ADR-014) ---------------------
+	# Off by default: the variant endpoints answer 404 until an environment opts
+	# in, so the existing system behaves exactly as before this feature.
+	ENABLE_MODEL_VARIANTS: bool = Field(
+		default=False,
+		description="Enable the Configurator model-variant endpoints.",
+	)
+	# Per-variant USDZ for iOS AR, off by default: it needs the converter image
+	# that accepts --model-variant-id, and one job run per uploaded variant.
+	# While this is off, usdz_url stays null and the viewer hides AR for that
+	# shape; switching it on later converts variants uploaded from then on.
+	ENABLE_VARIANT_USDZ: bool = Field(
+		default=False,
+		description="Request a USDZ conversion after a model-variant upload.",
+	)
+	# The whole upload is held in memory for inspection and compression.
+	MAX_VARIANT_GLB_BYTES: int = Field(
+		default=150 * 1024 * 1024,
+		description="Largest model-variant GLB accepted, in bytes.",
+	)
+	MAX_VARIANT_THUMBNAIL_BYTES: int = Field(
+		default=5 * 1024 * 1024,
+		description="Largest model-variant thumbnail accepted, in bytes.",
+	)
+
 	ENABLE_DRACO_COMPRESSION: bool = Field(default=True, description="Compress generated GLBs with Draco before upload to Azure.")
 
 	# Draco-compressed glTF package (model.gltf + model.bin + textures) stored as

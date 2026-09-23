@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.database.configurator_repo import configurator_repository as repo
-from app.models.models import PartOption, PartOptionTexture
+from app.models.configurator import PartOption, PartOptionTexture
 from app.services.configurator.option_service import OptionService
 from app.services.configurator.part_service import PartService
 from app.services.configurator.texture_baker import BakedTexture
@@ -518,7 +518,7 @@ class BakeService:
     @staticmethod
     async def _require_current_glb_version(db: AsyncSession, part) -> str:
         """Cheap glb_version check — one indexed lookup, no GLB download."""
-        current = await PartService.current_glb_version(db, part.product_id)
+        current = await PartService.current_glb_version(db, part.product_id, part.variant_id)
         if current is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=NO_MODEL_DETAIL

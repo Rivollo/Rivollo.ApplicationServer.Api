@@ -32,18 +32,17 @@ import uuid
 from datetime import datetime
 from typing import Optional, Sequence
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.models import (
+from app.models.configurator import (
     PartOption,
     PartOptionTexture,
-    Product,
-    ProductAsset,
-    ProductAssetMapping,
+    ProductModelVariant,
     ProductPart,
 )
+from app.models.models import Product, ProductAsset, ProductAssetMapping
 
 # A product's uploaded GLB is stored in tbl_product_assets with asset_id 9.
 #
@@ -54,6 +53,19 @@ from app.models.models import (
 MESH_ASSET_ID = 9
 # USDZ, for the shopper payload's AR model URL.
 USDZ_ASSET_ID = 11
+
+
+def _model_filter(variant_id: Optional[uuid.UUID]):
+    """Parts of one model: NULL variant_id is the product's original model."""
+    if variant_id is None:
+        return ProductPart.variant_id.is_(None)
+    return ProductPart.variant_id == variant_id
+
+
+def _variant_live():
+    """With ProductModelVariant outer-joined on the part: original-model parts,
+    or parts of a variant that has not been soft-deleted."""
+    return or_(ProductPart.variant_id.is_(None), ProductModelVariant.isactive.is_(True))
 
 
 class ConfiguratorRepository:
@@ -169,6 +181,105 @@ class ConfiguratorRepository:
         return result.scalar_one_or_none()
 
     # ------------------------------------------------------------------ #
+    # Model variants (ADR-014) — the EXTRA shapes; the original has no row
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    async def get_next_model_variant_order_index(
+        db: AsyncSession,
+        product_id: uuid.UUID,
+    ) -> int:
+        """Next display position. The original model is implicitly 0, so >= 1.
+
+        Counts soft-deleted rows too: a position is never reused, which keeps
+        ordering stable if a deleted variant is ever restored.
+        """
+        result = await db.execute(
+            select(func.max(ProductModelVariant.order_index)).where(
+                ProductModelVariant.product_id == product_id
+            )
+        )
+        current = result.scalar()
+        return max(int(current or 0), 0) + 1
+
+    @staticmethod
+    async def get_model_variants(
+        db: AsyncSession,
+        product_id: uuid.UUID,
+    ) -> list[ProductModelVariant]:
+        """A product's live extra variants in display order.
+
+        Caller must already have established ownership (or, for the shopper
+        payload, that the product is published).
+        """
+        result = await db.execute(
+            select(ProductModelVariant)
+            .where(
+                ProductModelVariant.product_id == product_id,
+                ProductModelVariant.isactive.is_(True),
+            )
+            .order_by(ProductModelVariant.order_index.asc(), ProductModelVariant.created_date.asc())
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def get_owned_model_variant(
+        db: AsyncSession,
+        variant_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> Optional[ProductModelVariant]:
+        """A live variant, resolved to its owner through its own product_id."""
+        result = await db.execute(
+            select(ProductModelVariant)
+            .join(Product, Product.id == ProductModelVariant.product_id)
+            .where(
+                ProductModelVariant.id == variant_id,
+                ProductModelVariant.isactive.is_(True),
+                Product.created_by == user_id,
+                Product.deleted_at.is_(None),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_assets_by_ids(
+        db: AsyncSession,
+        asset_ids: Sequence[uuid.UUID],
+    ) -> dict[uuid.UUID, ProductAsset]:
+        """Asset rows by id — a variant's GLB and USDZ are unmapped, so they
+        are addressed directly rather than through the mapping table."""
+        wanted = [a for a in asset_ids if a is not None]
+        if not wanted:
+            return {}
+        result = await db.execute(select(ProductAsset).where(ProductAsset.id.in_(wanted)))
+        return {row.id: row for row in result.scalars().all()}
+
+    @staticmethod
+    async def get_model_mesh_asset(
+        db: AsyncSession,
+        product_id: uuid.UUID,
+        variant_id: Optional[uuid.UUID],
+    ) -> Optional[ProductAsset]:
+        """The GLB asset row of one model of a product.
+
+        ``variant_id=None`` — the original model, resolved exactly as before
+        (newest active mapped asset 9). Otherwise the variant's own
+        ``glb_asset_id``, and only while the variant is live and belongs to
+        ``product_id``: a part never resolves another product's GLB.
+        """
+        if variant_id is None:
+            return await ConfiguratorRepository.get_product_mesh_asset(db, product_id)
+        result = await db.execute(
+            select(ProductAsset)
+            .join(ProductModelVariant, ProductModelVariant.glb_asset_id == ProductAsset.id)
+            .where(
+                ProductModelVariant.id == variant_id,
+                ProductModelVariant.product_id == product_id,
+                ProductModelVariant.isactive.is_(True),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    # ------------------------------------------------------------------ #
     # Parts — read
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -176,13 +287,19 @@ class ConfiguratorRepository:
         db: AsyncSession,
         product_id: uuid.UUID,
         *,
+        variant_id: Optional[uuid.UUID] = None,
         active_only: bool = False,
     ) -> list[ProductPart]:
-        """All parts of a product in display order, options eagerly loaded.
+        """One model's parts in display order, options eagerly loaded.
 
-        Caller must already have established ownership of ``product_id``.
+        ``variant_id=None`` is the product's ORIGINAL model — exactly the parts
+        this returned before model variants existed (ADR-014). Caller must
+        already have established ownership of ``product_id``.
         """
-        stmt = select(ProductPart).where(ProductPart.product_id == product_id)
+        stmt = select(ProductPart).where(
+            ProductPart.product_id == product_id,
+            _model_filter(variant_id),
+        )
         if active_only:
             stmt = stmt.where(ProductPart.isactive.is_(True))
         stmt = stmt.order_by(ProductPart.order_index.asc(), ProductPart.created_date.asc())
@@ -203,10 +320,13 @@ class ConfiguratorRepository:
         result = await db.execute(
             select(ProductPart)
             .join(Product, Product.id == ProductPart.product_id)
+            .outerjoin(ProductModelVariant, ProductModelVariant.id == ProductPart.variant_id)
             .where(
                 ProductPart.id == part_id,
                 Product.created_by == user_id,
                 Product.deleted_at.is_(None),
+                # A soft-deleted model variant takes its parts with it.
+                _variant_live(),
             )
         )
         return result.scalar_one_or_none()
@@ -216,15 +336,19 @@ class ConfiguratorRepository:
         db: AsyncSession,
         product_id: uuid.UUID,
         *,
+        variant_id: Optional[uuid.UUID] = None,
         exclude_id: Optional[uuid.UUID] = None,
     ) -> list[ProductPart]:
-        """Active parts of a product, for the material-index overlap check.
+        """Active parts of ONE model, for the material-index overlap check.
 
+        Material indices are only comparable within one GLB, so siblings are
+        the parts with the same ``variant_id`` (NULL = the original model).
         Must be called inside the transaction that holds the product row lock
         from ``get_owned_product(for_update=True)``, or the check races.
         """
         stmt = select(ProductPart).where(
             ProductPart.product_id == product_id,
+            _model_filter(variant_id),
             ProductPart.isactive.is_(True),
         )
         if exclude_id is not None:
@@ -294,10 +418,12 @@ class ConfiguratorRepository:
             select(PartOption)
             .join(ProductPart, ProductPart.id == PartOption.part_id)
             .join(Product, Product.id == ProductPart.product_id)
+            .outerjoin(ProductModelVariant, ProductModelVariant.id == ProductPart.variant_id)
             .where(
                 PartOption.id == option_id,
                 Product.created_by == user_id,
                 Product.deleted_at.is_(None),
+                _variant_live(),
             )
             .options(selectinload(PartOption.part))
         )
