@@ -86,7 +86,8 @@ product's model, and is its **permanent default**: no `is_default`, no "set as d
 `tbl_product_parts.variant_id` is nullable and **NULL means the original model**; slugs stay
 unique per product; the overlap rule is per model (the lock is still the product row). The
 migration writes no data and alters no existing core table. Variant routes are behind
-`ENABLE_MODEL_VARIANTS` (off by default). Legacy colour variants stay untouched. "Model variant"
+`ENABLE_MODEL_VARIANTS`, **on by default** since 2026-09-23 — so every environment running
+this build needs migration `e3b9c6a1d27f` applied; set it to `false` to hold one back. Legacy colour variants stay untouched. "Model variant"
 in code, "Variants" in UI — never plain "variant", which already means a colour variant here.
 ADR-014.
 

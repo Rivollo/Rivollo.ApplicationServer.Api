@@ -316,10 +316,13 @@ class Settings(BaseSettings):
 	)
 
 	# --- Product Configurator model variants (ADR-014) ---------------------
-	# Off by default: the variant endpoints answer 404 until an environment opts
-	# in, so the existing system behaves exactly as before this feature.
+	# ON by default (product decision, 2026-09-23). Every environment running
+	# this build therefore needs tbl_product_model_variants and the nullable
+	# tbl_product_parts.variant_id (migration e3b9c6a1d27f): with the flag on
+	# and the table missing, the variant routes AND the public shopper payload
+	# fail. Set ENABLE_MODEL_VARIANTS=false to hold an environment back.
 	ENABLE_MODEL_VARIANTS: bool = Field(
-		default=False,
+		default=True,
 		description="Enable the Configurator model-variant endpoints.",
 	)
 	# Per-variant USDZ for iOS AR, off by default: it needs the converter image

@@ -627,8 +627,11 @@ product's original model stays its model and its **permanent default**.
 6. **The migration is purely additive** (`e3b9c6a1d27f`): one table, one nullable column,
    indexes. No data written, nothing dropped, no change to `tbl_products`,
    `tbl_product_assets` or `tbl_product_asset_mapping`.
-7. **Off by default.** `ENABLE_MODEL_VARIANTS` makes every variant route answer 404 until an
-   environment opts in.
+7. **`ENABLE_MODEL_VARIANTS`, on by default** (product decision, 2026-09-23; it shipped off
+   and was flipped before the first deploy). Set to `false`, every variant route answers 404
+   and the shopper payload omits `variants`, exactly as before this feature. On — the default
+   — an environment MUST have migration `e3b9c6a1d27f` applied: without the table the variant
+   routes and the public shopper payload both fail.
 8. **Every variant GLB is Draco-compressed on upload**, reusing
    `glb_compression_service.compress()` (gltf-transform, in-process Node) off the event loop.
    The compressed file is re-inspected and must have identical material and mesh names in

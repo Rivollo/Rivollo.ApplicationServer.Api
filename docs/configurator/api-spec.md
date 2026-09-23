@@ -725,7 +725,8 @@ and separately immutable-cached, so a short TTL on the manifest is enough.
 
 An extra model variant is another **shape** of a product with its own GLB. The product's
 original model stays its model and permanent default; it has no variant row. Every route here
-answers **404** while `ENABLE_MODEL_VARIANTS` is off (the default).
+answers **404** while `ENABLE_MODEL_VARIANTS` is `false`; it is **on by default**, so an
+environment on this build needs migration `e3b9c6a1d27f` applied.
 
 ### `POST /products/{product_id}/configurator/model-variants` → `201`
 
