@@ -42,8 +42,9 @@ app/models/<domain>.py             ORM tables for the domain (e.g. configurator.
 
 ## Product Configurator
 
-Implemented: parts, options and textures (revision `c7a4e0d51b83`), and **model variants**
-(`e3b9c6a1d27f`, ADR-014) — being built out step by step. If you are asked to work on it:
+Implemented: parts, options and textures (revision `c7a4e0d51b83`), **model variants**
+(`e3b9c6a1d27f`, ADR-014), and **layout from photo** — model variants generated from a photo
+via reviewed candidates (`b7d3f1a2c9e4`, ADR-015) — being built out step by step. If you are asked to work on it:
 
 ### Read first, in order
 
@@ -76,9 +77,16 @@ what the existing colour-variant feature does and what this design replaces. ADR
 recomputed, unstable heuristic — surface it as `similarity_group_hint`, never store it as a
 part identity. ADR-004.
 
-**Exactly four tables.** `tbl_product_model_variants`, `tbl_product_parts`, `tbl_part_options`,
-`tbl_part_option_textures`. No `tbl_product_part_materials`, no separate texture-option table,
-no `option_type` / `source_type` column.
+**Exactly five tables.** `tbl_product_model_variants`, `tbl_product_parts`, `tbl_part_options`,
+`tbl_part_option_textures`, `tbl_model_variant_generations` (ADR-015). No
+`tbl_product_part_materials`, no separate texture-option table, no `option_type` /
+`source_type` column.
+
+**A generated candidate is never a model variant.** Photo generations (ADR-015) produce a private
+candidate GLB; only `accept` creates a `tbl_product_model_variants` row, and it does so through
+the unchanged `ModelVariantService.create_variant`. Never write a variant row without a GLB, and
+never expose `candidate_glb_url` to shoppers. Credits are charged per attempt through
+`app/services/generation_gate.py`.
 
 **Model variants are additive — the existing system must not change.** A model variant is an
 EXTRA shape of a product (its own GLB). The product's original model has no row, stays the
@@ -186,7 +194,7 @@ seller schema with fields omitted, and never exposes `recipe`, `bake_*`, `glb_ve
 | ~~Q5~~ | ~~Trigger or child table for material-index uniqueness?~~ ✅ resolved by ADR-012 | — |
 | Q6 | Fate of the existing colour-variant feature — and the `/products/{id}/materials` path collision. | routing |
 | ~~Q7~~ | ~~Can the viewer swap textures by glTF material index at runtime?~~ ✅ answered **yes** (product decision 2026-09-21) | — |
-| **Q8** | 🔴 **Has `Rivollo.AccountPurge.Job` been updated?** ADR-010, and ADR-014 for `tbl_product_model_variants`. Change written on its branch `model-variants-purge/supriya` (D10) — not merged or deployed. Deploy it in the same window as `e3b9c6a1d27f`. | **production deployment** |
+| **Q8** | 🔴 **Has `Rivollo.AccountPurge.Job` been updated?** ADR-010, ADR-014 for `tbl_product_model_variants`, ADR-015 for `tbl_model_variant_generations`, and the API-key / Shopify tables — full list in `docs/account-purge-job-changes.md`. Change written on its branch `model-variants-purge/supriya` (D10) — not merged or deployed. Deploy it in the same window as `e3b9c6a1d27f`. | **production deployment** |
 
 Open **Q8 on day one** — it is cross-repository and has the longest lead time.
 

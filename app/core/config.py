@@ -343,6 +343,83 @@ class Settings(BaseSettings):
 		description="Largest model-variant thumbnail accepted, in bytes.",
 	)
 
+	# --- Layout from photo: model-variant generations (ADR-015) -----------
+	# Rides on ENABLE_MODEL_VARIANTS; there is no separate flag.
+	# Generations running at once per replica. fal does the work remotely, but
+	# each finished GLB is held in memory for inspection and upload.
+	GENERATION_CONCURRENCY: int = Field(
+		default=2,
+		description="Model-variant generations run concurrently per replica.",
+	)
+	# A queued/generating row older than this is presumed dead with its
+	# replica and marked failed. Comfortably above fal's own poll ceiling
+	# (600 s) plus download and upload.
+	GENERATION_STALE_AFTER_SECONDS: int = Field(
+		default=30 * 60,
+		description="Age after which an in-flight generation is marked failed.",
+	)
+	GENERATION_SWEEP_INTERVAL_SECONDS: int = Field(
+		default=5 * 60,
+		description="How often the stale-generation sweep runs.",
+	)
+	GENERATION_SWEEP_BATCH: int = Field(
+		default=50,
+		description="Maximum rows the stale-generation sweep handles per pass.",
+	)
+	# Unaccepted candidates are discarded (blob deleted) after this many days.
+	GENERATION_CANDIDATE_TTL_DAYS: int = Field(
+		default=30,
+		description="Days an unaccepted candidate GLB is kept.",
+	)
+	# Largest source photo read back to make a layout-tile thumbnail.
+	GENERATION_MAX_SOURCE_IMAGE_BYTES: int = Field(
+		default=25 * 1024 * 1024,
+		description="Largest source image read to build a thumbnail, in bytes.",
+	)
+
+	# --- Shopify integration (docs/shopify-integration/spec.md, ADR-016) --
+	# OFF by default: every /integrations/shopify route answers 404 and the
+	# public Shopify payload is absent. Needs migration c9e5a3b1d8f6.
+	ENABLE_SHOPIFY_INTEGRATION: bool = Field(
+		default=False,
+		description="Enable the Shopify integration endpoints.",
+	)
+	# Largest Shopify image copied into Rivollo storage, in bytes.
+	SHOPIFY_IMAGE_MAX_BYTES: int = Field(
+		default=20 * 1024 * 1024,
+		description="Largest Shopify image imported, in bytes.",
+	)
+	SHOPIFY_IMAGE_TIMEOUT_SECONDS: float = Field(
+		default=20.0,
+		description="Timeout for downloading one Shopify image.",
+	)
+	# The public viewer site (Rivollo.Viewer.Portal), e.g. https://view.rivollo.com.
+	# The viewer link is VIEWER_BASE_URL + "/" + public_id. Empty = no link returned.
+	VIEWER_BASE_URL: str = Field(
+		default="",
+		description="Base URL of the public product viewer.",
+	)
+
+	# --- API keys for third-party integrations (docs/api_keys.md) ---------
+	# A seller may hold this many usable (not revoked, not expired) keys.
+	API_KEY_MAX_ACTIVE_PER_USER: int = Field(
+		default=10,
+		description="Maximum active API keys per user.",
+	)
+	# last_used_at is written at most this often per key, so a busy
+	# integration does not turn every request into a database write.
+	API_KEY_LAST_USED_RESOLUTION_SECONDS: int = Field(
+		default=60,
+		description="Minimum seconds between last_used_at writes for one key.",
+	)
+	# Failed API-key authentications allowed per IP per minute before 429.
+	# Per-process, like the OTP limiter; defence in depth only — a key has
+	# 192 random bits, so guessing is not a practical attack.
+	API_KEY_AUTH_FAILURES_PER_IP_PER_MINUTE: int = Field(
+		default=30,
+		description="Failed API-key authentications per IP per minute before 429.",
+	)
+
 	ENABLE_DRACO_COMPRESSION: bool = Field(default=True, description="Compress generated GLBs with Draco before upload to Azure.")
 
 	# Draco-compressed glTF package (model.gltf + model.bin + textures) stored as

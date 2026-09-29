@@ -21,6 +21,7 @@ Verification** until someone checks.
 | [012](#adr-012) | Material-index uniqueness: JSONB + row lock, no trigger, no child table | **Accepted** |
 | [013](#adr-013) | Uploaded textures are `recipe.method = "image"`, not an option type | **Accepted** |
 | [014](#adr-014) | Model variants: extra shapes, added without changing the existing system | **Accepted** (with a **deployment blocker**, Q8) |
+| [015](#adr-015) | Model variants can be generated from a photo, via reviewed candidates | **Accepted** (with a **deployment blocker**, Q8) |
 
 ---
 
@@ -679,6 +680,54 @@ which the purge's existing user prefix already sweeps.
   variant's own FK (job decision D10) — so the service always sets `created_by`.
 - A variant with `glb_asset_id IS NULL` can exist after an out-of-band asset delete; services
   treat it as unusable rather than failing.
+- **Amended by [ADR-015](#adr-015):** a variant may also originate from an accepted photo
+  generation. It is created through the same `create_variant` pipeline, so nothing above changes.
+
+---
+
+## ADR-015
+
+### Model variants can be generated from a photo, via reviewed candidates
+
+**Status: Accepted** (product decision, 2026-09-28) — carries the same **deployment blocker**
+as ADR-014 (Q8).
+
+**Context.** ADR-014 variants are upload-only. Sellers, and the Shopify integration, need to turn
+a product photo into a layout. Generation is paid (AI credits), takes minutes, and its quality
+depends on the photo — so a bad result must not appear to shoppers, and a seller must be able to
+try another image.
+
+**Decision.**
+
+1. **A fifth table, `tbl_model_variant_generations`,** records each attempt: source image, model,
+   credit cost, status (`queued → generating → ready → accepted | discarded`, or `failed`),
+   candidate GLB, and `accepted_variant_id`.
+2. **The output is a private candidate.** It is stored under
+   `{user}/{product}/model-variants/{generation_id}/` by the existing
+   `storage_service.upload_model_variant_file`, shown only to the seller, and never appears in any
+   shopper payload.
+3. **Accepting reuses `ModelVariantService.create_variant` unchanged** (ownership, Draco + name
+   re-check, unmapped asset row, blob path, USDZ request). So every ADR-014 rule holds for
+   generated variants, and `tbl_product_model_variants` keeps its invariant that every row has a
+   GLB. The source photo becomes the variant's thumbnail.
+4. **One image per generation.** The fal registry is single-image (`FalModelSpec.build_body`).
+5. **Same plan gate and credits as `/createProductFal`**, via `app/services/generation_gate.py`.
+   Charged per attempt, after the row is written; not refunded on failure (matches the product
+   path). `/createProductFal` keeps its inline copy for now.
+6. **Durability per ADR-007:** `generation_runner.enqueue()` in-process, plus a startup and
+   periodic sweep that fails stale in-flight rows (never silently re-runs paid work) and discards
+   candidates past `GENERATION_CANDIDATE_TTL_DAYS`.
+7. **`auto_accept`** lets a caller skip the preview; if acceptance fails the candidate stays
+   `ready` with a note.
+8. **`client_ref`** is an opaque caller tag (the Shopify module uses `shopify-layout:<uuid>`); the
+   Configurator never interprets it and gains no integration-specific column.
+
+**Foreign keys.** `product_id → tbl_products` CASCADE (a new product FK: Q8);
+`accepted_variant_id → tbl_product_model_variants` SET NULL; no FK to `tbl_users`.
+
+**Consequences.** `CLAUDE.md`'s "exactly four tables" becomes five; the spirit is unchanged (no
+normalised material table, no discriminator column). ADR-014 is amended: a variant may originate
+from an accepted generation. The account-purge job must allow-list one more product FK.
 
 ---
 
@@ -781,7 +830,9 @@ Tracked by [ADR-010](#adr-010). The decision is settled; the coordination is not
 FK in assertion 9 and adds the three tables plus the `configurator/{product_id}/…` blob prefix
 to its inventory and deletion order, **and** (ADR-014) allow-lists
 `tbl_product_model_variants.product_id → tbl_products` and inventories that table's
-`thumbnail_blob_url` / `original_glb_blob_url` blobs, **the migration must not be deployed to production** —
+`thumbnail_blob_url` / `original_glb_blob_url` blobs, **and** (ADR-015) allow-lists
+`tbl_model_variant_generations.product_id → tbl_products` and inventories that table,
+**the migration must not be deployed to production** —
 the contract check aborts every purge run on an unrecognised FK.
 
 This does not block writing the migration, the ORM, or any service code. It blocks the deploy.

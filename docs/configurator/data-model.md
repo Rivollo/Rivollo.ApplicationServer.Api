@@ -9,8 +9,9 @@
 See [architecture.md](architecture.md) for context and [decisions.md](decisions.md) for the
 ADRs and open questions this document depends on.
 
-**Shape: four tables.** `tbl_product_model_variants` (§14, [ADR-014](decisions.md#adr-014)),
-`tbl_product_parts`, `tbl_part_options`, `tbl_part_option_textures`. No normalized material
+**Shape: five tables.** `tbl_product_model_variants` (§14, [ADR-014](decisions.md#adr-014)),
+`tbl_product_parts`, `tbl_part_options`, `tbl_part_option_textures`, and
+`tbl_model_variant_generations` (§15, [ADR-015](decisions.md#adr-015)). No normalized material
 table, no separate texture-option table, no `option_type` / `source_type` discriminator column.
 
 ---
@@ -924,3 +925,35 @@ SELECT v.id, v.name, v.compression_status, v.original_size_bytes, v.compressed_s
 SELECT count(*) FROM tbl_product_asset_mapping m
   JOIN tbl_product_model_variants v ON v.glb_asset_id = m.product_asset_id;
 ```
+
+
+---
+
+## 15. `tbl_model_variant_generations` — layout from photo (implemented, `b7d3f1a2c9e4`)
+
+One row per attempt to generate a model variant from a photo ([ADR-015](decisions.md#adr-015)).
+The generated GLB is a private candidate; accepting it creates a `tbl_product_model_variants`
+row through `ModelVariantService.create_variant`, so a variant row only ever exists once its GLB
+does.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `product_id` | UUID NOT NULL | FK → `tbl_products` **CASCADE** (new product FK — Q8) |
+| `name` | TEXT NOT NULL | variant name on accept |
+| `source_image_url` | TEXT NOT NULL | seller's own upload, validated at request |
+| `model_key`, `credit_cost` | TEXT, INTEGER NOT NULL | resolved and charged at request |
+| `status` | TEXT NOT NULL `'queued'` | CHECK: queued, generating, ready, failed, accepted, discarded |
+| `error` | TEXT | seller-safe text only |
+| `started_at`, `completed_at` | TIMESTAMPTZ | `started_at` drives the sweep |
+| `candidate_glb_url`, `candidate_glb_blob_url`, `candidate_size_bytes` | | cleared when the blob is deleted |
+| `accepted_variant_id` | UUID | FK → `tbl_product_model_variants` **SET NULL** |
+| `auto_accept` | BOOLEAN NOT NULL `false` | |
+| `client_ref` | TEXT | caller's opaque tag (e.g. `shopify-layout:<uuid>`) |
+| audit | | no FK to `tbl_users` |
+
+Indexes: `(product_id, created_date)`, `(product_id, client_ref)`, `(accepted_variant_id)`,
+partial `ix_generations_in_flight ON (started_at) WHERE status IN ('queued','generating')`.
+
+Candidate blobs: `{user_id}/{product_id}/model-variants/{generation_id}/candidate.glb`, written by
+the existing `storage_service.upload_model_variant_file` — inside the purge's user prefix.

@@ -12,6 +12,12 @@ from app.core.db import get_db
 from app.core.security import decode_access_token
 from app.models.models import User
 from app.services.activity_service import ActivityService
+from app.services.api_key_service import (
+    INVALID_API_KEY_DETAIL,
+    ApiKeyPrincipal,
+    ApiKeyService,
+    client_ip as api_key_client_ip,
+)
 from app.services.auth_service import AuthService
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -172,8 +178,70 @@ async def verify_app_token(
         raise invalid_exc
 
 
+async def get_api_key_principal(
+    request: Request,
+    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApiKeyPrincipal:
+    """Authenticate an integration by ``Authorization: Bearer riv_live_...``.
+
+    Used ONLY by routes that opt in to API keys (integration endpoints). It is
+    not accepted by get_current_user, so a key can never reach a portal route.
+
+    The key is checked by ApiKeyService; the owner is then held to exactly the
+    rules get_current_user applies to a JWT, with the same messages.
+    """
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="An API key is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    api_key, user = await ApiKeyService.authenticate(
+        db, credentials.credentials, ip=api_key_client_ip(request)
+    )
+
+    if user is None:
+        # The owner no longer exists: the key grants nothing.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=INVALID_API_KEY_DETAIL,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if user.deleted_at is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ACCOUNT_PENDING_DELETION_DETAIL)
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ACCOUNT_DEACTIVATED_DETAIL)
+
+    return ApiKeyPrincipal(user=user, api_key=api_key)
+
+
+def require_api_key_scope(scope: str):
+    """Dependency factory: an API-key caller whose key carries ``scope``.
+
+    Usage::
+
+        @router.post("/integrations/...")
+        async def handler(principal: Annotated[ApiKeyPrincipal, Depends(require_api_key_scope("write"))]): ...
+    """
+
+    async def _dependency(
+        principal: Annotated[ApiKeyPrincipal, Depends(get_api_key_principal)],
+    ) -> ApiKeyPrincipal:
+        if not principal.has_scope(scope):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"This API key does not have the '{scope}' scope.",
+            )
+        return principal
+
+    return _dependency
+
+
 # Convenience type aliases
 CurrentUser = Annotated[User, Depends(get_current_user)]
 OptionalUser = Annotated[Optional[User], Depends(get_current_user_optional)]
 DB = Annotated[AsyncSession, Depends(get_db)]
 AppTokenVerified = Annotated[None, Depends(verify_app_token)]
+ApiKeyAuth = Annotated[ApiKeyPrincipal, Depends(get_api_key_principal)]
