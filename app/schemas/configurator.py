@@ -558,3 +558,59 @@ class ModelVariantReorder(BaseModel):
     # Every live extra variant of the product, in the new order. The original
     # model is always first and is not listed.
     variant_ids: list[uuid.UUID] = Field(default_factory=list, max_length=200)
+
+
+# --------------------------------------------------------------------------- #
+# Layout from photo: model-variant generations (ADR-015)
+#
+# Seller-only. A candidate GLB is never part of any shopper payload; it becomes
+# visible to shoppers only once accepted, as an ordinary model variant.
+# --------------------------------------------------------------------------- #
+GenerationStatus = Literal["queued", "generating", "ready", "failed", "accepted", "discarded"]
+CLIENT_REF_MAX = 200
+
+
+class ModelVariantGenerateRequest(BaseModel):
+    """``POST /products/{id}/configurator/model-variants/generate``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=MODEL_VARIANT_NAME_MAX)
+    # Must be the caller's own upload (POST /uploads/content). Checked in the
+    # service, which never fetches an arbitrary URL.
+    image_url: str = Field(..., min_length=1, max_length=2000)
+    # Registry key (GET /ai/3d-models). None = the registry's current default.
+    model: Optional[str] = Field(default=None, max_length=100)
+    client_ref: Optional[str] = Field(default=None, max_length=CLIENT_REF_MAX)
+    auto_accept: bool = False
+
+
+class ModelVariantAcceptRequest(BaseModel):
+    """``POST /configurator/model-variant-generations/{id}/accept``. Body optional."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Overrides the name given at request time.
+    name: Optional[str] = Field(default=None, min_length=1, max_length=MODEL_VARIANT_NAME_MAX)
+
+
+class ModelVariantGenerationResponse(BaseModel):
+    id: uuid.UUID
+    product_id: uuid.UUID
+    name: str
+    source_image_url: str
+    model: str
+    credit_cost: int
+    status: GenerationStatus
+    error: Optional[str] = None
+    # Set only while status == "ready": the raw generated GLB, for a seller
+    # preview. Not Draco-compressed; compression happens on accept.
+    candidate_glb_url: Optional[str] = None
+    accepted_variant_id: Optional[uuid.UUID] = None
+    auto_accept: bool = False
+    client_ref: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    # Same shape as /createProductFal's "gpu" field. Present on create only.
+    estimate: Optional[dict[str, Any]] = None

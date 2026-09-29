@@ -360,3 +360,87 @@ class PartOptionTexture(UUIDMixin, AuditMixin, Base):
         return self.created_date
 
     option: Mapped[PartOption] = relationship("PartOption", back_populates="textures")
+
+
+# --------------------------------------------------------------------------- #
+# Model variant generations (ADR-015)
+#
+# The fifth Configurator table. One row per attempt to generate a model variant
+# from a photo. The generated GLB is a private CANDIDATE until the seller
+# accepts it; acceptance creates an ordinary tbl_product_model_variants row via
+# ModelVariantService.create_variant. So a variant row only ever exists once its
+# GLB does, and no reader of variants has to understand "generating".
+# --------------------------------------------------------------------------- #
+GENERATION_STATUSES = ("queued", "generating", "ready", "failed", "accepted", "discarded")
+# Rows the sweep watches: work that is in flight and could have died with a replica.
+GENERATION_IN_FLIGHT = ("queued", "generating")
+
+
+class ModelVariantGeneration(UUIDMixin, AuditMixin, Base):
+    """One attempt to turn a photo into a model variant, and its candidate GLB.
+
+    ``created_by`` is the seller who asked (always set); the runner and the
+    auto-accept path act as that seller, because by then there is no request.
+
+    FKs: ``product_id -> tbl_products`` CASCADE — a new product FK, so
+    Rivollo.AccountPurge.Job must allow-list it (Q8, ADR-015).
+    ``accepted_variant_id -> tbl_product_model_variants`` SET NULL, consistent
+    with ADR-014's purge ordering. No FK to tbl_users (ADR-010).
+    """
+
+    __tablename__ = "tbl_model_variant_generations"
+    __table_args__ = (
+        Index("ix_generations_product_created", "product_id", "created_date"),
+        Index("ix_generations_product_client_ref", "product_id", "client_ref"),
+        Index("ix_generations_accepted_variant", "accepted_variant_id"),
+        # The sweep's query: in-flight rows by age.
+        Index(
+            "ix_generations_in_flight",
+            "started_at",
+            postgresql_where=text("status IN ('queued', 'generating')"),
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'generating', 'ready', 'failed', 'accepted', 'discarded')",
+            name="ck_generations_status",
+        ),
+        CheckConstraint("credit_cost >= 0", name="ck_generations_credit_cost"),
+    )
+
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("tbl_products.id", ondelete="CASCADE"), nullable=False
+    )
+    # The name the variant gets on accept (overridable at accept time).
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # The seller's own upload (validated at request time); what fal was given.
+    source_image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # The registry model resolved and paid for at request time.
+    model_key: Mapped[str] = mapped_column(Text, nullable=False)
+    credit_cost: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'queued'"))
+    # Seller-safe text only. The real exception goes to the log.
+    error: Mapped[Optional[str]] = mapped_column(Text)
+    started_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
+
+    # The raw generated GLB, under {user}/{product}/model-variants/{generation id}/.
+    # Cleared when the blob is deleted (accept, discard, TTL).
+    candidate_glb_url: Mapped[Optional[str]] = mapped_column(Text)
+    candidate_glb_blob_url: Mapped[Optional[str]] = mapped_column(Text)
+    candidate_size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger)
+
+    accepted_variant_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("tbl_product_model_variants.id", ondelete="SET NULL"),
+    )
+    # Accept the candidate as soon as it is ready, without a preview step.
+    auto_accept: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
+    # Opaque tag chosen by the caller (the Shopify module uses
+    # "shopify-layout:<uuid>"). Never interpreted here.
+    client_ref: Mapped[Optional[str]] = mapped_column(Text)
+
+    @property
+    def created_at(self) -> datetime:
+        return self.created_date

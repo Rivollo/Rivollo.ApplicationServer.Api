@@ -844,6 +844,77 @@ mirrors this behind `Configurator:EnableModelVariants`.
 
 ---
 
+## 9b. Layout from photo: model-variant generations ([ADR-015](decisions.md#adr-015))
+
+Generate a model variant from one of the seller's uploaded photos. The output is a private
+**candidate** until accepted; accepting creates an ordinary model variant through the same
+pipeline as `POST …/model-variants` (§9a). Behind `ENABLE_MODEL_VARIANTS`. Seller JWT, ownership
+404 on every route.
+
+### `POST /products/{product_id}/configurator/model-variants/generate` → `202`
+
+```json
+{ "name": "4 Seater-corner",
+  "image_url": "{CDN}/{uploads}/users/{user_id}/uploads/{id}/corner.jpg",
+  "model": null, "client_ref": null, "auto_accept": false }
+```
+
+- `image_url` must be the caller's own upload (`POST /uploads/content`), the ADR-013 rule; never
+  fetched to decide. `400` otherwise.
+- `model`: registry key (`GET /ai/3d-models`); `null` = default. Same plan gate and credit cost as
+  `/createProductFal` (`403` paid model on Free plan, `400` not enough credits). **Credits are
+  charged per attempt and not refunded on failure** (matches the product path).
+- `auto_accept: true` accepts the candidate as soon as it is ready.
+- Unknown fields → `422`.
+
+Response: a generation (below) with `status: "queued"` and `estimate` (same shape as
+`/createProductFal`'s `gpu` field).
+
+### Generation object
+
+```json
+{ "id": "uuid", "product_id": "uuid", "name": "4 Seater-corner",
+  "source_image_url": "…", "model": "tripo-h3.1", "credit_cost": 10,
+  "status": "queued | generating | ready | failed | accepted | discarded",
+  "error": null, "candidate_glb_url": null, "accepted_variant_id": null,
+  "auto_accept": false, "client_ref": null,
+  "started_at": null, "completed_at": null, "created_at": "…", "estimate": null }
+```
+
+`candidate_glb_url` is set **only** while `ready` (raw fal output for a seller preview; not
+Draco-compressed). Never in any shopper payload.
+
+### `GET /products/{product_id}/configurator/model-variants/generations`
+
+Newest first. Optional `?status=` and `?client_ref=` filters.
+
+### `GET /configurator/model-variant-generations/{generation_id}`
+
+### `POST /configurator/model-variant-generations/{generation_id}/accept` → `201`
+
+Optional body `{ "name": "Corner" }` overrides the name. Response:
+
+```json
+{ "generation": { …, "status": "accepted", "accepted_variant_id": "uuid" },
+  "model_variant": { …ModelVariantCreateResponse… } }
+```
+
+The source photo, shrunk to a 1024 px JPEG, becomes the variant's thumbnail. Idempotent: a second
+accept answers `200` with the same variant. `409` unless `ready`. A candidate that fails the glTF
+parse is marked `failed`.
+
+### `DELETE /configurator/model-variant-generations/{generation_id}` → `200`
+
+Discard (or cancel while queued/generating; the runner drops its output). Deletes the candidate
+blob. Idempotent. `409` once accepted (delete the variant instead).
+
+### Durability
+
+Runs in-process behind `generation_runner.enqueue()` (ADR-007 pattern). A startup and periodic
+sweep fail rows stuck `queued`/`generating` longer than `GENERATION_STALE_AFTER_SECONDS`
+(no automatic re-run of paid work) and discard `ready` candidates older than
+`GENERATION_CANDIDATE_TTL_DAYS`.
+
 ## 10. Error reference
 
 | Status | When | Body |

@@ -21,17 +21,21 @@ import uuid
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
 from app.api.deps import CurrentUser, DB, get_current_user
 from app.core.config import settings
 from app.models.configurator import PartOption, ProductPart
 from app.schemas.configurator import (
+    CLIENT_REF_MAX,
     BakeProgress,
     BakeStatusResponse,
     MaterialResponse,
     MaterialsResponse,
+    ModelVariantAcceptRequest,
     ModelVariantCreateResponse,
+    ModelVariantGenerateRequest,
+    ModelVariantGenerationResponse,
     ModelVariantReorder,
     ModelVariantResponse,
     ModelVariantUpdate,
@@ -51,6 +55,9 @@ from app.schemas.configurator import (
 )
 from app.services.configurator.bake_service import bake_service
 from app.services.configurator.material_service import material_service
+from app.services.configurator.model_variant_generation_service import (
+    model_variant_generation_service,
+)
 from app.services.configurator.model_variant_service import (
     ModelEntry,
     UploadedFile,
@@ -342,6 +349,139 @@ async def delete_model_variant(
     var_uuid = _parse_uuid(variant_id, "variantId")
     await model_variant_service.delete(db, var_uuid, current_user.id)
     return api_success({"message": "Model variant deleted successfully"})
+
+
+# --------------------------------------------------------------------------- #
+# Layout from photo: model-variant generations (ADR-015)
+# --------------------------------------------------------------------------- #
+def _generation_response(generation, *, estimate=None) -> ModelVariantGenerationResponse:
+    return ModelVariantGenerationResponse(
+        id=generation.id,
+        product_id=generation.product_id,
+        name=generation.name,
+        source_image_url=generation.source_image_url,
+        model=generation.model_key,
+        credit_cost=generation.credit_cost,
+        status=generation.status,
+        error=generation.error,
+        # Only a ready candidate has a file worth previewing.
+        candidate_glb_url=generation.candidate_glb_url if generation.status == "ready" else None,
+        accepted_variant_id=generation.accepted_variant_id,
+        auto_accept=bool(generation.auto_accept),
+        client_ref=generation.client_ref,
+        started_at=generation.started_at,
+        completed_at=generation.completed_at,
+        created_at=generation.created_date,
+        estimate=estimate,
+    )
+
+
+@router.post(
+    "/products/{product_id}/configurator/model-variants/generate",
+    response_model=dict,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def generate_model_variant(
+    product_id: str,
+    payload: ModelVariantGenerateRequest,
+    current_user: CurrentUser,
+    db: DB,
+):
+    """Generate a model variant candidate from one of the seller's uploaded photos.
+
+    Charges the model's AI credits and returns at once with status ``queued``.
+    Poll the generation until ``ready``, preview ``candidate_glb_url``, then
+    accept or discard it. With ``auto_accept`` the candidate becomes a variant
+    as soon as it is ready.
+    """
+    prod_uuid = _parse_uuid(product_id, "productId")
+    requested = await model_variant_generation_service.request(
+        db,
+        prod_uuid,
+        current_user.id,
+        name=payload.name,
+        image_url=payload.image_url,
+        model_key=payload.model,
+        client_ref=payload.client_ref,
+        auto_accept=payload.auto_accept,
+    )
+    body = _generation_response(requested.generation, estimate=requested.estimate)
+    return api_success(body.model_dump(mode="json"))
+
+
+@router.get(
+    "/products/{product_id}/configurator/model-variants/generations",
+    response_model=dict,
+)
+async def list_model_variant_generations(
+    product_id: str,
+    current_user: CurrentUser,
+    db: DB,
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    client_ref: Optional[str] = Query(default=None, max_length=CLIENT_REF_MAX),
+):
+    """A product's generations, newest first. Filter by ``status`` or ``client_ref``."""
+    prod_uuid = _parse_uuid(product_id, "productId")
+    generations = await model_variant_generation_service.list_for_product(
+        db, prod_uuid, current_user.id, status_filter=status_filter, client_ref=client_ref
+    )
+    return api_success([_generation_response(g).model_dump(mode="json") for g in generations])
+
+
+@router.get("/configurator/model-variant-generations/{generation_id}", response_model=dict)
+async def get_model_variant_generation(generation_id: str, current_user: CurrentUser, db: DB):
+    gen_uuid = _parse_uuid(generation_id, "generationId")
+    generation = await model_variant_generation_service.get(db, gen_uuid, current_user.id)
+    return api_success(_generation_response(generation).model_dump(mode="json"))
+
+
+@router.post(
+    "/configurator/model-variant-generations/{generation_id}/accept",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+)
+async def accept_model_variant_generation(
+    generation_id: str,
+    current_user: CurrentUser,
+    db: DB,
+    response: Response,
+    payload: Optional[ModelVariantAcceptRequest] = Body(default=None),
+):
+    """Turn a ready candidate into a model variant (a Layout tile).
+
+    201 with the new variant. Accepting an already-accepted generation is
+    idempotent and answers 200 with the variant it became.
+    """
+    gen_uuid = _parse_uuid(generation_id, "generationId")
+    accepted = await model_variant_generation_service.accept(
+        db, gen_uuid, current_user.id, name=payload.name if payload else None
+    )
+    if not accepted.created:
+        response.status_code = status.HTTP_200_OK
+
+    variant_body = None
+    if accepted.variant is not None:
+        if accepted.created:
+            variant_body = ModelVariantCreateResponse(
+                **_variant_response(accepted.variant, glb_url=accepted.glb_url).model_dump(),
+                warnings=accepted.warnings,
+            )
+        else:
+            variant_body = _variant_response(accepted.variant, glb_url=accepted.glb_url)
+    return api_success(
+        {
+            "generation": _generation_response(accepted.generation).model_dump(mode="json"),
+            "model_variant": variant_body.model_dump(mode="json") if variant_body else None,
+        }
+    )
+
+
+@router.delete("/configurator/model-variant-generations/{generation_id}", response_model=dict)
+async def discard_model_variant_generation(generation_id: str, current_user: CurrentUser, db: DB):
+    """Discard a candidate (or cancel one still generating). Credits are not refunded."""
+    gen_uuid = _parse_uuid(generation_id, "generationId")
+    generation = await model_variant_generation_service.discard(db, gen_uuid, current_user.id)
+    return api_success(_generation_response(generation).model_dump(mode="json"))
 
 
 @router.get(

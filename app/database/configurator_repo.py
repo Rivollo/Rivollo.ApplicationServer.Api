@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.configurator import (
+    ModelVariantGeneration,
     PartOption,
     PartOptionTexture,
     ProductModelVariant,
@@ -625,6 +626,116 @@ class ConfiguratorRepository:
             )
         )
         return int(result.scalar() or 0)
+
+    # ------------------------------------------------------------------ #
+    # Model variant generations (ADR-015)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    async def get_owned_generation(
+        db: AsyncSession,
+        generation_id: uuid.UUID,
+        user_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> Optional[ModelVariantGeneration]:
+        """A generation, only if its product belongs to ``user_id`` and is not deleted.
+
+        Ownership is walked from the row's own product_id, never taken from the
+        caller. ``for_update`` locks the generation row (not the product), which
+        is what serialises two concurrent accepts of the same candidate.
+        """
+        stmt = (
+            select(ModelVariantGeneration)
+            .join(Product, Product.id == ModelVariantGeneration.product_id)
+            .where(
+                ModelVariantGeneration.id == generation_id,
+                Product.created_by == user_id,
+                Product.deleted_at.is_(None),
+            )
+        )
+        if for_update:
+            stmt = stmt.with_for_update(of=ModelVariantGeneration)
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_generation(
+        db: AsyncSession, generation_id: uuid.UUID, *, for_update: bool = False
+    ) -> Optional[ModelVariantGeneration]:
+        """Unscoped, for the runner and the sweep only — they have no user.
+
+        Ownership was established when the row was created; never call this
+        from a route.
+        """
+        stmt = select(ModelVariantGeneration).where(ModelVariantGeneration.id == generation_id)
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def list_generations(
+        db: AsyncSession,
+        product_id: uuid.UUID,
+        *,
+        status: Optional[str] = None,
+        client_ref: Optional[str] = None,
+    ) -> list[ModelVariantGeneration]:
+        """A product's generations, newest first. The caller has checked ownership."""
+        stmt = select(ModelVariantGeneration).where(
+            ModelVariantGeneration.product_id == product_id
+        )
+        if status is not None:
+            stmt = stmt.where(ModelVariantGeneration.status == status)
+        if client_ref is not None:
+            stmt = stmt.where(ModelVariantGeneration.client_ref == client_ref)
+        stmt = stmt.order_by(ModelVariantGeneration.created_date.desc())
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def get_stale_generations(
+        db: AsyncSession, cutoff: datetime, limit: int
+    ) -> list[ModelVariantGeneration]:
+        """In-flight rows older than ``cutoff``: queued by creation, generating by start.
+
+        Locked with SKIP LOCKED so two replicas sweeping at once split the work
+        instead of both failing the same row.
+        """
+        stmt = (
+            select(ModelVariantGeneration)
+            .where(
+                or_(
+                    (ModelVariantGeneration.status == "generating")
+                    & (ModelVariantGeneration.started_at < cutoff),
+                    (ModelVariantGeneration.status == "queued")
+                    & (ModelVariantGeneration.created_date < cutoff),
+                )
+            )
+            .order_by(ModelVariantGeneration.created_date)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def get_expired_candidates(
+        db: AsyncSession, cutoff: datetime, limit: int
+    ) -> list[ModelVariantGeneration]:
+        """Ready candidates nobody accepted before ``cutoff``."""
+        stmt = (
+            select(ModelVariantGeneration)
+            .where(
+                ModelVariantGeneration.status == "ready",
+                ModelVariantGeneration.completed_at < cutoff,
+            )
+            .order_by(ModelVariantGeneration.completed_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
 
     # ------------------------------------------------------------------ #
     # Write — no commits; the service owns the transaction

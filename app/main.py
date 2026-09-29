@@ -40,6 +40,8 @@ from app.api.routes.payments import router as payments_router
 from app.api.routes.ai import router as ai_router
 from app.api.routes.notifications import router as notifications_router
 from app.api.routes.login_otp import router as login_otp_router
+from app.api.routes.api_keys import router as api_keys_router
+from app.api.routes.shopify import router as shopify_router, public_router as shopify_public_router
 from app.utils.envelopes import api_success, api_error
 from app.core.db import init_engine_and_session, token_refresh_loop, dispose_engine
 from app.middleware.cdn import BlobToCdnMiddleware
@@ -138,6 +140,50 @@ async def _configurator_bake_sweep_loop() -> None:
         await _run_configurator_bake_sweep("periodic stale-bake sweep")
 
 
+# ---------------------------------------------------------------------------
+# Background task: stale model-variant generation recovery (ADR-015)
+# ---------------------------------------------------------------------------
+# Same shape as the bake sweep above. A generation commits status='generating'
+# and then waits minutes on fal; a recycled replica would leave it there
+# forever. The sweep fails such rows (no silent re-run of paid work) and
+# discards unaccepted candidates past their TTL.
+
+
+async def _run_generation_sweep(label: str) -> None:
+    """One sweep pass. Never raises."""
+    from app.core.db import get_db
+    from app.services.configurator.model_variant_generation_service import (
+        ModelVariantGenerationService,
+    )
+
+    _gen_logger = logging.getLogger("rivollo.generation_sweep")
+    if not settings.ENABLE_MODEL_VARIANTS:
+        return
+    try:
+        async for db in get_db():
+            report = await ModelVariantGenerationService.recover_stale(db)
+            if report.acted:
+                _gen_logger.info(
+                    "%s: interrupted=%d expired=%d",
+                    label,
+                    len(report.interrupted),
+                    len(report.expired),
+                )
+            break
+    except Exception as exc:
+        _gen_logger.exception("%s failed (will retry next interval): %s", label, exc)
+
+
+async def _generation_sweep_loop() -> None:
+    interval = settings.GENERATION_SWEEP_INTERVAL_SECONDS
+    logging.getLogger("rivollo.generation_sweep").info(
+        "Stale-generation sweep started (interval=%ds).", interval
+    )
+    while True:
+        await asyncio.sleep(interval)
+        await _run_generation_sweep("periodic stale-generation sweep")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan — runs startup logic, yields, then shutdown logic."""
@@ -163,7 +209,14 @@ async def lifespan(app: FastAPI):
     bake_sweep_task = asyncio.create_task(_configurator_bake_sweep_loop())
     _logger.info("Configurator stale-bake sweep task started.")
 
+    await _run_generation_sweep("startup stale-generation sweep")
+    generation_sweep_task = asyncio.create_task(_generation_sweep_loop())
+
     yield  # <-- app is live here
+
+    generation_sweep_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await generation_sweep_task
 
     # --- Shutdown ---
     deactivation_task.cancel()
@@ -314,6 +367,9 @@ app.include_router(payments_router, prefix=_api_prefix)
 app.include_router(ai_router, prefix=_api_prefix)
 app.include_router(notifications_router, prefix=_api_prefix)
 app.include_router(login_otp_router, prefix=_api_prefix)
+app.include_router(api_keys_router, prefix=_api_prefix)
+app.include_router(shopify_router, prefix=_api_prefix)
+app.include_router(shopify_public_router, prefix=_api_prefix)
 
 
 
