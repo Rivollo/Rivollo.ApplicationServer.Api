@@ -378,10 +378,14 @@ class Settings(BaseSettings):
 	)
 
 	# --- Shopify integration (docs/shopify-integration/spec.md, ADR-016) --
-	# OFF by default: every /integrations/shopify route answers 404 and the
-	# public Shopify payload is absent. Needs migration c9e5a3b1d8f6.
+	# ON by default (product decision, 2026-09-29). Every environment running
+	# this build therefore needs the Shopify tables (migration c9e5a3b1d8f6, or
+	# the equivalent SQL) and tbl_api_keys (a5c1e9d4b7f2): with the flag on and
+	# the tables missing, the /integrations/shopify routes and the public
+	# Shopify payload fail. Set ENABLE_SHOPIFY_INTEGRATION=false to hold an
+	# environment back — every Shopify route then answers 404.
 	ENABLE_SHOPIFY_INTEGRATION: bool = Field(
-		default=False,
+		default=True,
 		description="Enable the Shopify integration endpoints.",
 	)
 	# Largest Shopify image copied into Rivollo storage, in bytes.

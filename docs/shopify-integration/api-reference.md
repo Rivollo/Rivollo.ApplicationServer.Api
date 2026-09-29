@@ -490,5 +490,5 @@ GET /public/products/{rivollo_product_id}/shopify
 
 ## 11. Server configuration (Rivollo side)
 
-The Shopify routes return `404` until `ENABLE_SHOPIFY_INTEGRATION=true` on the API.
+The Shopify routes are on by default; an environment with `ENABLE_SHOPIFY_INTEGRATION=false` answers `404` on all of them.
 `VIEWER_BASE_URL` must be set for `viewer_url` to be filled.
