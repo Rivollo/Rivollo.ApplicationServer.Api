@@ -25,7 +25,7 @@ the key is connected to; the shop never comes from the request body.
 A GID cannot be used in the path: the server decodes %2F back to "/" before
 routing. Request BODIES accept either form.
 
-Behind ENABLE_SHOPIFY_INTEGRATION (off by default): while off, every route
+Behind ENABLE_SHOPIFY_INTEGRATION (on by default): set it false and every route
 answers 404 before authentication runs. Removing the feature is one
 include_router line in app/main.py plus migration c9e5a3b1d8f6's downgrade.
 Publishing is NOT here: it stays in Rivollo.Viewer.Api.

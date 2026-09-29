@@ -70,7 +70,7 @@ State values: `rivollo_product.main_glb_state` = `none | generating | stalled | 
    tables in any environment where the purge runs: it allow-lists 3 new FKs to `tbl_users` and
    2 new FKs to `tbl_products`. Without it the purge's contract check (A14) aborts every run —
    safely, before deleting anything.
-3. Set `VIEWER_BASE_URL` (e.g. `https://view.rivollo.com`) and `ENABLE_SHOPIFY_INTEGRATION=true`
+3. Set `VIEWER_BASE_URL` (e.g. `https://view.rivollo.com`). `ENABLE_SHOPIFY_INTEGRATION` is **on by default** (2026-09-29): every environment running this build needs the tables; set it `false`
    where wanted.
 4. Portal: Settings → API Keys screen (docs/api_keys.md). Plugin: §12, with the auth change above.
 5. Viewer: read `/public/products/{id}/shopify` (directly or mirrored in Viewer.Api — D5).
@@ -862,7 +862,7 @@ generation belongs to product → image URL in caller's uploads.
 | `GENERATION_STALE_AFTER_SECONDS` | 1800 | 1 |
 | `GENERATION_SWEEP_INTERVAL_SECONDS` | 300 | 1 |
 | `GENERATION_CANDIDATE_TTL_DAYS` | 30 | 1 |
-| `ENABLE_SHOPIFY_INTEGRATION` | **false** | 2, 3 |
+| `ENABLE_SHOPIFY_INTEGRATION` | **true** (changed 2026-09-29) | 2, 3 |
 | `SHOPIFY_IMAGE_MAX_BYTES` | 20 MB | 2 |
 | `VIEWER_BASE_URL` | none; required when the Shopify flag is on (same value as Viewer.Api's `ViewerBaseUrl`) | 2 |
 
