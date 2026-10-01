@@ -38,6 +38,19 @@
    `tbl_shopify_connections`, `tbl_shopify_products`; `rivollo_product_id → tbl_products`;
    `api_key_id → tbl_api_keys`. Audit columns stay plain UUIDs (`AuditMixin`). The purge job's
    changes are in [../account-purge-job-changes.md](../account-purge-job-changes.md).
+9. **Portal (JWT) door** (2026-10-01, the Web.Portal team's request). The same services under
+   `/products/{rivollo_product_id}/shopify[...]` with the seller's JWT: state, options, main
+   GLB, layout GLB, accept, discard. `ShopifyContext` carries a `user_id` instead of an API-key
+   principal, so both doors build the same context; the Portal one comes from the product's
+   link and requires the shop to be still connected (404 otherwise — an uninstalled app closes
+   both doors). `GET /products/{id}` and `GET /v2/me/products` gained `source`
+   (`"rivollo" | "shopify"`), derived from that same rule; no column on `tbl_products`, and the
+   lookup is skipped with the flag off and contained in a savepoint so it can never break the
+   core product routes. API reference §9b.
+10. **The main GLB is in flight from the request, not from the background task.** The request
+   sets the product to `queue` under a row lock on the Shopify product, in the same commit as
+   the credit charge, so a repeat request (double click, or Portal and app at once) is `409`
+   and is not charged twice.
 
 ### Endpoints (all `Authorization: Bearer riv_live_…`, behind `ENABLE_SHOPIFY_INTEGRATION`)
 
@@ -70,8 +83,7 @@ State values: `rivollo_product.main_glb_state` = `none | generating | stalled | 
    tables in any environment where the purge runs: it allow-lists 3 new FKs to `tbl_users` and
    2 new FKs to `tbl_products`. Without it the purge's contract check (A14) aborts every run —
    safely, before deleting anything.
-3. Set `VIEWER_BASE_URL` (e.g. `https://view.rivollo.com`). `ENABLE_SHOPIFY_INTEGRATION` is **on by default** (2026-09-29): every environment running this build needs the tables; set it `false`
-   where wanted.
+3. Set `VIEWER_BASE_URL` (e.g. `https://view.rivollo.com`). `ENABLE_SHOPIFY_INTEGRATION` is **on by default** (2026-09-29): every environment running this build needs the tables; set it `false` to hold an environment back.
 4. Portal: Settings → API Keys screen (docs/api_keys.md). Plugin: §12, with the auth change above.
 5. Viewer: read `/public/products/{id}/shopify` (directly or mirrored in Viewer.Api — D5).
 

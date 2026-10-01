@@ -2,7 +2,7 @@
 
 For the team building the Rivollo 3D Shopify app. Everything the app needs from the Rivollo
 backend: authentication, the flow in order, and every endpoint with its request, response and
-errors. Sections 9 and 10 are for the portal and viewer teams.
+errors. Sections 9, 9b and 10 are for the portal and viewer teams.
 
 **Base URL (dev):** `https://dev-api-f7e16734.rivollo.com` — no `/api/v1` prefix.
 
@@ -449,6 +449,58 @@ Key object: `id, name, key_prefix, scopes, status, created_at, last_used_at, exp
 `409` above 10 active keys. UI: list with name, prefix, last used, Revoke; "Generate key" modal
 showing the full key once with a copy button and *"Copy this key now. It won't be shown again."*
 Full detail: `docs/api_keys.md`.
+
+---
+
+## 9b. Portal team — Shopify products in the product editor (portal JWT)
+
+The same operations as sections 5–6, with the seller's **portal JWT** instead of the API key, and
+addressed by the **Rivollo product id** instead of the Shopify id. Same services, so the bodies,
+responses, `409`s and image rules are exactly those of sections 5–6.
+
+**Is this a Shopify product?** `source` on the product responses:
+
+| Endpoint | Field |
+|---|---|
+| `GET /products/{id}` | `data.source` |
+| `GET /v2/me/products` (product list, recent products) | `data.items[].source` |
+
+`"shopify"` means linked to a Shopify store the seller still has connected — exactly when
+`GET /products/{id}/shopify` answers `200`. `"rivollo"` (or absent/null on other endpoints)
+otherwise. After the merchant uninstalls the app it goes back to `"rivollo"`.
+
+| Method | Path | Same as |
+|---|---|---|
+| `GET` | `/products/{product_id}/shopify` | `GET /integrations/shopify/products/{id}` — full state, poll it (5–10 s) while anything generates |
+| `PUT` | `/products/{product_id}/shopify/options` | `PUT …/options` — body `{ "roles": { "Layout": "layout" }, "original_layout_value": "…" }` |
+| `POST` | `/products/{product_id}/shopify/glb` | `POST …/glb` — main model, `202` |
+| `POST` | `/products/{product_id}/shopify/layouts/{layout_id}/glb` | `POST …/layouts/{layout_id}/glb` — layout candidate, `202` |
+| `POST` | `/products/{product_id}/shopify/generations/{generation_id}/accept` | `POST …/generations/{id}/accept` |
+| `DELETE` | `/products/{product_id}/shopify/generations/{generation_id}` | `DELETE …/generations/{id}` |
+
+Rules:
+
+- **`404`** when the product is not the caller's, is not linked to Shopify (`"This product is not
+  linked to a connected Shopify store."`), or its store's app was uninstalled. Never `403`.
+  `400` for a malformed id.
+- **No layouts until a layout option is chosen.** Sync never sets option roles, so `layouts` is
+  `[]` on a freshly synced product. Let the merchant pick which option changes the shape (e.g.
+  "Layout") and which value is the main model, then call `PUT …/options`; the layouts appear in
+  the response. Products whose variants do not differ in shape skip this and only need the main
+  model.
+- **Main model first.** The `original` layout uses the main model: create it with `…/glb`
+  (`…/layouts/{original}/glb` is `409`). A second `…/glb` while one is in flight is `409` and is
+  not charged, even straight after the first.
+- **Layout candidates are charged per request** — several per layout are allowed by design, so
+  disable the button while a request is pending.
+- **Accept with this route, not `POST /configurator/model-variant-generations/{id}/accept`.**
+  Both create the model variant, but only this one refuses a second model for a layout that
+  already has one. Discarding through either is equivalent.
+- **Model picker and cost:** `GET /ai/3d-models` (portal JWT) — the same list as
+  `GET /integrations/shopify/models`.
+- **Credits are not refunded** when a generation fails.
+- `GET /products/{id}/configurator/model-variants` answers `200` for a product with no GLB yet:
+  the list holds the `Original` entry with `glb_url: null` (and no other entries).
 
 ---
 

@@ -9,11 +9,13 @@ bookkeeping in the Shopify tables.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from decimal import Decimal
-from typing import Optional
+from typing import Iterable, Optional
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -42,7 +44,11 @@ from app.schemas.shopify import (
 from app.services.shopify.glb_service import GENERATING_STATUSES, main_glb_stalled, status_value
 from app.services.shopify.sync_service import ShopifySyncService
 
+logger = logging.getLogger(__name__)
+
 ORIGINAL = "original"
+SOURCE_RIVOLLO = "rivollo"
+SOURCE_SHOPIFY = "shopify"
 
 
 def money(value: Optional[Decimal]) -> Optional[str]:
@@ -52,6 +58,28 @@ def money(value: Optional[Decimal]) -> Optional[str]:
 def viewer_url(public_id: Optional[str]) -> Optional[str]:
     base = (settings.VIEWER_BASE_URL or "").rstrip("/")
     return f"{base}/{public_id}" if base and public_id else None
+
+
+async def product_sources(
+    db: AsyncSession, product_ids: Iterable[uuid.UUID], user_id: uuid.UUID
+) -> dict[uuid.UUID, str]:
+    """``source`` for the core product responses: "shopify" or "rivollo".
+
+    "shopify" exactly when GET /products/{id}/shopify answers 200 for the
+    owner: linked, and the shop still connected. The core product routes call
+    this, so it must never break them: with the integration off it does not
+    query, and a failure (e.g. tables not created yet) is contained in a
+    savepoint and reported as "rivollo".
+    """
+    ids = list(product_ids)
+    linked: set[uuid.UUID] = set()
+    if ids and settings.ENABLE_SHOPIFY_INTEGRATION:
+        try:
+            async with db.begin_nested():
+                linked = await repo.get_linked_product_ids(db, ids, user_id)
+        except SQLAlchemyError:
+            logger.warning("Shopify source lookup failed; reporting products as rivollo", exc_info=True)
+    return {pid: SOURCE_SHOPIFY if pid in linked else SOURCE_RIVOLLO for pid in ids}
 
 
 def generation_dict(generation: ModelVariantGeneration) -> dict:

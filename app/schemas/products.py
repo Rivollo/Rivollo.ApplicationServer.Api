@@ -163,6 +163,9 @@ class ProductResponse(ProductBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     configurator: Optional[ConfiguratorSettings] = None
+    # "rivollo" | "shopify" (linked to a connected Shopify store). Only set by
+    # GET /products/{id}; absent means "rivollo".
+    source: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -288,6 +291,8 @@ class ProductWithPrimaryAsset(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
     public_id: Optional[str] = None
+    # "rivollo" | "shopify". Set by GET /v2/me/products; null elsewhere means "rivollo".
+    source: Optional[str] = None
 
 
 class ProductsByUserResponse(BaseModel):

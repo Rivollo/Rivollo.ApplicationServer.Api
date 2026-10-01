@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional, Sequence
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.configurator import ModelVariantGeneration
@@ -135,6 +135,47 @@ class ShopifyRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_linked_product(
+        db: AsyncSession, product_id: uuid.UUID, user_id: uuid.UUID
+    ) -> Optional[ShopifyProduct]:
+        """Portal lookup by Rivollo product, scoped to the user. Newest link wins."""
+        result = await db.execute(
+            select(ShopifyProduct)
+            .where(
+                ShopifyProduct.rivollo_product_id == product_id,
+                ShopifyProduct.user_id == user_id,
+            )
+            .order_by(ShopifyProduct.synced_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_linked_product_ids(
+        db: AsyncSession, product_ids: Sequence[uuid.UUID], user_id: uuid.UUID
+    ) -> set[uuid.UUID]:
+        """Which of these products are linked to a shop the user still has connected."""
+        if not product_ids:
+            return set()
+        result = await db.execute(
+            select(ShopifyProduct.rivollo_product_id)
+            .join(
+                ShopifyConnection,
+                and_(
+                    ShopifyConnection.shop_domain == ShopifyProduct.shop_domain,
+                    ShopifyConnection.user_id == ShopifyProduct.user_id,
+                    ShopifyConnection.isactive.is_(True),
+                ),
+            )
+            .where(
+                ShopifyProduct.rivollo_product_id.in_(list(product_ids)),
+                ShopifyProduct.user_id == user_id,
+            )
+            .distinct()
+        )
+        return set(result.scalars().all())
 
     # ------------------------------------------------------------------ #
     # Rivollo product (read; ownership in the WHERE clause)
