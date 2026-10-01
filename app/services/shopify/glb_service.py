@@ -101,7 +101,11 @@ class ShopifyGlbService:
         background_tasks: BackgroundTasks,
     ) -> MainGlbStarted:
         user_id = context.user_id
-        shopify_product = await ShopifySyncService.get_product(db, context, shopify_product_id)
+        # Row lock: a second request (a double click, or the Portal and the
+        # Shopify app at once) waits here, then sees QUEUE below and gets 409.
+        shopify_product = await ShopifySyncService.get_product(
+            db, context, shopify_product_id, for_update=True
+        )
         product = await ShopifyGlbService._live_product(db, shopify_product, user_id)
         require_allowed_image(shopify_product, image_url)
 
@@ -122,13 +126,16 @@ class ShopifyGlbService:
         spec = await authorize_generation(db, user_id, model_key)
 
         now = _utcnow()
-        if current in GENERATING_STATUSES:
-            product.status = ProductStatus.DRAFT  # the stalled attempt is abandoned
+        # In flight from this commit, not from when the background task starts:
+        # until then the product would still read DRAFT and a repeat request
+        # would be charged again. (A stalled attempt is simply replaced.) The
+        # pipeline sets QUEUE itself as well, which is then a no-op.
+        product.status = ProductStatus.QUEUE
         if await repo.get_mapped_asset(db, product.id, THUMBNAIL_ASSET_ID) is None:
             await ShopifySyncService.add_thumbnail(db, product, rivollo_image, user_id)
         shopify_product.main_glb_requested_at = now
-        await db.commit()
 
+        # Commits the status, the timestamp and the charge together.
         await charge_generation(db, user_id, spec.credit_cost)
         # The product pipeline, unchanged. It opens its own sessions.
         background_tasks.add_task(

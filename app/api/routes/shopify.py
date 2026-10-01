@@ -19,6 +19,17 @@ the key is connected to; the shop never comes from the request body.
     DELETE /integrations/shopify/products/{id}/generations/{gid}         discard candidate   write
     DELETE /integrations/shopify/products/{id}                 unlink (products/delete)     write
 
+Rivollo Portal, with the seller's JWT, keyed by the RIVOLLO product id. The
+same services; the shop comes from the product's link, and the routes answer
+404 unless the caller owns the product and its shop is still connected:
+
+    GET    /products/{product_id}/shopify                      full state (poll this)
+    PUT    /products/{product_id}/shopify/options              option roles
+    POST   /products/{product_id}/shopify/glb                  create the main GLB
+    POST   /products/{product_id}/shopify/layouts/{layout_id}/glb        layout GLB
+    POST   /products/{product_id}/shopify/generations/{gid}/accept       accept candidate
+    DELETE /products/{product_id}/shopify/generations/{gid}              discard candidate
+
     GET    /public/products/{product_id}/shopify               shopper payload (no auth)
 
 ``{id}`` is the NUMERIC Shopify product id (strip ``gid://shopify/Product/``).
@@ -33,12 +44,14 @@ Publishing is NOT here: it stays in Rivollo.Viewer.Api.
 
 
 import uuid
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 
-from app.api.deps import DB, get_api_key_principal, require_api_key_scope
+from app.api.deps import DB, CurrentUser, get_api_key_principal, require_api_key_scope
 from app.models.api_key import SCOPE_CONVERT, SCOPE_READ, SCOPE_WRITE
+from app.models.shopify import ShopifyProduct
 from app.schemas.configurator import ModelVariantCreateResponse, ModelVariantResponse
 from app.schemas.shopify import (
     ShopifyConnectionResponse,
@@ -64,6 +77,7 @@ def _require_enabled() -> None:
 
 
 router = APIRouter(tags=["shopify"], dependencies=[Depends(_require_enabled)])
+portal_router = APIRouter(tags=["shopify"], dependencies=[Depends(_require_enabled)])
 public_router = APIRouter(tags=["shopify"], dependencies=[Depends(_require_enabled)])
 
 
@@ -96,6 +110,50 @@ def _uuid(raw: str, label: str) -> uuid.UUID:
         return uuid.UUID(raw)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid {label}.")
+
+
+def _main_glb_body(started) -> dict:
+    return {
+        "rivollo_product_id": str(started.product.id),
+        "status": "queue",
+        "estimate": started.estimate,
+    }
+
+
+def _layout_glb_body(requested) -> dict:
+    body = generation_dict(requested.generation)
+    body["estimate"] = requested.estimate
+    return body
+
+
+def _accept_body(accepted) -> dict:
+    variant = None
+    if accepted.variant is not None:
+        v = accepted.variant
+        base = ModelVariantResponse(
+            id=str(v.id),
+            product_id=v.product_id,
+            name=v.name,
+            glb_url=accepted.glb_url,
+            thumbnail_url=v.thumbnail_url,
+            order_index=v.order_index,
+            is_original=False,
+            isactive=v.isactive,
+            compression_status=v.compression_status,
+            compression_error=v.compression_error,
+            original_size_bytes=v.original_size_bytes,
+            compressed_size_bytes=v.compressed_size_bytes,
+            width_m=v.width_m,
+            depth_m=v.depth_m,
+            height_m=v.height_m,
+            created_at=v.created_date,
+        )
+        variant = (
+            ModelVariantCreateResponse(**base.model_dump(), warnings=accepted.warnings)
+            if accepted.created
+            else base
+        ).model_dump(mode="json")
+    return {"generation": generation_dict(accepted.generation), "model_variant": variant}
 
 
 def _connection(connection) -> dict:
@@ -264,13 +322,7 @@ async def create_main_glb(
         retry=payload.retry,
         background_tasks=background_tasks,
     )
-    return api_success(
-        {
-            "rivollo_product_id": str(started.product.id),
-            "status": "queue",
-            "estimate": started.estimate,
-        }
-    )
+    return api_success(_main_glb_body(started))
 
 
 @router.post(
@@ -295,9 +347,7 @@ async def create_layout_glb(
         model_key=payload.model,
         auto_accept=payload.auto_accept,
     )
-    body = generation_dict(requested.generation)
-    body["estimate"] = requested.estimate
-    return api_success(body)
+    return api_success(_layout_glb_body(requested))
 
 
 @router.post(
@@ -313,33 +363,7 @@ async def accept_layout_candidate(
     )
     if not accepted.created:
         response.status_code = status.HTTP_200_OK
-    variant = None
-    if accepted.variant is not None:
-        v = accepted.variant
-        base = ModelVariantResponse(
-            id=str(v.id),
-            product_id=v.product_id,
-            name=v.name,
-            glb_url=accepted.glb_url,
-            thumbnail_url=v.thumbnail_url,
-            order_index=v.order_index,
-            is_original=False,
-            isactive=v.isactive,
-            compression_status=v.compression_status,
-            compression_error=v.compression_error,
-            original_size_bytes=v.original_size_bytes,
-            compressed_size_bytes=v.compressed_size_bytes,
-            width_m=v.width_m,
-            depth_m=v.depth_m,
-            height_m=v.height_m,
-            created_at=v.created_date,
-        )
-        variant = (
-            ModelVariantCreateResponse(**base.model_dump(), warnings=accepted.warnings)
-            if accepted.created
-            else base
-        ).model_dump(mode="json")
-    return api_success({"generation": generation_dict(accepted.generation), "model_variant": variant})
+    return api_success(_accept_body(accepted))
 
 
 @router.delete(
@@ -349,6 +373,121 @@ async def accept_layout_candidate(
 async def discard_layout_candidate(shopify_product_id: str, generation_id: str, context: WriteContext, db: DB):
     generation = await ShopifyGlbService.discard(
         db, context, _product_id(shopify_product_id), _uuid(generation_id, "generation id")
+    )
+    return api_success(generation_dict(generation))
+
+
+# --------------------------------------------------------------------------- #
+# Portal (JWT): the same operations, keyed by the Rivollo product id
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class _PortalTarget:
+    context: ShopifyContext
+    shopify_product: ShopifyProduct
+
+    @property
+    def shopify_product_id(self) -> int:
+        return self.shopify_product.shopify_product_id
+
+
+async def _portal_target(product_id: str, current_user: CurrentUser, db: DB) -> _PortalTarget:
+    """The caller's product, linked to a shop they still have connected. 404 otherwise."""
+    context, shopify_product = await ShopifyConnectionService.get_portal_context(
+        db, _uuid(product_id, "product id"), current_user.id
+    )
+    return _PortalTarget(context=context, shopify_product=shopify_product)
+
+
+PortalTarget = Annotated[_PortalTarget, Depends(_portal_target)]
+
+
+@portal_router.get("/products/{product_id}/shopify", response_model=dict)
+async def portal_get_state(target: PortalTarget, db: DB):
+    """The connector's product state, for the Portal. Poll it while a model generates."""
+    state = await ShopifyViewService.state(db, target.shopify_product, target.context.user_id)
+    return api_success(state.model_dump(mode="json"))
+
+
+@portal_router.put("/products/{product_id}/shopify/options", response_model=dict)
+async def portal_set_options(target: PortalTarget, payload: ShopifyOptionsRequest, db: DB):
+    """Mark which Shopify option picks the 3D model; that creates the layouts."""
+    shopify_product = await ShopifySyncService.set_options(
+        db, target.context, target.shopify_product_id, payload
+    )
+    state = await ShopifyViewService.state(db, shopify_product, target.context.user_id)
+    return api_success(state.model_dump(mode="json"))
+
+
+@portal_router.post(
+    "/products/{product_id}/shopify/glb",
+    response_model=dict,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def portal_create_main_glb(
+    target: PortalTarget,
+    payload: ShopifyMainGlbRequest,
+    db: DB,
+    background_tasks: BackgroundTasks,
+):
+    """Generate the product's main 3D model from one of its Shopify images. Charges AI credits."""
+    started = await ShopifyGlbService.start_main_glb(
+        db,
+        target.context,
+        target.shopify_product_id,
+        image_url=payload.image_url,
+        model_key=payload.model,
+        retry=payload.retry,
+        background_tasks=background_tasks,
+    )
+    return api_success(_main_glb_body(started))
+
+
+@portal_router.post(
+    "/products/{product_id}/shopify/layouts/{layout_id}/glb",
+    response_model=dict,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def portal_create_layout_glb(
+    target: PortalTarget, layout_id: str, payload: ShopifyLayoutGlbRequest, db: DB
+):
+    """Generate a candidate 3D model for one layout value. Charges AI credits."""
+    requested = await ShopifyGlbService.start_layout_glb(
+        db,
+        target.context,
+        target.shopify_product_id,
+        _uuid(layout_id, "layout id"),
+        image_url=payload.image_url,
+        model_key=payload.model,
+        auto_accept=payload.auto_accept,
+    )
+    return api_success(_layout_glb_body(requested))
+
+
+@portal_router.post(
+    "/products/{product_id}/shopify/generations/{generation_id}/accept",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+)
+async def portal_accept_layout_candidate(
+    target: PortalTarget, generation_id: str, db: DB, response: Response
+):
+    """Use this for Shopify layout candidates, not the generic configurator accept:
+    only this one refuses a second model for a layout that already has one."""
+    accepted = await ShopifyGlbService.accept(
+        db, target.context, target.shopify_product_id, _uuid(generation_id, "generation id")
+    )
+    if not accepted.created:
+        response.status_code = status.HTTP_200_OK
+    return api_success(_accept_body(accepted))
+
+
+@portal_router.delete(
+    "/products/{product_id}/shopify/generations/{generation_id}",
+    response_model=dict,
+)
+async def portal_discard_layout_candidate(target: PortalTarget, generation_id: str, db: DB):
+    generation = await ShopifyGlbService.discard(
+        db, target.context, target.shopify_product_id, _uuid(generation_id, "generation id")
     )
     return api_success(generation_dict(generation))
 

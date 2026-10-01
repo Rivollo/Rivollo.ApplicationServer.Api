@@ -79,6 +79,7 @@ from app.services.dimension_service import DimensionService
 from app.utils.envelopes import api_error, api_success
 from app.models.models import PublishLink
 from app.services.product_service import ProductService
+from app.services.shopify.view_service import SOURCE_RIVOLLO, product_sources
 from app.database.products_repo import ProductRepository
 
 
@@ -1072,6 +1073,11 @@ async def get_product(
             for link in valid_links
         ]
 
+        source = SOURCE_RIVOLLO
+        if product.created_by is not None:
+            sources = await product_sources(db, [product.id], product.created_by)
+            source = sources.get(product.id, SOURCE_RIVOLLO)
+
         response_data = ProductResponse(
             id=str(product.id),
             name=product.name,
@@ -1084,6 +1090,7 @@ async def get_product(
             created_at=product.created_at,
             updated_at=product.updated_at,
             configurator=configurator_data,
+            source=source,
         )
 
         response_dict = response_data.model_dump(exclude_none=True)
@@ -2184,6 +2191,7 @@ async def get_my_products_v2(
     public_id_map = await ProductRepository.get_public_ids_for_products(
         db, [p.id for p in products if p.status.value == "published"]
     )
+    source_map = await product_sources(db, all_ids, current_user.id)
 
     items: list[ProductWithPrimaryAsset] = []
     for product in products:
@@ -2210,6 +2218,7 @@ async def get_my_products_v2(
                 created_at=product.created_at,
                 updated_at=product.updated_at,
                 public_id=public_id,
+                source=source_map.get(product.id, SOURCE_RIVOLLO),
             )
         )
 

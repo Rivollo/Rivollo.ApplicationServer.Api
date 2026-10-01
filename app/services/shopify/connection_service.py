@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.database.shopify_repo import shopify_repository as repo
-from app.models.shopify import ShopifyConnection
+from app.models.shopify import ShopifyConnection, ShopifyProduct
 from app.services.api_key_service import ApiKeyPrincipal
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ NOT_CONNECTED = (
     "This API key is not connected to a Shopify store. "
     "Call POST /integrations/shopify/connect first."
 )
+NOT_LINKED = "This product is not linked to a connected Shopify store."
 
 
 def _utcnow() -> datetime:
@@ -40,14 +41,14 @@ def _utcnow() -> datetime:
 
 @dataclass(frozen=True)
 class ShopifyContext:
-    """Who is calling and for which shop."""
+    """Who is calling and for which shop.
 
-    principal: ApiKeyPrincipal
+    Built from an API key's connection (the Shopify app) or from a product the
+    logged-in Portal user owns; the services below see no difference.
+    """
+
+    user_id: uuid.UUID
     connection: ShopifyConnection
-
-    @property
-    def user_id(self) -> uuid.UUID:
-        return self.principal.user.id
 
     @property
     def shop_domain(self) -> str:
@@ -114,7 +115,27 @@ class ShopifyConnectionService:
         connection = await repo.get_active_connection_by_key(db, principal.api_key.id)
         if connection is None or connection.user_id != principal.user.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=NOT_CONNECTED)
-        return ShopifyContext(principal=principal, connection=connection)
+        return ShopifyContext(user_id=principal.user.id, connection=connection)
+
+    @staticmethod
+    async def get_portal_context(
+        db: AsyncSession, product_id: uuid.UUID, user_id: uuid.UUID
+    ) -> tuple[ShopifyContext, ShopifyProduct]:
+        """The Portal's way in: a Rivollo product the JWT user owns, linked to Shopify.
+
+        404 when the product is not the caller's (ADR-008), and 404 when it is
+        not linked to a shop the caller still has connected. An uninstalled app
+        therefore closes these routes exactly as it closes the API-key ones.
+        """
+        if await repo.get_live_product(db, product_id, user_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+        shopify_product = await repo.get_linked_product(db, product_id, user_id)
+        if shopify_product is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_LINKED)
+        connection = await repo.get_active_connection_by_shop(db, shopify_product.shop_domain)
+        if connection is None or connection.user_id != user_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_LINKED)
+        return ShopifyContext(user_id=user_id, connection=connection), shopify_product
 
     @staticmethod
     async def disconnect(db: AsyncSession, principal: ApiKeyPrincipal) -> None:

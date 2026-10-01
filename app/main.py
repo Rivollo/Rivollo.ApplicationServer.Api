@@ -41,7 +41,11 @@ from app.api.routes.ai import router as ai_router
 from app.api.routes.notifications import router as notifications_router
 from app.api.routes.login_otp import router as login_otp_router
 from app.api.routes.api_keys import router as api_keys_router
-from app.api.routes.shopify import router as shopify_router, public_router as shopify_public_router
+from app.api.routes.shopify import (
+    portal_router as shopify_portal_router,
+    public_router as shopify_public_router,
+    router as shopify_router,
+)
 from app.utils.envelopes import api_success, api_error
 from app.core.db import init_engine_and_session, token_refresh_loop, dispose_engine
 from app.middleware.cdn import BlobToCdnMiddleware
@@ -369,6 +373,7 @@ app.include_router(notifications_router, prefix=_api_prefix)
 app.include_router(login_otp_router, prefix=_api_prefix)
 app.include_router(api_keys_router, prefix=_api_prefix)
 app.include_router(shopify_router, prefix=_api_prefix)
+app.include_router(shopify_portal_router, prefix=_api_prefix)
 app.include_router(shopify_public_router, prefix=_api_prefix)
 
 
