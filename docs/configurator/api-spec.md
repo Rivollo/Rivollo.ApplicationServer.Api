@@ -915,6 +915,115 @@ sweep fail rows stuck `queued`/`generating` longer than `GENERATION_STALE_AFTER_
 (no automatic re-run of paid work) and discard `ready` candidates older than
 `GENERATION_CANDIDATE_TTL_DAYS`.
 
+## 9c. Configuration dimensions ([ADR-017](decisions.md#adr-017))
+
+Optional Capacity × Layout (or any other dimensions) over a product's models. Seller JWT,
+ownership checked (another user's product is `404`), behind `ENABLE_CONFIGURATION_DIMENSIONS`
+(`404` while off). A product without dimensions keeps every payload exactly as before.
+
+### `GET /products/{product_id}/configurator/configuration`
+
+```json
+{ "success": true, "data": {
+  "dimensions": [
+    { "id": "…", "code": "capacity", "label": "Capacity", "display_type": "button",
+      "order_index": 0, "is_required": true,
+      "values": [ { "id": "…", "code": "3_seater", "label": "3 Seater", "order_index": 2,
+                    "thumbnail_url": null, "is_active": true, "is_default": true } ] } ],
+  "variants": [
+    { "id": "original", "name": "Default", "glb_url": "https://…", "thumbnail_url": "https://…",
+      "is_default": true, "selections": { "capacity": "3_seater", "layout": "straight" } },
+    { "id": "7d1f…", "name": "Corner", "glb_url": "https://…", "thumbnail_url": null,
+      "is_default": false, "selections": null } ],
+  "shopify_linked": true,
+  "shopify_mapping": { "capacity": { "option_name": "Capacity", "values": { "3_seater": "3 Seater" } } }
+}}
+```
+
+`variants` lists **every live model** (the original first), configured or not. `selections: null`
+means the model is not part of the configuration and the pickers do not offer it.
+
+### `PUT /products/{product_id}/configurator/configuration` → `200` (same body as `GET`)
+
+Replaces the whole configuration in one transaction. Dimensions and values are matched by
+**code**, so changing a label keeps the id.
+
+```json
+{
+  "dimensions": [
+    { "code": "capacity", "label": "Capacity", "display_type": "button", "order_index": 0,
+      "is_required": true,
+      "values": [ { "code": "2_seater", "label": "2 Seater", "order_index": 0 },
+                  { "code": "3_seater", "label": "3 Seater", "order_index": 1,
+                    "thumbnail_url": null, "is_active": true } ] },
+    { "code": "layout", "label": "Layout", "display_type": "image", "order_index": 1,
+      "values": [ { "code": "straight", "label": "Straight", "order_index": 0 },
+                  { "code": "corner", "label": "Corner", "order_index": 1 } ] }
+  ],
+  "variants": [
+    { "id": "original", "is_default": true, "selections": { "capacity": "3_seater", "layout": "straight" } },
+    { "id": "7d1f…", "is_default": false, "selections": { "capacity": "3_seater", "layout": "corner" } }
+  ],
+  "shopify_mapping": {
+    "capacity": { "option_name": "Capacity", "values": { "2_seater": "2 Seater", "3_seater": "3 Seater" } },
+    "layout":   { "option_name": "Layout",   "values": { "straight": "Straight", "corner": "Corner" } }
+  }
+}
+```
+
+- `variants[].id` is `"original"` (the product's own model) or a model-variant id.
+- `dimensions: []` (with `variants: []`) removes the configuration.
+- `shopify_mapping` **left out** keeps the stored mapping, re-checked against the new
+  configuration; `null` or `{}` removes it. It is only allowed when the product is linked to
+  Shopify.
+- Codes: a dimension code matches `^[a-z][a-z0-9_]*$`; a value code matches `^[a-z0-9][a-z0-9_]*$`.
+- `thumbnail_url` must be the seller's own upload (`POST /uploads/content`).
+- Limits: 5 dimensions, 50 values per dimension, 500 models.
+
+**Errors:** `400` with `{"detail": {"code", "message", "fields"}}`, and nothing is changed.
+
+| `code` | When |
+|---|---|
+| `INVALID_CODE` · `DUPLICATE_DIMENSION` · `DUPLICATE_VALUE` | bad or repeated code; repeated label (case-insensitive) |
+| `TOO_MANY_DIMENSIONS` · `TOO_MANY_VALUES` · `TOO_MANY_MODELS` | over a limit |
+| `DIMENSION_WITHOUT_VALUES` | a required dimension has no active value |
+| `UNKNOWN_MODEL` · `DUPLICATE_MODEL` · `MODEL_WITHOUT_GLB` | not a live model of this product; listed twice; no GLB |
+| `UNKNOWN_DIMENSION` · `UNKNOWN_VALUE` · `INACTIVE_VALUE` | a selection outside the configuration |
+| `MISSING_SELECTION` | a model lacks a required dimension |
+| `DUPLICATE_VARIANT_SELECTION` | two models share a combination (the message names it) |
+| `DEFAULT_REQUIRED` · `MULTIPLE_DEFAULTS` · `NO_MODELS` · `VARIANTS_WITHOUT_DIMENSIONS` | default and model-list rules |
+| `INVALID_THUMBNAIL_URL` | not the seller's own upload |
+| `SHOPIFY_NOT_LINKED` | a mapping sent for a product not linked to Shopify |
+| `SHOPIFY_DIMENSION_UNMAPPED` · `SHOPIFY_UNKNOWN_DIMENSION` · `SHOPIFY_UNKNOWN_VALUE` | the mapping does not match the configuration |
+| `SHOPIFY_OPTION_NOT_FOUND` · `SHOPIFY_VALUE_NOT_FOUND` | not in the synced Shopify product (exact match) |
+| `SHOPIFY_MAPPING_AMBIGUOUS` | two dimensions mapped to one option, or two values to one Shopify value |
+| `SHOPIFY_VALUE_UNMAPPED` | a value some model uses has no Shopify value |
+| `SHOPIFY_DEFAULT_NOT_FOUND` | no Shopify variant has the default combination |
+
+`409 CONFIGURATION_CONFLICT` means a concurrent write won; reload and retry.
+
+**Deleting a model** (`DELETE /configurator/model-variants/{id}`) that is the configured default
+is `409 MODEL_IS_DEFAULT`: choose another default first. Any other model loses its selections.
+
+### Shopper payload
+
+`GET /public/products/{product_id}/configurator`, and Viewer.Api's
+`/api/public/products/{publicId}/configurator`, gain these fields **only on a configured product**:
+
+- `configuration_dimensions`: dimensions in `order_index` order, each with its **active** values
+  in order (`id, code, label, order_index, thumbnail_url`).
+- `variants[].selections`: `{dimension code: value code}`; absent for a model outside the
+  configuration.
+- `variants[].is_default` marks the default combination's model, which may not be the original.
+
+Valid combinations are exactly the variants' `selections`, never a Cartesian product. Resolve a
+model only when every required dimension is picked and exactly one variant matches. Grey out
+values with no model for the current picks.
+
+The public Shopify payload (`GET /public/products/{product_id}/shopify`) gains
+`variants[].model`: `"original"`, a model-variant id, or `null`. `null` means no model has that
+combination: keep the current shape and never substitute another.
+
 ## 10. Error reference
 
 | Status | When | Body |

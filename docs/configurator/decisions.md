@@ -682,6 +682,10 @@ which the purge's existing user prefix already sweeps.
   treat it as unusable rather than failing.
 - **Amended by [ADR-015](#adr-015):** a variant may also originate from an accepted photo
   generation. It is created through the same `create_variant` pipeline, so nothing above changes.
+- **Amended by [ADR-017](#adr-017):** on a product that has configuration dimensions, the
+  original is no longer the permanent default: the seller picks a default combination, which
+  may be an extra variant. The original keeps being the product's model everywhere else
+  (lists, thumbnail, AR, publish). Products without dimensions are unchanged.
 
 ---
 
@@ -728,6 +732,65 @@ try another image.
 **Consequences.** `CLAUDE.md`'s "exactly four tables" becomes five; the spirit is unchanged (no
 normalised material table, no discriminator column). ADR-014 is amended: a variant may originate
 from an accepted generation. The account-purge job must allow-list one more product FK.
+
+---
+
+## ADR-017
+
+### Configuration dimensions: Capacity × Layout over a product's models
+
+**Status: Accepted** (product decision, 2026-10-08, from the "Multi-Capacity Configurator —
+Backend Handover") — carries the same **deployment blocker** as ADR-014 (Q8).
+
+**Context.** A product's models are a flat list: nothing says that one model is both
+"3 Seater" and "Corner", so a viewer cannot offer Capacity and Layout pickers or know which
+layouts exist for a capacity. Shopify products are configured exactly that way (one variant
+per option combination) and have no notion of an "original" model.
+
+**Decision.**
+
+1. **Three tables, generic, no sofa vocabulary:** `tbl_configuration_dimensions` (code, label,
+   display_type, order, required), `tbl_configuration_values` (code, label, order, thumbnail,
+   active, `is_default`), and `tbl_model_configuration_values` (one value per dimension per
+   model). Codes are the stable identifiers; labels are display only. A dimension code matches
+   `^[a-z][a-z0-9_]*$`; a **value** code may also start with a digit (`3_seater`), because the
+   handover's own examples do.
+2. **A model is the original or an extra variant.** `model_variant_id` NULL means the original,
+   exactly as `tbl_product_parts.variant_id` (ADR-014). The original needs no variant row.
+3. **The default is a combination.** Each dimension marks at most one default value (partial
+   unique index), written from the model the seller marks `is_default`; together they must select
+   exactly one model. On a configured product this replaces "the original is the permanent
+   default" (ADR-014 amended). Unconfigured products keep the original as default.
+4. **One transactional PUT replaces the whole configuration** under the product row lock. Every
+   handover rule is checked before the first write, so a rejected PUT changes nothing. Combination
+   uniqueness spans rows, so it is service-enforced under that lock, as ADR-012.
+5. **No draft/publish snapshot.** Every configurator table is read live (Viewer.Api caches 60 s);
+   building snapshots only for this would make it the one feature that behaves differently. The
+   all-or-nothing PUT means the live configuration is never invalid. Revisit for the whole
+   configurator if drafts are wanted.
+6. **Errors** are `HTTPException(400, detail={code, message, fields})` — the repo-wide convention
+   with a structured detail. Q2 (the `api_error` envelope) stays open.
+7. **Shopify mapping lives on the Shopify product** (`tbl_shopify_products.dimension_mapping`,
+   JSONB, keyed by codes), validated exactly (no fuzzy matching) against the synced options, and
+   the default combination must be a real Shopify variant. The public Shopify payload gains
+   `variants[].model`. The configurator tables never learn about Shopify.
+8. **Deleting a model** that is the configured default is refused (409 `MODEL_IS_DEFAULT`);
+   any other configured model loses its selections.
+9. **No backfill.** The migration writes no data; an unconfigured product's payloads are
+   byte-for-byte what they were. The editor can offer "make a Layout dimension from my models"
+   as a pre-filled PUT.
+10. Behind `ENABLE_CONFIGURATION_DIMENSIONS` (on by default; also needs `ENABLE_MODEL_VARIANTS`).
+
+**Foreign keys.** `tbl_configuration_dimensions.product_id` and
+`tbl_model_configuration_values.product_id → tbl_products` CASCADE (two new product FKs: Q8);
+`model_variant_id`, `dimension_id`, `value_id` CASCADE within the configurator; no FK to
+`tbl_users`.
+
+**Consequences.** `CLAUDE.md`'s five tables become eight. The public configurator payload gains
+`configuration_dimensions` and `variants[].selections` only for configured products — in this
+API and, separately, in `Rivollo.Viewer.Api`, which serves the viewer. The purge job must
+allow-list two more product FKs. The Shopify single-`layout` role (ADR-016) keeps working; the
+photo-generation flow still targets one layout value, not a combination (follow-up).
 
 ---
 
@@ -832,6 +895,8 @@ to its inventory and deletion order, **and** (ADR-014) allow-lists
 `tbl_product_model_variants.product_id → tbl_products` and inventories that table's
 `thumbnail_blob_url` / `original_glb_blob_url` blobs, **and** (ADR-015) allow-lists
 `tbl_model_variant_generations.product_id → tbl_products` and inventories that table,
+**and** (ADR-017) allow-lists `tbl_configuration_dimensions.product_id` and
+`tbl_model_configuration_values.product_id → tbl_products`,
 **the migration must not be deployed to production** —
 the contract check aborts every purge run on an unrecognised FK.
 

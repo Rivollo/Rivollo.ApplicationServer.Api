@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_db
 from app.main import app
 from app.services.configurator import shopper_service as module
+from app.services.configurator import configuration_service as config_module
 
 PRODUCT = uuid.uuid4()
 ORIGINAL_GLB = SimpleNamespace(id=uuid.uuid4(), image="https://cdn/dev/u/p/model.glb")
@@ -69,6 +70,16 @@ class Repo:
     async def get_parts_for_product(self, db, product_id, *, variant_id=None, active_only=False):
         return [p for p in self.parts if p.variant_id == variant_id]
 
+    # Configuration dimensions (ADR-017): these tests configure none.
+    async def get_dimensions(self, db, product_id):
+        return []
+
+    async def get_model_configuration_values(self, db, product_id):
+        return []
+
+    async def delete_model_configuration_values(self, db, product_id, *, model_variant_id=None):
+        return None
+
     async def get_model_variants(self, db, product_id):
         return sorted((v for v in self.variants if v.isactive), key=lambda v: v.order_index)
 
@@ -95,6 +106,7 @@ class Repo:
 def repo(monkeypatch):
     fake = Repo()
     monkeypatch.setattr(module, "repo", fake)
+    monkeypatch.setattr(config_module, "repo", fake)
     monkeypatch.setattr(module.settings, "ENABLE_MODEL_VARIANTS", True)
     return fake
 

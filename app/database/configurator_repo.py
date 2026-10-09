@@ -32,11 +32,14 @@ import uuid
 from datetime import datetime
 from typing import Optional, Sequence
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.configurator import (
+    ConfigurationDimension,
+    ModelConfigurationValue,
     ModelVariantGeneration,
     PartOption,
     PartOptionTexture,
@@ -736,6 +739,43 @@ class ConfiguratorRepository:
         )
         result = await db.execute(stmt)
         return list(result.scalars().all())
+
+    # ------------------------------------------------------------------ #
+    # Configuration dimensions (ADR-017)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    async def get_dimensions(
+        db: AsyncSession, product_id: uuid.UUID
+    ) -> list[ConfigurationDimension]:
+        """A product's dimensions in display order; values load with them, ordered."""
+        result = await db.execute(
+            select(ConfigurationDimension)
+            .where(ConfigurationDimension.product_id == product_id)
+            .order_by(ConfigurationDimension.order_index, ConfigurationDimension.code)
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def get_model_configuration_values(
+        db: AsyncSession, product_id: uuid.UUID
+    ) -> list[ModelConfigurationValue]:
+        result = await db.execute(
+            select(ModelConfigurationValue).where(ModelConfigurationValue.product_id == product_id)
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def delete_model_configuration_values(
+        db: AsyncSession,
+        product_id: uuid.UUID,
+        *,
+        model_variant_id: Optional[uuid.UUID] = None,
+    ) -> None:
+        """Every assignment of the product, or only one extra variant's."""
+        stmt = sa_delete(ModelConfigurationValue).where(ModelConfigurationValue.product_id == product_id)
+        if model_variant_id is not None:
+            stmt = stmt.where(ModelConfigurationValue.model_variant_id == model_variant_id)
+        await db.execute(stmt)
 
     # ------------------------------------------------------------------ #
     # Write — no commits; the service owns the transaction

@@ -28,6 +28,9 @@ from app.core.config import settings
 from app.models.configurator import PartOption, ProductPart
 from app.schemas.configurator import (
     CLIENT_REF_MAX,
+    ConfigurationResponse,
+    ConfigurationUpdateRequest,
+    PublicConfigurationDimension,
     BakeProgress,
     BakeStatusResponse,
     MaterialResponse,
@@ -54,6 +57,7 @@ from app.schemas.configurator import (
     PublicProductPart,
 )
 from app.services.configurator.bake_service import bake_service
+from app.services.configurator.configuration_service import configuration_service
 from app.services.configurator.material_service import material_service
 from app.services.configurator.model_variant_generation_service import (
     model_variant_generation_service,
@@ -280,6 +284,31 @@ def _entry_response(entry: ModelEntry) -> ModelVariantResponse:
         order_index=entry.order_index,
         is_original=True,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Configuration dimensions (ADR-017): Capacity x Layout over the models
+# --------------------------------------------------------------------------- #
+@router.get("/products/{product_id}/configurator/configuration", response_model=dict)
+async def get_configuration(product_id: str, current_user: CurrentUser, db: DB):
+    """Dimensions, values, every live model with its selections, and the Shopify mapping."""
+    prod_uuid = _parse_uuid(product_id, "productId")
+    view = await configuration_service.get(db, prod_uuid, current_user.id)
+    return api_success(ConfigurationResponse(**view).model_dump(mode="json"))
+
+
+@router.put("/products/{product_id}/configurator/configuration", response_model=dict)
+async def put_configuration(
+    product_id: str,
+    payload: ConfigurationUpdateRequest,
+    current_user: CurrentUser,
+    db: DB,
+):
+    """Replace the whole configuration in one transaction. A rule failure is 400
+    with detail {code, message, fields} and changes nothing."""
+    prod_uuid = _parse_uuid(product_id, "productId")
+    view = await configuration_service.update(db, prod_uuid, current_user.id, payload)
+    return api_success(ConfigurationResponse(**view).model_dump(mode="json"))
 
 
 @router.get("/products/{product_id}/configurator/model-variants", response_model=dict)
@@ -834,10 +863,16 @@ async def get_public_configurator(
                     depth_m=v.depth_m,
                     height_m=v.height_m,
                     parts=_public_parts(v.parts),
+                    selections=v.selections,
                 )
                 for v in view.variants
             ]
             if view.variants
+            else None
+        ),
+        configuration_dimensions=(
+            [PublicConfigurationDimension(**d) for d in view.configuration_dimensions]
+            if view.configuration_dimensions
             else None
         ),
     )
@@ -846,6 +881,12 @@ async def get_public_configurator(
         # Single-model product: the payload stays exactly as it was before
         # model variants existed (ADR-014).
         body.pop("variants", None)
+    if body.get("configuration_dimensions") is None:
+        # Unconfigured product: no new keys at all (ADR-017).
+        body.pop("configuration_dimensions", None)
+    for variant in body.get("variants") or []:
+        if variant.get("selections") is None:
+            variant.pop("selections", None)
     return api_success(body)
 
 

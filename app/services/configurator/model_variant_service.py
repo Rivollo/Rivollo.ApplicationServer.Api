@@ -47,6 +47,7 @@ from app.database.configurator_repo import (
 from app.models.configurator import ProductModelVariant
 from app.models.models import ProductAsset
 from app.schemas.configurator import MODEL_VARIANT_NAME_MAX
+from app.services.configurator.configuration_service import ConfigurationService
 from app.services.configurator.glb_inspection import GlbSummary, InvalidGlbError, inspect_glb
 from app.services.glb_compression_service import glb_compression_service
 from app.services.storage import storage_service
@@ -319,6 +320,8 @@ class ModelVariantService:
         model is not a row and cannot be deleted here.
         """
         variant = await ModelVariantService._require_owned_variant(db, variant_id, user_id)
+        # ADR-017: not the configured default (409); its selections are dropped.
+        await ConfigurationService.release_variant(db, variant)
         variant.isactive = False
         variant.updated_by = user_id
         variant.updated_date = datetime.now(timezone.utc)

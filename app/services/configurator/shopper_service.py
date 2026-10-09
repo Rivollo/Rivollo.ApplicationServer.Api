@@ -11,6 +11,7 @@ so that a future field added to the seller schema cannot leak by omission.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import uuid
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from app.core.config import settings
 from app.database.configurator_repo import USDZ_ASSET_ID
 from app.database.configurator_repo import configurator_repository as repo
 from app.models.configurator import PartOption, ProductPart
+from app.services.configurator.configuration_service import ConfigurationService, LoadedConfiguration
 from app.services.configurator.material_service import material_service
 from app.services.configurator.option_service import OptionService
 
@@ -65,6 +67,8 @@ class PublicVariantView:
     depth_m: Optional[float]
     height_m: Optional[float]
     parts: list[PublicPartView]
+    # ADR-017: {dimension code: value code} on a configured product, else None.
+    selections: Optional[dict[str, str]] = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,8 @@ class PublicConfiguratorView:
     # None unless the product has extra model variants (ADR-014), so a
     # single-model product's payload is exactly what it was before.
     variants: Optional[list[PublicVariantView]] = None
+    # ADR-017: the dimensions (active values only), or None when unconfigured.
+    configuration_dimensions: Optional[list] = None
 
 
 class ShopperService:
@@ -112,15 +118,42 @@ class ShopperService:
         model_url = mesh_asset.image if mesh_asset is not None else None
         ar_model_url = usdz_asset.image if usdz_asset is not None else None
 
+        config = await ConfigurationService.load(db, product_id)
+        variants = await ShopperService._variants(
+            db, product_id, model_url, ar_model_url, parts, config
+        )
+        dimensions = None
+        if config.configured and variants:
+            dimensions = [
+                {
+                    "id": d.id,
+                    "code": d.code,
+                    "label": d.label,
+                    "display_type": d.display_type,
+                    "order_index": d.order_index,
+                    "is_required": d.is_required,
+                    "values": [
+                        {
+                            "id": v.id,
+                            "code": v.code,
+                            "label": v.label,
+                            "order_index": v.order_index,
+                            "thumbnail_url": v.thumbnail_url,
+                        }
+                        for v in d.values
+                        if v.isactive
+                    ],
+                }
+                for d in config.dimensions
+            ]
         return PublicConfiguratorView(
             product_id=product.id,
             product_name=product.name,
             model_url=model_url,
             ar_model_url=ar_model_url,
             parts=parts,
-            variants=await ShopperService._variants(
-                db, product_id, model_url, ar_model_url, parts
-            ),
+            variants=variants,
+            configuration_dimensions=dimensions,
         )
 
     @staticmethod
@@ -144,16 +177,21 @@ class ShopperService:
         model_url: Optional[str],
         ar_model_url: Optional[str],
         original_parts: list[PublicPartView],
+        config: Optional[LoadedConfiguration] = None,
     ) -> Optional[list[PublicVariantView]]:
         """The original model first, then each extra variant with its own parts.
 
         None — the key is then omitted — when the feature is off, when the
-        product has no extra variants, or when the original has no GLB.
+        product has no extra variants, or when the original has no GLB. A
+        configured product (ADR-017) always lists its models, carries each
+        one's selections, and marks the default combination's model instead
+        of the original.
         """
         if not settings.ENABLE_MODEL_VARIANTS or not model_url:
             return None
+        configured = config is not None and config.configured
         rows = await repo.get_model_variants(db, product_id)
-        if not rows:
+        if not rows and not configured:
             return None
 
         assets = await repo.get_assets_by_ids(
@@ -173,6 +211,7 @@ class ShopperService:
                 depth_m=None,
                 height_m=None,
                 parts=original_parts,
+                selections=config.selections.get(ORIGINAL_TOKEN) if configured else None,
             )
         ]
         for variant in rows:
@@ -197,9 +236,15 @@ class ShopperService:
                         db, product_id, variant.id,
                         material_service.build_glb_version(glb.id),
                     ),
+                    selections=config.selections.get(str(variant.id)) if configured else None,
                 )
             )
-        return views if len(views) > 1 else None
+        if not configured:
+            return views if len(views) > 1 else None
+        # The default is the combination's model; the original only as a
+        # fallback if that model is gone, so the viewer always has one.
+        default_id = config.default_model_id({v.id for v in views}) or ORIGINAL_TOKEN
+        return [dataclasses.replace(v, is_default=v.id == default_id) for v in views]
 
     @staticmethod
     def _filter_part(

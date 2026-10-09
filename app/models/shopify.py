@@ -137,6 +137,13 @@ class ShopifyProduct(UUIDMixin, AuditMixin, Base):
     option_roles: Mapped[dict[str, str]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    # Rivollo configuration dimensions (ADR-017) -> this product's options, by
+    # stable codes: {"capacity": {"option_name": "Capacity",
+    # "values": {"3_seater": "3 Seater"}}}. NULL = not mapped. Written only by
+    # PUT /products/{id}/configurator/configuration, which validates it against
+    # the synced options; a later sync that renames an option leaves it as is,
+    # and the affected Shopify variants then resolve to no model.
+    dimension_mapping: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB)
 
     # The draft product sync created.
     rivollo_product_id: Mapped[uuid.UUID] = mapped_column(

@@ -957,3 +957,21 @@ partial `ix_generations_in_flight ON (started_at) WHERE status IN ('queued','gen
 
 Candidate blobs: `{user_id}/{product_id}/model-variants/{generation_id}/candidate.glb`, written by
 the existing `storage_service.upload_model_variant_file` — inside the purge's user prefix.
+
+---
+
+## 16. Configuration dimensions (implemented, `d2f8b4c6a1e3`, ADR-017)
+
+| Table | Columns | Constraints |
+|---|---|---|
+| `tbl_configuration_dimensions` | `product_id` → `tbl_products` CASCADE, `code`, `label`, `display_type`, `order_index`, `is_required`, audit | unique `(product_id, code)`; code `^[a-z][a-z0-9_]*$`; display_type `button` / `image` / `swatch`; order ≥ 0 |
+| `tbl_configuration_values` | `dimension_id` → dimensions CASCADE, `code`, `label`, `order_index`, `thumbnail_url`, `isactive`, `is_default`, audit | unique `(dimension_id, code)`; unique `(dimension_id, lower(label))`; at most one `is_default` per dimension (partial unique); code `^[a-z0-9][a-z0-9_]*$` |
+| `tbl_model_configuration_values` | `product_id` → `tbl_products` CASCADE, `model_variant_id` → variants CASCADE (**NULL = the original**), `dimension_id`, `value_id` (both CASCADE), audit | one value per dimension per model: partial unique `(model_variant_id, dimension_id)`, and `(product_id, dimension_id) WHERE model_variant_id IS NULL` |
+
+Plus `tbl_shopify_products.dimension_mapping JSONB`, nullable:
+`{dimension code: {option_name, values: {value code: Shopify value}}}`.
+
+Enforced in the service under the product row lock: one model per combination, required
+selections present, each selection's value belongs to its dimension and product, exactly one
+default model. The default is stored as each dimension's default value. Two new product FKs, so
+the purge job must be updated (Q8). The migration writes no data.

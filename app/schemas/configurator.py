@@ -492,6 +492,9 @@ class PublicModelVariant(BaseModel):
     depth_m: Optional[float] = None
     height_m: Optional[float] = None
     parts: list[PublicProductPart] = Field(default_factory=list)
+    # ADR-017, only on configured products: {dimension code: value code}.
+    # None (key dropped) for a model outside the configuration.
+    selections: Optional[dict[str, str]] = None
 
 
 class PublicConfiguratorResponse(BaseModel):
@@ -504,6 +507,8 @@ class PublicConfiguratorResponse(BaseModel):
     # Present only when the product has extra model variants; the route drops
     # the key otherwise, so a single-model product's payload is unchanged.
     variants: Optional[list[PublicModelVariant]] = None
+    # ADR-017: present only on a configured product; the key is dropped otherwise.
+    configuration_dimensions: Optional[list[PublicConfigurationDimension]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -614,3 +619,127 @@ class ModelVariantGenerationResponse(BaseModel):
     created_at: datetime
     # Same shape as /createProductFal's "gpu" field. Present on create only.
     estimate: Optional[dict[str, Any]] = None
+
+
+# --------------------------------------------------------------------------- #
+# Configuration dimensions (ADR-017)
+#
+# PUT /products/{id}/configurator/configuration replaces a product's whole
+# configuration in one transaction. Dimensions and values are matched by CODE,
+# so an edited label keeps its id. Business rules (codes, duplicates, required
+# selections, one default, Shopify mapping) are checked in ConfigurationService
+# and answered 400 with detail {code, message, fields}; only shape errors are
+# 422 here.
+# --------------------------------------------------------------------------- #
+DisplayType = Literal["button", "image", "swatch"]
+
+
+class ConfigurationValueIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=120)
+    order_index: int = Field(ge=0)
+    thumbnail_url: Optional[str] = Field(default=None, max_length=2048)
+    is_active: bool = True
+
+
+class ConfigurationDimensionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=120)
+    display_type: DisplayType = "button"
+    order_index: int = Field(ge=0)
+    is_required: bool = True
+    values: list[ConfigurationValueIn] = Field(default_factory=list)
+
+
+class ConfigurationModelIn(BaseModel):
+    """One model's place in the configuration. ``id`` is "original" or a variant id."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64)
+    is_default: bool = False
+    # {dimension code: value code}
+    selections: dict[str, str] = Field(default_factory=dict)
+
+
+class ShopifyDimensionMappingIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    option_name: str = Field(min_length=1, max_length=255)
+    # {value code: Shopify option value}
+    values: dict[str, str] = Field(default_factory=dict)
+
+
+class ConfigurationUpdateRequest(BaseModel):
+    """The whole configuration. ``dimensions: []`` removes it (the product goes
+    back to its unconfigured payload). ``shopify_mapping`` left out keeps the
+    stored mapping (it is re-checked); ``{}`` or null removes it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dimensions: list[ConfigurationDimensionIn] = Field(default_factory=list)
+    variants: list[ConfigurationModelIn] = Field(default_factory=list)
+    shopify_mapping: Optional[dict[str, ShopifyDimensionMappingIn]] = None
+
+
+class ConfigurationValueResponse(BaseModel):
+    id: uuid.UUID
+    code: str
+    label: str
+    order_index: int
+    thumbnail_url: Optional[str] = None
+    is_active: bool
+    is_default: bool
+
+
+class ConfigurationDimensionResponse(BaseModel):
+    id: uuid.UUID
+    code: str
+    label: str
+    display_type: str
+    order_index: int
+    is_required: bool
+    values: list[ConfigurationValueResponse]
+
+
+class ConfigurationModelResponse(BaseModel):
+    """Every live model of the product, configured or not, so the editor can assign it."""
+
+    id: str
+    name: str
+    glb_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    is_default: bool
+    # None = not part of the configuration (not offered by the pickers).
+    selections: Optional[dict[str, str]] = None
+
+
+class ConfigurationResponse(BaseModel):
+    dimensions: list[ConfigurationDimensionResponse]
+    variants: list[ConfigurationModelResponse]
+    # True when the product is linked to a Shopify product (mapping allowed).
+    shopify_linked: bool
+    shopify_mapping: Optional[dict[str, Any]] = None
+
+
+# Shopper side: a separate schema (no is_active / is_default / audit fields).
+class PublicConfigurationValue(BaseModel):
+    id: uuid.UUID
+    code: str
+    label: str
+    order_index: int
+    thumbnail_url: Optional[str] = None
+
+
+class PublicConfigurationDimension(BaseModel):
+    id: uuid.UUID
+    code: str
+    label: str
+    display_type: str
+    order_index: int
+    is_required: bool
+    values: list[PublicConfigurationValue]
