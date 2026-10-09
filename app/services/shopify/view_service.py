@@ -41,6 +41,8 @@ from app.schemas.shopify import (
     ShopifyProductStateResponse,
     ShopifyVariantOut,
 )
+from app.services.configurator.configuration_service import ConfigurationService
+from app.services.shopify import mapping_service
 from app.services.shopify.glb_service import GENERATING_STATUSES, main_glb_stalled, status_value
 from app.services.shopify.sync_service import ShopifySyncService
 
@@ -199,6 +201,7 @@ class ShopifyViewService:
             images=list(shopify_product.images or []),
             options=list(shopify_product.options or []),
             option_roles=dict(shopify_product.option_roles or {}),
+            dimension_mapping=shopify_product.dimension_mapping,
             variants=[
                 ShopifyVariantOut(
                     shopify_variant_id=str(v.shopify_variant_id),
@@ -281,6 +284,22 @@ class ShopifyViewService:
     # Public shopper payload (Phase 3)
     # ------------------------------------------------------------------ #
     @staticmethod
+    async def _variant_models(
+        db: AsyncSession, shopify_product: ShopifyProduct, product_id: uuid.UUID
+    ) -> dict[int, Optional[str]]:
+        """ADR-017: which model each Shopify variant shows, from the dimension mapping."""
+        if not shopify_product.dimension_mapping:
+            return {}
+        config = await ConfigurationService.load(db, product_id)
+        if not config.configured:
+            return {}
+        live = {m.id for m in await ConfigurationService.live_models(db, product_id) if m.glb_url}
+        selections = {k: v for k, v in config.selections.items() if k in live}
+        return mapping_service.variant_models(
+            shopify_product.dimension_mapping, shopify_product.shopify_variants, selections
+        )
+
+    @staticmethod
     async def public_payload(db: AsyncSession, product_id: uuid.UUID) -> PublicShopifyProduct:
         """For a PUBLISHED product linked to a Shopify product on a live connection. 404 otherwise."""
         not_found = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -312,6 +331,7 @@ class ShopifyViewService:
                     layouts.append(PublicShopifyLayout(value=layout.option_value, model=str(variant.id)))
 
         roles = shopify_product.option_roles or {}
+        models = await ShopifyViewService._variant_models(db, shopify_product, product_id)
         return PublicShopifyProduct(
             title=shopify_product.title,
             currency=shopify_product.currency,
@@ -336,6 +356,7 @@ class ShopifyViewService:
                     available=v.available,
                     image_url=(v.image_urls or [None])[0],
                     add_to_cart_url=f"https://{shop}/cart/{v.shopify_variant_id}:1",
+                    model=models.get(v.shopify_variant_id),
                 )
                 for v in shopify_product.shopify_variants
             ],

@@ -343,6 +343,8 @@ class ShopifyProductStateResponse(BaseModel):
     images: list[dict[str, Any]] = Field(default_factory=list)
     options: list[dict[str, Any]] = Field(default_factory=list)
     option_roles: dict[str, str] = Field(default_factory=dict)
+    # ADR-017, set via PUT /products/{id}/configurator/configuration.
+    dimension_mapping: Optional[dict[str, Any]] = None
     variants: list[ShopifyVariantOut] = Field(default_factory=list)
     # None when the linked Rivollo product was deleted; the next sync recreates it.
     rivollo_product: Optional[RivolloProductOut] = None
@@ -380,6 +382,10 @@ class PublicShopifyVariant(BaseModel):
     available: bool
     image_url: Optional[str] = None
     add_to_cart_url: str
+    # ADR-017: the model this variant shows ("original" or a model-variant id),
+    # resolved through the dimension mapping. None when unmapped or no model
+    # has that combination; the viewer then keeps the current shape.
+    model: Optional[str] = None
 
 
 class PublicShopifyProduct(BaseModel):

@@ -335,3 +335,84 @@ ORDER BY 1, 2;
 - Table side: drop in reverse order (`tbl_shopify_layouts`, `tbl_shopify_product_variants`,
   `tbl_shopify_products`, `tbl_shopify_connections`, `tbl_model_variant_generations`,
   `tbl_api_keys`), or downgrade the three migrations.
+
+---
+
+## 8. Addendum — configuration dimensions (ADR-017, Application Server `d2f8b4c6a1e3`)
+
+Three more configurator tables and one nullable column. **Two new FKs to `tbl_products`**, none to
+`tbl_users`. Same mechanism as above: the product step's CASCADE erases everything; no new DELETE
+target, no new blob prefix (value thumbnails are the seller's own `users/{user}/uploads/…` files,
+already swept by the user prefix).
+
+| FK | Rule | Seen by |
+|---|---|---|
+| `tbl_configuration_dimensions.product_id → tbl_products` | CASCADE | **A14 (product FKs)** |
+| `tbl_model_configuration_values.product_id → tbl_products` | CASCADE | **A14 (product FKs)** |
+| `tbl_configuration_values.dimension_id → tbl_configuration_dimensions` | CASCADE | A22 |
+| `tbl_model_configuration_values.dimension_id → tbl_configuration_dimensions` | CASCADE | A22 |
+| `tbl_model_configuration_values.value_id → tbl_configuration_values` | CASCADE | A22 |
+| `tbl_model_configuration_values.model_variant_id → tbl_product_model_variants` | CASCADE | A22 |
+
+`tbl_shopify_products.dimension_mapping` (JSONB, nullable) is a plain column: nothing to do.
+
+### 8.1 `expectations.py`
+
+```python
+PRODUCT_CASCADE_FKS += (
+    # Configuration dimensions (ADR-017) — Application Server d2f8b4c6a1e3 (D11).
+    ("tbl_configuration_dimensions", "product_id"),
+    ("tbl_model_configuration_values", "product_id"),
+)
+
+INTEGRATION_CHILD_FKS += (
+    ("tbl_configuration_values", "dimension_id", "tbl_configuration_dimensions", "CASCADE"),
+    ("tbl_model_configuration_values", "dimension_id", "tbl_configuration_dimensions", "CASCADE"),
+    ("tbl_model_configuration_values", "value_id", "tbl_configuration_values", "CASCADE"),
+    ("tbl_model_configuration_values", "model_variant_id", "tbl_product_model_variants", "CASCADE"),
+)
+
+REQUIRED_COLUMNS += (
+    ("tbl_configuration_dimensions", "product_id", "uuid", False),
+    ("tbl_configuration_values", "dimension_id", "uuid", False),
+    ("tbl_model_configuration_values", "product_id", "uuid", False),
+    ("tbl_model_configuration_values", "model_variant_id", "uuid", True),   # NULL = original model
+    ("tbl_model_configuration_values", "dimension_id", "uuid", False),
+    ("tbl_model_configuration_values", "value_id", "uuid", False),
+)
+
+HOT_PATH_INDEX_COLUMNS += (
+    ("tbl_configuration_dimensions", "product_id"),       # uq_configuration_dimensions_product_code (leading)
+    ("tbl_model_configuration_values", "product_id"),     # ix_model_configuration_values_product
+)
+```
+
+Product-FK count in the `expected_product_fks` docstring and the §6.2 comment: **15 → 17**.
+`CASCADE_TABLES` picks the new tables up through the two tuples.
+
+### 8.2 Tests
+
+- `test_expectations.py`: product-FK count 15 → 17; the three tables in `CASCADE_TABLES`.
+- `schema_compliant.sql`: append the three `CREATE TABLE`s from
+  `migrations/versions/d2f8b4c6a1e3_add_configuration_dimensions.py` (after
+  `tbl_product_model_variants`); `schema_drifted.sql`: one of them with `ON DELETE RESTRICT`
+  → A14 / A22 must fail.
+- End-to-end seed: one configured product (a dimension, two values, an assignment for the
+  original and one for a variant); assert all three tables are empty for the purged user.
+
+### 8.3 Deploy order and verification
+
+Same as section 5: ship the job change and the tables between two nightly runs. Either one alone
+makes the contract check abort the run — safely, before anything is deleted.
+
+```sql
+SELECT conrelid::regclass AS tbl, conname, confdeltype
+FROM pg_constraint
+WHERE contype = 'f'
+  AND conrelid::regclass::text IN ('tbl_configuration_dimensions', 'tbl_configuration_values',
+                                   'tbl_model_configuration_values');
+-- Expect 6 rows, all confdeltype = 'c' (CASCADE).
+```
+
+Rollback: drop `tbl_model_configuration_values`, `tbl_configuration_values`,
+`tbl_configuration_dimensions` and the `dimension_mapping` column (or downgrade `d2f8b4c6a1e3`).

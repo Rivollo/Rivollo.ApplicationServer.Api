@@ -25,6 +25,7 @@ from app.services.configurator import part_service as part_module
 from app.services.configurator.material_service import MeshContext
 from app.services.configurator.model_variant_service import ModelVariantService, UploadedFile
 from app.services.configurator.part_service import PartService
+from app.services.configurator import configuration_service as config_module
 from tests.test_model_variant_service import FakeSession, FakeStorage
 
 OWNER = uuid.uuid4()
@@ -89,6 +90,16 @@ class Repo:
             return None
         return v
 
+    # Configuration dimensions (ADR-017): these tests configure none.
+    async def get_dimensions(self, db, product_id):
+        return []
+
+    async def get_model_configuration_values(self, db, product_id):
+        return []
+
+    async def delete_model_configuration_values(self, db, product_id, *, model_variant_id=None):
+        return None
+
     async def get_model_variants(self, db, product_id):
         return sorted(
             (v for v in self.variants.values() if v.product_id == product_id and v.isactive),
@@ -142,6 +153,7 @@ def env(monkeypatch):
     monkeypatch.setattr(mv_module, "repo", repo)
     monkeypatch.setattr(mv_module, "storage_service", storage)
     monkeypatch.setattr(part_module, "repo", repo)
+    monkeypatch.setattr(config_module, "repo", repo)
     monkeypatch.setattr(mv_module.settings, "ENABLE_MODEL_VARIANTS", True)
 
     async def _mesh(_db, _pid, variant_id=None):

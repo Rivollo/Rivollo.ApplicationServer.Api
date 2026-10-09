@@ -444,3 +444,157 @@ class ModelVariantGeneration(UUIDMixin, AuditMixin, Base):
     @property
     def created_at(self) -> datetime:
         return self.created_date
+
+
+# --------------------------------------------------------------------------- #
+# Configuration dimensions (ADR-017)
+#
+# An optional layer over a product's models: named dimensions ("Capacity",
+# "Layout"), their values ("3 Seater", "Corner"), and one value per dimension
+# assigned to each model, so the viewer can offer Capacity x Layout pickers and
+# resolve the exact model for a combination. A product without dimensions is
+# untouched: its payloads and its default (the original model) stay as before.
+#
+# The DEFAULT of a configured product is a combination, not "the original":
+# each dimension marks one default value (`is_default`, one per dimension by a
+# partial unique index), and those values must select exactly one model. The
+# PUT writes them from the model the seller marks as default.
+#
+# FKs: tbl_configuration_dimensions.product_id and
+# tbl_model_configuration_values.product_id -> tbl_products CASCADE are two new
+# product FKs: Rivollo.AccountPurge.Job must allow-list them (Q8, ADR-010).
+# No FK to tbl_users. Combination uniqueness spans rows, so it is enforced in
+# ConfigurationService under the product row lock (as ADR-012), not here.
+# --------------------------------------------------------------------------- #
+CONFIGURATION_CODE_PATTERN = r"^[a-z][a-z0-9_]*$"
+# A value code may start with a digit ("3_seater", as the handover's own
+# examples do); a dimension code may not.
+CONFIGURATION_VALUE_CODE_PATTERN = r"^[a-z0-9][a-z0-9_]*$"
+DISPLAY_TYPES = ("button", "image", "swatch")
+
+
+class ConfigurationDimension(UUIDMixin, AuditMixin, Base):
+    """A configurable axis of one product — Capacity, Layout, Size."""
+
+    __tablename__ = "tbl_configuration_dimensions"
+    __table_args__ = (
+        UniqueConstraint("product_id", "code", name="uq_configuration_dimensions_product_code"),
+        Index("ix_configuration_dimensions_product_order", "product_id", "order_index"),
+        CheckConstraint(f"code ~ '{CONFIGURATION_CODE_PATTERN}'", name="ck_configuration_dimensions_code"),
+        CheckConstraint(
+            "display_type IN ('button', 'image', 'swatch')",
+            name="ck_configuration_dimensions_display_type",
+        ),
+        CheckConstraint("order_index >= 0", name="ck_configuration_dimensions_order"),
+    )
+
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("tbl_products.id", ondelete="CASCADE"), nullable=False
+    )
+    # Stable machine name; the label is display only and never an identifier.
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    display_type: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'button'"))
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    is_required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+
+    values: Mapped[list["ConfigurationValue"]] = relationship(
+        "ConfigurationValue",
+        back_populates="dimension",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="ConfigurationValue.order_index",
+    )
+
+
+class ConfigurationValue(UUIDMixin, AuditMixin, Base):
+    """One value of a dimension — "3 Seater", "Corner"."""
+
+    __tablename__ = "tbl_configuration_values"
+    __table_args__ = (
+        UniqueConstraint("dimension_id", "code", name="uq_configuration_values_dimension_code"),
+        Index(
+            "ux_configuration_values_dimension_label",
+            "dimension_id",
+            text("lower(label)"),
+            unique=True,
+        ),
+        # The default combination: at most one default value per dimension.
+        Index(
+            "ux_configuration_values_one_default",
+            "dimension_id",
+            unique=True,
+            postgresql_where=text("is_default"),
+        ),
+        CheckConstraint(f"code ~ '{CONFIGURATION_VALUE_CODE_PATTERN}'", name="ck_configuration_values_code"),
+        CheckConstraint("order_index >= 0", name="ck_configuration_values_order"),
+    )
+
+    dimension_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("tbl_configuration_dimensions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # The seller's own upload (users/{user}/uploads/...), validated on write.
+    thumbnail_url: Mapped[Optional[str]] = mapped_column(Text)
+    isactive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    is_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
+
+    dimension: Mapped[ConfigurationDimension] = relationship(
+        "ConfigurationDimension", back_populates="values"
+    )
+
+
+class ModelConfigurationValue(UUIDMixin, AuditMixin, Base):
+    """The value one model takes for one dimension.
+
+    ``model_variant_id`` NULL means the product's original model, the same
+    convention as ``tbl_product_parts.variant_id`` (ADR-014). ``product_id`` is
+    the anchor for that NULL case and must equal the variant's and the
+    dimension's product; the service guarantees that.
+    """
+
+    __tablename__ = "tbl_model_configuration_values"
+    __table_args__ = (
+        # One value per dimension per model; two partial indexes because of NULL.
+        Index(
+            "ux_model_configuration_values_variant_dimension",
+            "model_variant_id",
+            "dimension_id",
+            unique=True,
+            postgresql_where=text("model_variant_id IS NOT NULL"),
+        ),
+        Index(
+            "ux_model_configuration_values_original_dimension",
+            "product_id",
+            "dimension_id",
+            unique=True,
+            postgresql_where=text("model_variant_id IS NULL"),
+        ),
+        Index("ix_model_configuration_values_product", "product_id"),
+        Index("ix_model_configuration_values_dimension", "dimension_id"),
+        Index("ix_model_configuration_values_value", "value_id"),
+    )
+
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("tbl_products.id", ondelete="CASCADE"), nullable=False
+    )
+    model_variant_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("tbl_product_model_variants.id", ondelete="CASCADE"),
+    )
+    dimension_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("tbl_configuration_dimensions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    value_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("tbl_configuration_values.id", ondelete="CASCADE"),
+        nullable=False,
+    )

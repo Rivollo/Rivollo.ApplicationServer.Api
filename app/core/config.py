@@ -343,6 +343,22 @@ class Settings(BaseSettings):
 		description="Largest model-variant thumbnail accepted, in bytes.",
 	)
 
+	# --- Configuration dimensions (ADR-017) ---------------------------------
+	# ON by default, like model variants: every environment running this build
+	# needs the three tables and tbl_shopify_products.dimension_mapping
+	# (migration d2f8b4c6a1e3, or the SQL script). With the flag on and the
+	# tables missing, the configuration routes and the public configurator
+	# payload fail. Set ENABLE_CONFIGURATION_DIMENSIONS=false to hold an
+	# environment back: the routes then answer 404 and no payload reads the
+	# tables. Also needs ENABLE_MODEL_VARIANTS.
+	ENABLE_CONFIGURATION_DIMENSIONS: bool = Field(
+		default=True,
+		description="Enable configuration dimensions (Capacity x Layout) on model variants.",
+	)
+	CONFIGURATION_MAX_DIMENSIONS: int = Field(default=5, description="Dimensions per product.")
+	CONFIGURATION_MAX_VALUES: int = Field(default=50, description="Values per dimension.")
+	CONFIGURATION_MAX_MODELS: int = Field(default=500, description="Configured models per product.")
+
 	# --- Layout from photo: model-variant generations (ADR-015) -----------
 	# Rides on ENABLE_MODEL_VARIANTS; there is no separate flag.
 	# Generations running at once per replica. fal does the work remotely, but

@@ -536,6 +536,11 @@ GET /public/products/{rivollo_product_id}/shopify
   `available`, and link **Add to cart** to `add_to_cart_url`.
 - Layouts without an accepted model are omitted; their variants still exist and show the original
   model.
+- **Configured products (Capacity × Layout, `configurator/api-spec.md` §9c):** each variant also
+  carries `"model": "original" | "<model-variant id>" | null`, resolved through the seller's
+  dimension mapping. When the shopper picks options, show the variant's price and switch to its
+  `model`. `null` means no model has that combination: keep the current shape, never substitute.
+  `model` is `null` on products without a mapping; use `layouts` there.
 - Never contains stock counts, SKUs or Shopify ids beyond the variant number.
 
 ---
