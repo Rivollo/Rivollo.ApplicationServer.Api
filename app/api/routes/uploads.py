@@ -20,6 +20,7 @@ from app.schemas.uploads import (
 	UploadInitRequest,
 	UploadInitResponse,
 )
+from app.services.image_moderation_service import image_moderation_service
 from app.services.licensing_service import LicensingService
 from app.services.model_converter import model_converter
 from app.services.storage import storage_service
@@ -281,6 +282,18 @@ async def upload_content(
 			return api_success(response_payload)
 
 	content_bytes = await file.read()
+
+	# Screen images for explicit content BEFORE anything is written to storage.
+	# Non-image files (GLB/USDZ) are skipped inside screen(). Raises
+	# ContentPolicyViolation -> 422 (or 403 once the account is suspended).
+	await image_moderation_service.screen(
+		content_bytes,
+		user_id=user_id,
+		source="uploads.content",
+		filename=filename,
+		content_type=file.content_type,
+	)
+
 	stream = io.BytesIO(content_bytes)
 	stream.seek(0)
 

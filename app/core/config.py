@@ -75,6 +75,73 @@ class Settings(BaseSettings):
 			d.strip().lower() for d in self.EMAIL_DOMAIN_ALLOWLIST.split(",") if d.strip()
 		)
 
+	# Operator-maintained DENYLIST of email domains, on top of the upstream
+	# `disposable-email-domains` package. The upstream list is a static
+	# snapshot that lags behind new temp-mail services (koboywin.com and
+	# ehwit.com were both missing from it while publishing valid MX records,
+	# so they sailed through every stage of the check). Domains listed here
+	# — and in app/data/email_domain_denylist.txt — are rejected at signup
+	# AND at login / Google sign-in, because they are a deliberate operator
+	# decision rather than an upstream guess. Comma-separated; subdomains of
+	# a listed domain are blocked too.
+	EMAIL_DOMAIN_DENYLIST: str = Field(default="")
+
+	def get_email_domain_denylist(self) -> frozenset[str]:
+		return frozenset(
+			d.strip().lower() for d in self.EMAIL_DOMAIN_DENYLIST.split(",") if d.strip()
+		)
+
+	# Image content moderation (app/services/image_moderation_service.py).
+	# Every user-supplied image is screened BEFORE it is written to blob
+	# storage; a rejected image is refused with HTTP 422 and nothing is stored.
+	# No strikes, no suspension — the user is simply told the image is not
+	# allowed. Set ENABLED=false as a kill switch.
+	IMAGE_MODERATION_ENABLED: bool = Field(default=True)
+	# "azure" (Azure AI Content Safety, per-category rules below) or "fal"
+	# (fal-ai/imageutils/nsfw, a single nsfw probability — no categories).
+	# With "azure" configured and reachable, fal is never called; if Azure is
+	# not configured the service falls back to fal automatically.
+	IMAGE_MODERATION_PROVIDER: str = Field(default="azure")
+	# Fail OPEN on classifier/network errors (the upload goes through and is
+	# logged) so a provider outage does not take product creation down with it.
+	IMAGE_MODERATION_FAIL_OPEN: bool = Field(default=True)
+	IMAGE_MODERATION_TIMEOUT_SECONDS: float = Field(default=20.0)
+
+	# --- Azure AI Content Safety ------------------------------------------
+	# Create a "Content Safety" resource in Azure (Foundry / AI Services) and
+	# copy Endpoint + Key. Endpoint looks like
+	#   https://<name>.cognitiveservices.azure.com
+	AZURE_CONTENT_SAFETY_ENDPOINT: str = Field(default="")
+	AZURE_CONTENT_SAFETY_KEY: str = Field(default="")
+	AZURE_CONTENT_SAFETY_API_VERSION: str = Field(default="2024-09-01")
+	# Which kinds of images are NOT allowed, and from what severity.
+	# Azure scores each image in four categories — Sexual, Violence, Hate,
+	# SelfHarm — at severity 0 (safe), 2 (low), 4 (medium) or 6 (high).
+	# Format: "Category:minSeverity,Category:minSeverity". An image is rejected
+	# if ANY listed category scores at or above its threshold. Leave a category
+	# out to allow it entirely. Default blocks anything sexual at all and
+	# clearly violent/hateful/self-harm imagery.
+	AZURE_CONTENT_SAFETY_BLOCK_RULES: str = Field(
+		default="Sexual:2,Violence:4,Hate:4,SelfHarm:4"
+	)
+
+	def get_content_safety_block_rules(self) -> dict[str, int]:
+		rules: dict[str, int] = {}
+		for part in self.AZURE_CONTENT_SAFETY_BLOCK_RULES.split(","):
+			part = part.strip()
+			if not part:
+				continue
+			name, _, sev = part.partition(":")
+			try:
+				rules[name.strip().lower()] = int(sev) if sev.strip() else 2
+			except ValueError:
+				continue
+		return rules
+
+	# --- fal.ai fallback ----------------------------------------------------
+	IMAGE_MODERATION_NSFW_THRESHOLD: float = Field(default=0.7)
+	IMAGE_MODERATION_FAL_ENDPOINT_ID: str = Field(default="fal-ai/imageutils/nsfw")
+
 	# Resend email
 	RESEND_API_KEY: str = Field(default="")
 	RESEND_FROM_EMAIL: str = Field(default="noreply@rivollomail.com")

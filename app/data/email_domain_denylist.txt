@@ -1,0 +1,12 @@
+# Operator-maintained email domain denylist.
+#
+# Domains here are rejected at signup AND at login / Google sign-in, on top
+# of the upstream `disposable-email-domains` package. Add a domain when a
+# temp-mail service is seen in signups before the upstream list catches up.
+# One domain per line, lowercase, no "@" — subdomains are blocked too.
+# Lines starting with "#" are comments. EMAIL_DOMAIN_DENYLIST (env) adds
+# more without a deploy.
+#
+# Seen abusing signups, not in upstream blocklist as of 0.0.242 (Aug 2026):
+koboywin.com
+ehwit.com
