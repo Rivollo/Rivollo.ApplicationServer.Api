@@ -68,6 +68,14 @@ class ProductCreateWithFalImage(BaseModel):
             "correct even if the default model changes without a deploy."
         ),
     )
+    textured: bool = Field(
+        True,
+        description=(
+            "False asks for a solid-body mesh with no texture. Only models "
+            "whose GET /ai/3d-models entry has supports_untextured=true accept "
+            "it; any other model returns 400."
+        ),
+    )
 
     # `model` collides with pydantic's reserved `model_` namespace warning only
     # for prefixed names, but silence the namespace check explicitly so the
