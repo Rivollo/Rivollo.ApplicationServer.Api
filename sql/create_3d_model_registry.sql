@@ -159,7 +159,8 @@ INSERT INTO tbl_mstr_3d_models (
             "face_limit": 50000
         },
         "glb_url_paths": ["model_urls.glb.url", "model_mesh.url"],
-        "usdz_url_paths": []
+        "usdz_url_paths": [],
+        "untextured_overrides": {"texture": false, "pbr": false}
     }'::jsonb,
     'The registry default (is_default) and first in order_index, so it is '
     'also what a Free-plan seller lands on — every model here is '
@@ -190,7 +191,8 @@ INSERT INTO tbl_mstr_3d_models (
             "face_count": 500000
         },
         "glb_url_paths": ["model_glb.url", "model_urls.glb.url"],
-        "usdz_url_paths": []
+        "usdz_url_paths": [],
+        "untextured_overrides": {"generate_type": "Geometry", "enable_pbr": false, "face_count": 50000}
     }'::jsonb,
     'Unlike every other model here, the image field is "input_image_url", '
     'not "image_url" — this is exactly what provider_config.image_url_field '
@@ -277,7 +279,8 @@ INSERT INTO tbl_mstr_3d_models (
             "enable_safety_checker": true
         },
         "glb_url_paths": ["model_glb.url", "model_urls.glb.url"],
-        "usdz_url_paths": ["model_urls.usdz.url"]
+        "usdz_url_paths": ["model_urls.usdz.url"],
+        "untextured_overrides": {"should_texture": false, "enable_pbr": false}
     }'::jsonb,
     'Rigging and animation are deliberately OFF: fal''s own example '
     'enables them, but Meshy''s docs say rigging targets "humanoid '

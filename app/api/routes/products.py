@@ -505,6 +505,17 @@ async def create_product_with_image_fal(
             detail=str(exc),
         )
 
+    # Solid-body (untextured) output is a per-model capability declared in the
+    # registry row. Swap in the derived spec here so every step after this —
+    # plan gate, credits, generation, ETA — uses it with no further changes.
+    if not payload.textured:
+        if not model_spec.supports_untextured:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{model_spec.label} does not support untextured (solid) output.",
+            )
+        model_spec = model_spec.untextured()
+
     # Only paid (Pro/Enterprise) users may generate products via billed fal
     # vendors. Whichever model(s) the registry flags free_plan_eligible are
     # the exception, so Free-plan sellers can still use the direct-image

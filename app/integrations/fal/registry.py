@@ -35,7 +35,7 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -71,6 +71,38 @@ class FalModelSpec:
     request_body_template: dict
     glb_url_paths: tuple[str, ...]
     usdz_url_paths: tuple[str, ...]
+    # Request fields that switch this model to an untextured (solid-body)
+    # mesh, merged over request_body_template by :meth:`untextured`. Empty
+    # means the model offers no untextured mode. From
+    # ``provider_config.untextured_overrides``.
+    untextured_overrides: dict = field(default_factory=dict)
+
+    @property
+    def supports_untextured(self) -> bool:
+        return bool(self.untextured_overrides)
+
+    def untextured(self) -> "FalModelSpec":
+        """This model, asked for geometry without a texture.
+
+        Returns a derived spec rather than taking a flag through the service
+        layer: everything downstream (product service, queue client, Draco,
+        USDZ) already works from ``spec`` alone, so none of it changes. The
+        derived key ``<key>_solid`` keeps its duration history apart from the
+        textured runs, which take a different amount of time. The derived key
+        is never a registry row, so ``get_model_spec`` will not resolve it.
+        """
+        if not self.untextured_overrides:
+            raise ValueError(f"{self.label} does not support untextured output.")
+        return replace(
+            self,
+            key=f"{self.key}_solid",
+            label=f"{self.label} (solid)",
+            request_body_template={
+                **self.request_body_template,
+                **self.untextured_overrides,
+            },
+            untextured_overrides={},
+        )
 
     @property
     def submit_url(self) -> str:
@@ -160,6 +192,7 @@ def _row_to_spec(row: Model3DConfig) -> FalModelSpec:
         request_body_template=dict(config.get("request_body_template") or {}),
         glb_url_paths=tuple(config.get("glb_url_paths") or ()),
         usdz_url_paths=tuple(config.get("usdz_url_paths") or ()),
+        untextured_overrides=dict(config.get("untextured_overrides") or {}),
     )
 
 
