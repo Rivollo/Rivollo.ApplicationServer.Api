@@ -151,6 +151,7 @@ jobs:
       - name: Deploy image and configuration to Container App
         env:
           ACCESS_TOKEN_EXPIRES_MINUTES: ${{ vars.ACCESS_TOKEN_EXPIRES_MINUTES }}
+          AGENT_USAGE_KEY: ${{ secrets.AGENT_USAGE_KEY }}
           AI_LINK_URL_MAX_CHARS: ${{ vars.AI_LINK_URL_MAX_CHARS }}
           AI_USER_INPUT_DESC_MAX_CHARS: ${{ vars.AI_USER_INPUT_DESC_MAX_CHARS }}
           AI_USER_INPUT_NAME_MAX_CHARS: ${{ vars.AI_USER_INPUT_NAME_MAX_CHARS }}
@@ -169,6 +170,7 @@ jobs:
           CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DEBUG: ${{ vars.DEBUG }}
+          ENABLE_AGENT_BILLING: ${{ vars.ENABLE_AGENT_BILLING }}
           FAL_KEY: ${{ secrets.FAL_KEY }}
           FCM_DRY_RUN: ${{ vars.FCM_DRY_RUN }}
           FIREBASE_JSON_PATH: ${{ vars.FIREBASE_JSON_PATH }}
@@ -239,6 +241,7 @@ jobs:
           }
 
           add ACCESS_TOKEN_EXPIRES_MINUTES "${ACCESS_TOKEN_EXPIRES_MINUTES:-}"
+          add AGENT_USAGE_KEY "${AGENT_USAGE_KEY:-}"
           add AI_LINK_URL_MAX_CHARS "${AI_LINK_URL_MAX_CHARS:-}"
           add AI_USER_INPUT_DESC_MAX_CHARS "${AI_USER_INPUT_DESC_MAX_CHARS:-}"
           add AI_USER_INPUT_NAME_MAX_CHARS "${AI_USER_INPUT_NAME_MAX_CHARS:-}"
@@ -257,6 +260,7 @@ jobs:
           add CDN_BASE_URL "${CDN_BASE_URL:-}"
           add DATABASE_URL "${DATABASE_URL:-}"
           add DEBUG "${DEBUG:-}"
+          add ENABLE_AGENT_BILLING "${ENABLE_AGENT_BILLING:-}"
           add FAL_KEY "${FAL_KEY:-}"
           add FCM_DRY_RUN "${FCM_DRY_RUN:-}"
           add FIREBASE_JSON_PATH "${FIREBASE_JSON_PATH:-}"

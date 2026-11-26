@@ -41,6 +41,7 @@ from app.api.routes.ai import router as ai_router
 from app.api.routes.notifications import router as notifications_router
 from app.api.routes.login_otp import router as login_otp_router
 from app.api.routes.api_keys import router as api_keys_router
+from app.api.routes.agent_billing import router as agent_billing_router
 from app.api.routes.shopify import (
     portal_router as shopify_portal_router,
     public_router as shopify_public_router,
@@ -372,6 +373,7 @@ app.include_router(ai_router, prefix=_api_prefix)
 app.include_router(notifications_router, prefix=_api_prefix)
 app.include_router(login_otp_router, prefix=_api_prefix)
 app.include_router(api_keys_router, prefix=_api_prefix)
+app.include_router(agent_billing_router, prefix=_api_prefix)
 app.include_router(shopify_router, prefix=_api_prefix)
 app.include_router(shopify_portal_router, prefix=_api_prefix)
 app.include_router(shopify_public_router, prefix=_api_prefix)

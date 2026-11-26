@@ -13,6 +13,7 @@ from . import model_registry  # noqa: F401
 from . import configurator  # noqa: F401
 from . import api_key  # noqa: F401
 from . import shopify  # noqa: F401
+from . import agent_billing  # noqa: F401
 
 
 __all__ = ["Base"]

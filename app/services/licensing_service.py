@@ -3,13 +3,14 @@
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.database.agent_billing_repo import agent_billing_repository
 from app.models.models import LicenseAssignment, Notification, Plan, Subscription, User
 
 
@@ -182,11 +183,34 @@ class LicensingService:
         if limit_val is None:
             return True, limits_info
 
-        if current_usage + increment > limit_val:
+        # Credits held by running AI Assistant messages are spoken for: product
+        # creation and generations must not spend them (see
+        # app/services/agent_billing/hold_service.py).
+        held = 0
+        if usage_col == "usage_ai_credits":
+            held = await LicensingService.held_ai_credits(db, user_id)
+
+        if current_usage + held + increment > limit_val:
             # Quota exceeded
-            return False, {"limit": limit_val, "current": current_usage, "quota": quota_key}
+            info = {"limit": limit_val, "current": current_usage, "quota": quota_key}
+            if held:
+                info["held"] = held
+            return False, info
 
         return True, limits_info
+
+    @staticmethod
+    async def held_ai_credits(db: AsyncSession, user_id: uuid.UUID) -> int:
+        """AI credits held by the user's running AI Assistant messages.
+
+        Always 0 while ENABLE_AGENT_BILLING is off, so environments without
+        tbl_agent_usage (sql/create_agent_billing.sql) never query it.
+        """
+        if not settings.ENABLE_AGENT_BILLING:
+            return 0
+        return await agent_billing_repository.sum_open_holds(
+            db, user_id, datetime.now(timezone.utc)
+        )
 
     @staticmethod
     async def increment_usage(
@@ -229,6 +253,34 @@ class LicensingService:
             )
 
         return True
+
+    @staticmethod
+    async def notify_usage_thresholds(
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        quota_key: str,
+        previous_usage: int,
+        current_usage: int,
+        limit: Optional[int],
+    ) -> None:
+        """Send the quota-threshold notifications a usage change crossed — the
+        same ones increment_usage sends — for callers that update usage under
+        their own lock and transaction (AI Assistant billing). Call after
+        committing: a failed notification rolls the session back."""
+        thresholds = LicensingService._crossed_quota_thresholds(
+            previous_usage=previous_usage,
+            current_usage=current_usage,
+            limit=limit or 0,
+        )
+        for threshold in thresholds:
+            await LicensingService._notify_quota_threshold(
+                db=db,
+                user_id=user_id,
+                quota_key=quota_key,
+                usage=current_usage,
+                limit=limit,
+                threshold=threshold,
+            )
 
     @staticmethod
     async def get_user_plan_code(db: AsyncSession, user_id: uuid.UUID) -> str:
