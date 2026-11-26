@@ -393,6 +393,57 @@ class Settings(BaseSettings):
 		description="Largest source image read to build a thumbnail, in bytes.",
 	)
 
+	# --- 3D Agent (AI Assistant) billing — sql/create_agent_billing.sql -----
+	# A chat message is charged by the LLM tokens it actually used:
+	#   credits = CEIL(cost_usd x AGENT_BILLING_MULTIPLIER / AGENT_CREDIT_USD_VALUE)
+	# with cost_usd from tbl_llm_model_prices. The message runs on a credit hold
+	# that grows by AGENT_HOLD_CHUNK_CREDITS at a time; when the seller cannot
+	# cover the next chunk the agent stops. Each settled row records the rates
+	# it was billed at, so changing these never rewrites an old bill.
+	#
+	# OFF by default: it needs tbl_agent_usage and tbl_llm_model_prices
+	# (sql/create_agent_billing.sql). With it on and the tables missing, every
+	# AI-credit check — product creation included — fails, because open holds
+	# are subtracted from the available credits. Turn it on per environment
+	# only after that script has been applied there.
+	ENABLE_AGENT_BILLING: bool = Field(
+		default=False,
+		description="Enable AI Assistant credit holds and billing (needs sql/create_agent_billing.sql).",
+	)
+	AGENT_BILLING_MULTIPLIER: float = Field(
+		default=2.0,
+		description="Credits charged per unit of actual LLM cost (2.0 = twice the cost).",
+	)
+	AGENT_CREDIT_USD_VALUE: float = Field(
+		default=0.01,
+		description="Internal USD value of one AI credit.",
+	)
+	AGENT_MIN_CREDITS: int = Field(
+		default=1,
+		description="Least a settled (charged) chat message costs, in credits.",
+	)
+	AGENT_HOLD_CHUNK_CREDITS: int = Field(
+		default=3,
+		description="Credits added to a running message's hold at a time.",
+	)
+	AGENT_MAX_CREDITS_PER_MESSAGE: int = Field(
+		default=30,
+		description="Safety limit for one chat message, protecting the seller's balance.",
+	)
+	# A hold still open after this is presumed dead with its agent turn and is
+	# released by the sweep. Comfortably above the portal proxy's 25-minute
+	# upstream timeout for one agent turn.
+	AGENT_HOLD_TTL_MINUTES: int = Field(
+		default=30,
+		description="Minutes after which an unsettled credit hold is released.",
+	)
+	# Shared secret the 3D Agent sends as X-Agent-Usage-Key on the internal
+	# hold-extend / settle endpoints. Empty = those endpoints refuse every call.
+	AGENT_USAGE_KEY: str = Field(
+		default="",
+		description="Service key for the 3D Agent's internal billing calls.",
+	)
+
 	# --- Shopify integration (docs/shopify-integration/spec.md, ADR-016) --
 	# ON by default (product decision, 2026-09-29). Every environment running
 	# this build therefore needs the Shopify tables (migration c9e5a3b1d8f6, or

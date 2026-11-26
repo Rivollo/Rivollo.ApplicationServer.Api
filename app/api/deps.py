@@ -1,5 +1,6 @@
 """FastAPI dependencies for authentication and database sessions."""
 
+import hmac
 import uuid
 from typing import Annotated, Optional
 
@@ -8,6 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.core.security import decode_access_token
 from app.models.models import User
@@ -239,9 +241,29 @@ def require_api_key_scope(scope: str):
     return _dependency
 
 
+AGENT_USAGE_KEY_HEADER = "X-Agent-Usage-Key"
+INVALID_AGENT_USAGE_KEY_DETAIL = "Invalid service key."
+
+
+async def verify_agent_usage_key(request: Request) -> None:
+    """The 3D Agent's internal billing calls (hold extend, settle) carry the
+    shared secret AGENT_USAGE_KEY. Compared in constant time; with no key
+    configured every call is refused, so the endpoints are never open by
+    accident."""
+    expected = settings.AGENT_USAGE_KEY
+    supplied = request.headers.get(AGENT_USAGE_KEY_HEADER, "")
+    if not expected or not supplied or not hmac.compare_digest(
+        supplied.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=INVALID_AGENT_USAGE_KEY_DETAIL
+        )
+
+
 # Convenience type aliases
 CurrentUser = Annotated[User, Depends(get_current_user)]
 OptionalUser = Annotated[Optional[User], Depends(get_current_user_optional)]
 DB = Annotated[AsyncSession, Depends(get_db)]
 AppTokenVerified = Annotated[None, Depends(verify_app_token)]
 ApiKeyAuth = Annotated[ApiKeyPrincipal, Depends(get_api_key_principal)]
+AgentServiceAuth = Annotated[None, Depends(verify_agent_usage_key)]
