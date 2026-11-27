@@ -23,6 +23,7 @@ from app.models.plan import Plan, PlanFeature
 from app.models.plan import PlanPrice
 from app.models.subscription import Subscription
 from app.models.subscription_enums import LicenseStatus
+from app.services.licensing_service import carry_over_ai_credit_overdraft
 
 _logger = logging.getLogger("rivollo.usd_entitlement")
 
@@ -144,13 +145,18 @@ async def upsert_usd_license(
     existing = result.scalars().first()
 
     if existing is not None:
+        # Read before the limit below is replaced: credits the last AI
+        # Assistant message overdrew are owed in the new period.
+        ai_credit_overdraft = carry_over_ai_credit_overdraft(
+            existing.usage_ai_credits, existing.limit_max_ai_credits
+        )
         existing.status = LicenseStatus.ACTIVE
         existing.limit_max_products = limits.get("max_products", 0)
         existing.limit_max_ai_credits = ai_credit_limit
         existing.limit_max_public_views = limits.get("max_public_views", 0)
         existing.limit_max_galleries = limits.get("max_galleries", 0)
         if reset_usage:
-            existing.usage_ai_credits = 0
+            existing.usage_ai_credits = ai_credit_overdraft
             existing.usage_public_views = 0
     else:
         db.add(

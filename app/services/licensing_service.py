@@ -12,9 +12,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.database.agent_billing_repo import agent_billing_repository
 from app.models.models import LicenseAssignment, Notification, Plan, Subscription, User
+from app.models.subscription_enums import SubscriptionStatus
 
 
 logger = logging.getLogger(__name__)
+
+
+def carry_over_ai_credit_overdraft(usage: Optional[int], limit: Optional[int]) -> int:
+    """AI-credit usage a licence starts its new period with.
+
+    Normally 0. The last AI Assistant message of a period is allowed to finish
+    past the limit (app/services/agent_billing/hold_service.py, "Overdraft"),
+    so usage can end above it; that excess is carried into the new period
+    instead of being forgiven by the reset. ``limit`` is the limit of the period
+    that just ended; None (unlimited) can never be overdrawn.
+    """
+    if limit is None:
+        return 0
+    return max(int(usage or 0) - int(limit), 0)
 
 
 class LicensingService:
@@ -290,15 +305,28 @@ class LicensingService:
         if not license:
             return "free"
 
-        # Get subscription and plan
+        # The plan counts only while its subscription is ACTIVE and inside its
+        # paid period — the same rule GET /subscriptions/me applies. Starting a
+        # checkout puts the new plan on the subscription row while it is still
+        # PENDING; reading the plan without this check treated an unpaid (or
+        # abandoned) checkout as Pro.
         result = await db.execute(
-            select(Plan)
-            .join(Subscription)
+            select(Plan.code, Subscription.status, Subscription.current_period_end)
+            .join(Subscription, Subscription.plan_id == Plan.id)
             .where(Subscription.id == license.subscription_id)
         )
-        plan = result.scalar_one_or_none()
-
-        return plan.code if plan else "free"
+        row = result.first()
+        if row is None:
+            return "free"
+        plan_code, sub_status, period_end = row
+        if sub_status != SubscriptionStatus.ACTIVE:
+            return "free"
+        if period_end is not None:
+            if period_end.tzinfo is None:
+                period_end = period_end.replace(tzinfo=timezone.utc)
+            if period_end <= datetime.now(timezone.utc):
+                return "free"
+        return plan_code or "free"
 
     # Plans whose users may generate USDZ. GLB creation stays available on every
     # plan — only the GLB -> USDZ conversion is paid-tier.

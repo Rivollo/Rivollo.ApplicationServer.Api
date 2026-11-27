@@ -397,8 +397,11 @@ class Settings(BaseSettings):
 	# A chat message is charged by the LLM tokens it actually used:
 	#   credits = CEIL(cost_usd x AGENT_BILLING_MULTIPLIER / AGENT_CREDIT_USD_VALUE)
 	# with cost_usd from tbl_llm_model_prices. The message runs on a credit hold
-	# that grows by AGENT_HOLD_CHUNK_CREDITS at a time; when the seller cannot
-	# cover the next chunk the agent stops. Each settled row records the rates
+	# that grows by AGENT_HOLD_CHUNK_CREDITS at a time. A seller with any credit
+	# left can send a message and it always runs to the end, so the last one may
+	# take the balance below zero (by at most AGENT_MAX_CREDITS_PER_MESSAGE);
+	# nothing more is allowed until credits are added, and a renewal carries
+	# the overdraft forward. Each settled row records the rates
 	# it was billed at, so changing these never rewrites an old bill.
 	#
 	# OFF by default: it needs tbl_agent_usage and tbl_llm_model_prices

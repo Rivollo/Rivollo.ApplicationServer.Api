@@ -17,8 +17,10 @@ Idempotent: settling a hold that is already settled or released returns the
 saved result and changes nothing, so the agent can safely retry.
 
 A hold the sweep already expired (the agent finished after AGENT_HOLD_TTL) is
-still settled: the work was done, so it is charged — the seller may end
-slightly over their limit, exactly as an in-flight message is allowed to.
+still settled: the work was done, so it is charged.
+
+The charge is not limited by the balance: the last message may take
+usage_ai_credits past limit_max_ai_credits (hold_service, "Overdraft").
 
 Locking: licence row first, usage row second — the order hold_service uses —
 and usage_ai_credits is incremented on the locked licence row, so concurrent

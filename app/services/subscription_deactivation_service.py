@@ -7,34 +7,149 @@ Design decisions:
     - Runs as a background job — NEVER raises exceptions outward.
       Any failure is logged, rolled back, and silently swallowed so the server
       never crashes because of a failed scheduled task.
-    - Uses bulk UPDATE ... RETURNING for efficiency — one round-trip to find AND
-      cancel expired subscriptions, a second to revoke their licenses.
-    - Uses raw SQL from app.queries.subscription_queries (pure SQL constants,
-      no ORM overhead for a batch update).
-    - Idempotent — running it twice in quick succession is safe because the
-      first run marks subscriptions 'canceled', so the second run's WHERE clause
-      (status = 'active') skips them.
+    - Status is MATCHED without regard to case and WRITTEN through the models.
+      The status columns are plain text holding the enum NAMES ('ACTIVE',
+      'CANCELED', 'REVOKED'), because the models declare them
+      ``Enum(..., native_enum=False)``. The raw SQL this job used to run
+      compared against lowercase 'active', so it matched no row — nothing ever
+      expired — and wrote lowercase 'canceled' / 'revoked', which the ORM
+      cannot read back. Now the job finds a row whichever case it was stored
+      in (``_status_is``), reads plain columns rather than model objects so an
+      oddly-cased row cannot break the run, and writes the value the rest of
+      the app expects.
+    - Asks Razorpay before ending a subscription it is still billing. A missed
+      or late renewal webhook leaves current_period_end in the past for a
+      customer who has paid; cancelling on our clock alone would take their
+      plan away. See ``decide_expiry``.
+    - Idempotent — a subscription this job cancels is no longer ACTIVE, so the
+      next run skips it.
 """
 
 from __future__ import annotations
 
 import logging
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
-from sqlalchemy import select, text
+import httpx
+from sqlalchemy import String, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.models.license_assignment import LicenseAssignment
 from app.models.models import Notification, User
 from app.models.subscription import Subscription
-from app.models.subscription_enums import SubscriptionStatus
-from app.queries.subscription_queries import (
-    DEACTIVATE_EXPIRED_SUBSCRIPTIONS,
-    REVOKE_LICENSES_FOR_SUBSCRIPTIONS,
-)
+from app.models.subscription_enums import LicenseStatus, SubscriptionStatus
+from app.services.licensing_service import carry_over_ai_credit_overdraft
 
 logger = logging.getLogger("rivollo.subscription_deactivation")
+
+
+# Subscriptions examined per run, so one run cannot make an unbounded number of
+# gateway calls. The rest are picked up by the next run (every 5 minutes).
+_MAX_EXPIRED_PER_RUN = 50
+
+# How long past current_period_end a subscription Razorpay still reports as
+# running (charge due, or being retried) keeps its plan while we wait for the
+# charge. After that it is ended whatever the gateway says.
+_RENEWAL_GRACE = timedelta(hours=72)
+
+# Razorpay subscription statuses that mean "still being billed".
+_GATEWAY_RUNNING = ("active", "authenticated", "pending")
+
+EXPIRY_CANCEL = "cancel"
+EXPIRY_EXTEND = "extend"
+EXPIRY_WAIT = "wait"
+
+
+def _status_is(column, member) -> Any:
+    """``column`` holds ``member``, whatever case it was stored in ('ACTIVE',
+    'active', ...). Compared as text, so it works for the stored enum name and
+    for the enum's lowercase value alike."""
+    return func.lower(cast(column, String)) == member.name.lower()
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _gateway_time(value: Any) -> Optional[datetime]:
+    """A Razorpay unix timestamp as an aware datetime (None when absent)."""
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc) if value else None
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def decide_expiry(
+    *,
+    period_end: datetime,
+    has_gateway_subscription: bool,
+    cancel_at_period_end: bool,
+    gateway: Optional[dict],
+    gateway_lookup_failed: bool,
+    now: datetime,
+) -> str:
+    """What to do with an ACTIVE subscription whose period end has passed.
+
+    cancel  end it and revoke its licence
+    extend  Razorpay shows a paid period we never recorded (missed webhook):
+            take the period from Razorpay instead of ending it
+    wait    Razorpay is still billing it (charge due or retrying), or could
+            not be asked: leave it for the next run, up to _RENEWAL_GRACE
+
+    Pure: no database, no network.
+    """
+    # Nothing at the gateway (e.g. a manually granted plan), or the customer
+    # cancelled and was promised access until exactly this date.
+    if not has_gateway_subscription or cancel_at_period_end:
+        return EXPIRY_CANCEL
+
+    within_grace = now - _as_utc(period_end) < _RENEWAL_GRACE
+
+    if gateway is None:
+        # Could not ask Razorpay. Do not end a possibly-paid plan on a network
+        # error — but do not keep it forever either.
+        return EXPIRY_WAIT if gateway_lookup_failed and within_grace else EXPIRY_CANCEL
+
+    if gateway.get("status") not in _GATEWAY_RUNNING:
+        # cancelled / halted / completed / expired
+        return EXPIRY_CANCEL
+
+    gateway_end = _gateway_time(gateway.get("current_end"))
+    if gateway.get("status") == "active" and gateway_end and gateway_end > now:
+        return EXPIRY_EXTEND
+    return EXPIRY_WAIT if within_grace else EXPIRY_CANCEL
+
+
+async def fetch_gateway_subscription(rz_subscription_id: str) -> tuple[Optional[dict], bool]:
+    """Razorpay's view of a subscription: ``(entity, lookup_failed)``.
+
+    ``(None, False)`` when Razorpay has no such subscription or no credentials
+    are configured (nothing to wait for); ``(None, True)`` on a network or
+    server error (worth retrying on the next run). Never raises.
+    """
+    if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
+        return None, False
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{settings.RAZORPAY_BASE_URL}/subscriptions/{rz_subscription_id}",
+                auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),
+            )
+        if response.status_code in (400, 404):
+            return None, False
+        response.raise_for_status()
+        body = response.json()
+        return (body, False) if isinstance(body, dict) else (None, True)
+    except Exception:
+        logger.warning(
+            "Deactivation job: could not read rz_sub_id=%s from Razorpay",
+            rz_subscription_id,
+            exc_info=True,
+        )
+        return None, True
 
 
 class SubscriptionDeactivationService:
@@ -131,18 +246,58 @@ class SubscriptionDeactivationService:
                     await db.rollback()
 
     @staticmethod
+    async def _extend_from_gateway(
+        db: AsyncSession, subscription_id, user_id, gateway: dict, now: datetime
+    ) -> Optional[datetime]:
+        """Record a paid period Razorpay has and we do not — what the missed
+        subscription.charged webhook would have done: move the period on and
+        start the licence's monthly counters again (an AI-credit overdraft is
+        carried over, as on any renewal). Limits are left as they are.
+        Returns the new period end."""
+        period_end = _gateway_time(gateway.get("current_end"))
+        await db.execute(
+            update(Subscription)
+            .where(Subscription.id == subscription_id)
+            .values(
+                current_period_start=_gateway_time(gateway.get("current_start")) or now,
+                current_period_end=period_end,
+                updated_date=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+
+        result = await db.execute(
+            select(
+                LicenseAssignment.id,
+                LicenseAssignment.usage_ai_credits,
+                LicenseAssignment.limit_max_ai_credits,
+            ).where(
+                LicenseAssignment.subscription_id == subscription_id,
+                LicenseAssignment.user_id == user_id,
+                _status_is(LicenseAssignment.status, LicenseStatus.ACTIVE),
+            )
+        )
+        for license_id, usage, limit in result.all():
+            await db.execute(
+                update(LicenseAssignment)
+                .where(LicenseAssignment.id == license_id)
+                .values(
+                    usage_ai_credits=carry_over_ai_credit_overdraft(usage, limit),
+                    usage_public_views=0,
+                )
+                .execution_options(synchronize_session=False)
+            )
+        return period_end
+
+    @staticmethod
     async def run_deactivation_job(db: AsyncSession) -> None:
-        """Find all expired active subscriptions, cancel them, and revoke licenses.
+        """Find ACTIVE subscriptions whose period has ended; cancel them and
+        revoke their licences — unless Razorpay shows the customer has paid
+        for a period we never recorded, or is still being charged for it
+        (``decide_expiry``).
 
-        This is the main entry point for the background scheduler.
-
-        It performs exactly two SQL statements:
-            1. UPDATE tbl_subscriptions WHERE period_end <= now → CANCELED
-               (RETURNING the list of IDs updated)
-            2. UPDATE tbl_license_assignments WHERE subscription_id IN (above IDs)
-               → REVOKED
-
-        A single transaction wraps both updates so they succeed or fail together.
+        This is the main entry point for the background scheduler. All of a
+        run's changes are committed together.
 
         Args:
             db: An async database session (obtained from the session factory,
@@ -153,37 +308,103 @@ class SubscriptionDeactivationService:
 
             await SubscriptionDeactivationService._send_subscription_expiry_reminders(db, now)
 
-            # ── Step 1: Cancel all expired subscriptions ──────────────────────
-            # RETURNING gives us the IDs immediately without a follow-up SELECT.
+            # Plain columns, not Subscription objects: loading a model whose
+            # status is stored in an unexpected case raises inside the ORM.
             result = await db.execute(
-                text(DEACTIVATE_EXPIRED_SUBSCRIPTIONS),
-                {"now": now},
+                select(
+                    Subscription.id,
+                    Subscription.user_id,
+                    Subscription.razorpay_subscription_id,
+                    Subscription.cancel_at_period_end,
+                    Subscription.current_period_end,
+                )
+                .where(
+                    _status_is(Subscription.status, SubscriptionStatus.ACTIVE),
+                    Subscription.current_period_end.is_not(None),
+                    Subscription.current_period_end <= now,
+                )
+                .order_by(Subscription.current_period_end.asc())
+                .limit(_MAX_EXPIRED_PER_RUN)
             )
-            canceled_ids = [row[0] for row in result.fetchall()]
-            sub_count = len(canceled_ids)
+            expired = result.all()
 
-            if sub_count == 0:
-                # Nothing to do — skip license revocation and commit.
+            if not expired:
                 logger.debug("Deactivation job: no expired subscriptions found.")
                 await db.commit()
                 return
 
-            # ── Step 2: Revoke licenses for the canceled subscriptions ────────
-            # ANY(:subscription_ids) requires a list — asyncpg handles it natively.
-            license_result = await db.execute(
-                text(REVOKE_LICENSES_FOR_SUBSCRIPTIONS),
-                {"now": now, "subscription_ids": canceled_ids},
-            )
-            license_count = license_result.rowcount
+            canceled_ids = []
+            extended = waiting = 0
+            for (
+                subscription_id,
+                user_id,
+                rz_subscription_id,
+                cancel_at_period_end,
+                period_end,
+            ) in expired:
+                gateway: Optional[dict] = None
+                lookup_failed = False
+                if rz_subscription_id and not cancel_at_period_end:
+                    gateway, lookup_failed = await fetch_gateway_subscription(
+                        rz_subscription_id
+                    )
 
-            # ── Step 3: Commit both updates together ──────────────────────────
+                decision = decide_expiry(
+                    period_end=period_end,
+                    has_gateway_subscription=bool(rz_subscription_id),
+                    cancel_at_period_end=bool(cancel_at_period_end),
+                    gateway=gateway,
+                    gateway_lookup_failed=lookup_failed,
+                    now=now,
+                )
+
+                if decision == EXPIRY_EXTEND:
+                    new_end = await SubscriptionDeactivationService._extend_from_gateway(
+                        db, subscription_id, user_id, gateway or {}, now
+                    )
+                    extended += 1
+                    logger.warning(
+                        "Deactivation job: subscription %s (rz_sub_id=%s) was past its "
+                        "period end but Razorpay shows it paid until %s — period taken "
+                        "from Razorpay (a renewal webhook was missed).",
+                        subscription_id,
+                        rz_subscription_id,
+                        new_end,
+                    )
+                elif decision == EXPIRY_WAIT:
+                    waiting += 1
+                else:
+                    canceled_ids.append(subscription_id)
+
+            license_count = 0
+            if canceled_ids:
+                await db.execute(
+                    update(Subscription)
+                    .where(Subscription.id.in_(canceled_ids))
+                    .values(status=SubscriptionStatus.CANCELED, updated_date=now)
+                    .execution_options(synchronize_session=False)
+                )
+                license_result = await db.execute(
+                    update(LicenseAssignment)
+                    .where(
+                        LicenseAssignment.subscription_id.in_(canceled_ids),
+                        _status_is(LicenseAssignment.status, LicenseStatus.ACTIVE),
+                    )
+                    .values(status=LicenseStatus.REVOKED)
+                    .execution_options(synchronize_session=False)
+                )
+                license_count = license_result.rowcount
+
             await db.commit()
 
             logger.info(
                 "Deactivation job: %d subscription(s) expired → canceled, "
-                "%d license(s) revoked.",
-                sub_count,
+                "%d license(s) revoked, %d extended from Razorpay, "
+                "%d awaiting their renewal charge.",
+                len(canceled_ids),
                 license_count,
+                extended,
+                waiting,
             )
 
         except Exception as exc:

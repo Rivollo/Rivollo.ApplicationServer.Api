@@ -58,6 +58,13 @@ ACTIVE_SUBSCRIPTION_BLOCK_DETAIL = (
 )
 
 
+# Shown when a customer with a running paid subscription starts another checkout.
+ALREADY_SUBSCRIBED_DETAIL = (
+    "You already have an active subscription. To change plans, cancel it first; "
+    "you can subscribe again once the current billing period ends."
+)
+
+
 async def get_blocking_subscription(
     db: AsyncSession, user_id: uuid.UUID
 ) -> Optional[Subscription]:
