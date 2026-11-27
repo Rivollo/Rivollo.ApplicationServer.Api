@@ -230,6 +230,23 @@ async def create_subscription(
     """
     _check_credentials()
 
+    # A running paid subscription must never be overwritten. This function
+    # reuses the user's latest subscription row, so a second checkout used to
+    # replace the live row's plan, status and Razorpay id before any payment:
+    # the customer showed as Free, and the original Razorpay subscription kept
+    # charging with its webhooks no longer matching any row. The portal hides
+    # the plans from such a customer; this is the server-side lock.
+    from app.services.subscription_guard import (
+        ALREADY_SUBSCRIBED_DETAIL,
+        get_blocking_subscription,
+    )
+
+    if await get_blocking_subscription(db, user_id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=ALREADY_SUBSCRIBED_DETAIL,
+        )
+
     # ── 1. Get plan from DB ──────────────────────────────────────────────────
     plan, plan_price, _ = await _get_plan_with_features(db, plan_code, billing_interval)
     razorpay_plan_id = plan_price.razorpay_plan_id

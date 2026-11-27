@@ -312,6 +312,8 @@ async def handle_usd_subscription_event(
         _logger.info("USD webhook event '%s' has no handler — skipping.", event)
         return {"status": "ok", "skipped": True}
 
+    # Already unique per occurrence: resolved by resolve_event_id in
+    # subscription_webhook_service. The fallback is only for a direct caller.
     effective_event_id = event_id or f"{event}_{rz_subscription_id}"
 
     # Committed before processing, so a handler failure cannot roll away the

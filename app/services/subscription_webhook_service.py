@@ -35,6 +35,7 @@ from app.models.payment import Payment, PaymentStatus
 from app.models.plan import Plan, PlanFeature
 from app.models.subscription import Subscription
 from app.models.subscription_enums import LicenseStatus, SubscriptionStatus
+from app.services.licensing_service import carry_over_ai_credit_overdraft
 from app.services import webhook_inbox
 
 _logger = logging.getLogger("rivollo.subscription_webhook_service")
@@ -191,13 +192,18 @@ async def _upsert_license(
     existing = result.scalar_one_or_none()
 
     if existing is not None:
+        # Read before the limit below is replaced: credits the last AI
+        # Assistant message overdrew are owed in the new period.
+        ai_credit_overdraft = carry_over_ai_credit_overdraft(
+            existing.usage_ai_credits, existing.limit_max_ai_credits
+        )
         existing.status = LicenseStatus.ACTIVE
         existing.limit_max_products = limits.get("max_products", 0)
         existing.limit_max_ai_credits = ai_credit_limit
         existing.limit_max_public_views = limits.get("max_public_views", 0)
         existing.limit_max_galleries = limits.get("max_galleries", 0)
         if reset_usage:
-            existing.usage_ai_credits = 0
+            existing.usage_ai_credits = ai_credit_overdraft
             existing.usage_public_views = 0
     else:
         db.add(LicenseAssignment(
@@ -484,11 +490,43 @@ _EVENT_HANDLERS = {
 }
 
 
+def resolve_event_id(
+    *, header_event_id: str, payload: dict, event: str, rz_subscription_id: str
+) -> str:
+    """The idempotency key for one webhook event.
+
+    Razorpay sends the event's unique id in the X-Razorpay-Event-Id header; the
+    JSON body carries none. Keying on anything coarser is how renewals were
+    lost: the old fallback "{event}_{subscription}" is identical for every
+    monthly subscription.charged, so the second charge onwards was skipped as
+    an already-processed duplicate — period not extended, credits not refilled.
+
+    Without the header (it should always be there) the key is still made
+    unique per occurrence: the payment the event is about, else the event's
+    created_at. Both are stable across redeliveries of the same event.
+    """
+    header_event_id = (header_event_id or "").strip()
+    if header_event_id:
+        return header_event_id
+    body_id = payload.get("id")
+    if isinstance(body_id, str) and body_id:
+        return body_id
+
+    payment_id = (
+        (payload.get("payload") or {}).get("payment", {}).get("entity", {}).get("id")
+    )
+    occurrence = payment_id or payload.get("created_at")
+    if occurrence:
+        return f"{event}_{rz_subscription_id}_{occurrence}"
+    return f"{event}_{rz_subscription_id}"
+
+
 async def handle_subscription_webhook(
     db: AsyncSession,
     *,
     payload_bytes: bytes,
     signature_header: str,
+    event_id_header: str = "",
 ) -> dict[str, str]:
     """Handle an incoming Razorpay subscription webhook event.
 
@@ -507,8 +545,9 @@ async def handle_subscription_webhook(
         return {"status": "ok"}
 
     event: str = payload.get("event", "")
-    event_id: str = payload.get("id", "")
-    _logger.info("Subscription webhook received: event=%s id=%s", event, event_id)
+    _logger.info(
+        "Subscription webhook received: event=%s id=%s", event, event_id_header
+    )
 
     # ── 3. Route to appropriate handler ──────────────────────────────────────
     handler = _EVENT_HANDLERS.get(event)
@@ -541,6 +580,14 @@ async def handle_subscription_webhook(
     # status-only handlers from this one, so a module-level import would be
     # circular. (is_usd_subscription lives in usd_entitlement, which has no such
     # cycle, but both are kept together here for one readable block.)
+    # One key for both currencies, resolved once (see resolve_event_id).
+    effective_event_id = resolve_event_id(
+        header_event_id=event_id_header,
+        payload=payload,
+        event=event,
+        rz_subscription_id=rz_subscription_id,
+    )
+
     from app.services.usd_entitlement import is_usd_subscription
     from app.services.usd_subscription_webhook_service import (
         handle_usd_subscription_event,
@@ -550,7 +597,7 @@ async def handle_subscription_webhook(
         return await handle_usd_subscription_event(
             db,
             event=event,
-            event_id=event_id,
+            event_id=effective_event_id,
             rz_subscription_id=rz_subscription_id,
             payload=payload,
             payload_data=payload_data,
@@ -560,8 +607,6 @@ async def handle_subscription_webhook(
     # The row is committed BEFORE the handler runs, so a handler failure can no
     # longer roll away the record that the event ever arrived. It stays
     # processed=false, which marks it as outstanding work that can be replayed.
-    effective_event_id = event_id or f"{event}_{rz_subscription_id}"
-
     event_row = await webhook_inbox.claim_event(
         db,
         event_id=effective_event_id,

@@ -183,11 +183,15 @@ async def subscription_webhook(
     """Receive and process Razorpay subscription webhook events."""
     payload_bytes: bytes = await request.body()
     signature_header: str = request.headers.get("x-razorpay-signature", "")
+    # Razorpay's unique id for this event. It is sent ONLY in this header — the
+    # JSON body has no id — and stays the same across redeliveries.
+    event_id_header: str = request.headers.get("x-razorpay-event-id", "")
 
     result = await handle_subscription_webhook(
         db,
         payload_bytes=payload_bytes,
         signature_header=signature_header,
+        event_id_header=event_id_header,
     )
 
     return result

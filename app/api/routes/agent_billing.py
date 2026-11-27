@@ -47,7 +47,7 @@ def _hold_fields(hold: HoldState) -> dict:
 @router.post("/agent/holds", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def open_agent_hold(body: AgentHoldCreateRequest, current_user: CurrentUser, db: DB):
     """Hold the first credits for an AI Assistant message (400 when the seller
-    cannot cover them)."""
+    has no credits left; one credit is enough to start)."""
     hold = await AgentHoldService.open_hold(
         db,
         current_user.id,

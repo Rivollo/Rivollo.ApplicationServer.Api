@@ -2,11 +2,19 @@
 
 A message does not reserve a fixed cap up front. It opens a hold of one chunk
 (AGENT_HOLD_CHUNK_CREDITS) and, while it runs, the agent asks to extend the
-hold one chunk at a time before an LLM call it could not otherwise cover. An
-extension is refused when the seller's available credits cannot cover the next
-chunk, or the message would pass AGENT_MAX_CREDITS_PER_MESSAGE — the agent then
-stops cleanly between steps. Settling (charging the actual credits and
-releasing the rest) is a later step.
+hold one chunk at a time before an LLM call it could not otherwise cover.
+Settling (charging the actual credits and releasing the rest) is a later step.
+
+Overdraft (product decision, 2026-11-27): a message that was allowed to start
+is allowed to finish. A seller with ANY credit left (available >= 1) can send a
+message, and its hold is extended even when the balance cannot cover the next
+chunk — so the last message may take usage_ai_credits past the limit. The
+balance is then negative, every later message (and product creation) is
+refused until credits are added, and a renewal carries the overdraft into the
+new period (carry_over_ai_credit_overdraft in licensing_service). The only
+extension refusal left for a seller with a plan is the per-message cap,
+AGENT_MAX_CREDITS_PER_MESSAGE, which also bounds how far one message can
+overdraw.
 
     available = limit_max_ai_credits - usage_ai_credits - credits held by the
                 seller's running messages            (limit None = unlimited)
@@ -48,6 +56,10 @@ REASON_MESSAGE_LIMIT = "message_limit"
 
 BILLING_DISABLED_DETAIL = "The AI Assistant is not available right now."
 NO_PLAN_DETAIL = "You need an active plan to use the AI Assistant."
+NO_CREDITS_DETAIL = (
+    "Not enough AI credits. You have no AI credits left to send a message "
+    "to the AI Assistant."
+)
 HOLD_NOT_FOUND_DETAIL = "Credit hold not found."
 HOLD_CLOSED_DETAIL = "This credit hold is no longer open."
 
@@ -126,8 +138,11 @@ class AgentHoldService:
         agent_model_id: Optional[str] = None,
         mode: Optional[str] = None,
     ) -> HoldState:
-        """Start a message: hold its first chunk. Raises 400 when the seller
-        cannot cover it, 404 when agent billing is disabled. Commits."""
+        """Start a message: hold its first chunk. Raises 400 when the seller has
+        no credits left, 404 when agent billing is disabled. Commits.
+
+        One credit is enough to start: the hold may be larger than the balance
+        (see "Overdraft" in the module docstring)."""
         AgentHoldService.require_enabled()
         now = _utcnow()
         max_credits = int(settings.AGENT_MAX_CREDITS_PER_MESSAGE)
@@ -139,15 +154,9 @@ class AgentHoldService:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=NO_PLAN_DETAIL)
 
         available = await AgentHoldService._available(db, license_obj, user_id, now)
-        if available is not None and available < chunk:
+        if available is not None and available <= 0:
             await db.rollback()
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Not enough AI credits. At least {chunk} credits are required "
-                    "to send a message to the AI Assistant."
-                ),
-            )
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=NO_CREDITS_DETAIL)
 
         usage = AgentUsage(
             hold_key=secrets.token_urlsafe(24),
@@ -168,7 +177,7 @@ class AgentHoldService:
         repo.add_usage(db, usage)
         await db.commit()
 
-        remaining = None if available is None else available - chunk
+        remaining = None if available is None else max(available - chunk, 0)
         return AgentHoldService._state(usage, remaining)
 
     # ------------------------------------------------------------------ #
@@ -180,7 +189,9 @@ class AgentHoldService:
 
         Raises 404 for an unknown hold and 409 for one that is no longer open
         (settled, released, expired, or past its expiry time). Commits when it
-        grants; a refusal changes nothing.
+        grants; a refusal changes nothing. Never refused for the balance alone
+        (the message may overdraw it); only for the per-message cap, or when
+        the seller's plan ended mid-message.
         """
         AgentHoldService.require_enabled()
         now = _utcnow()
@@ -218,14 +229,14 @@ class AgentHoldService:
             int(settings.AGENT_HOLD_CHUNK_CREDITS),
             int(usage.max_credits) - int(usage.credits_held),
         )
-        reason = None
+        # A running message is never stopped for credits: it may overdraw the
+        # balance (module docstring, "Overdraft"). Only the per-message cap
+        # stops it.
         if chunk <= 0:
-            reason = REASON_MESSAGE_LIMIT
-        elif available is not None and available < chunk:
-            reason = REASON_INSUFFICIENT_CREDITS
-        if reason is not None:
             refused = ExtendResult(
-                granted=False, hold=AgentHoldService._state(usage, available), reason=reason
+                granted=False,
+                hold=AgentHoldService._state(usage, available),
+                reason=REASON_MESSAGE_LIMIT,
             )
             await db.rollback()
             return refused
@@ -234,7 +245,7 @@ class AgentHoldService:
         usage.updated_date = now
         await db.commit()
 
-        remaining = None if available is None else available - chunk
+        remaining = None if available is None else max(available - chunk, 0)
         return ExtendResult(granted=True, hold=AgentHoldService._state(usage, remaining))
 
 
